@@ -7,10 +7,11 @@
 //! - Auto-detect: Let Whisper detect from all ~99 supported languages
 //! - Constrained auto-detect: Detect from a user-specified subset of languages
 
-use super::Transcriber;
+use super::{RuntimeMetadata, TimedSegment, Transcriber};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -36,6 +37,9 @@ pub struct WhisperTranscriber {
     /// (since whisper-rs does not currently expose the chosen language
     /// from the full() pipeline). Read via [`Transcriber::last_detected_language`].
     last_language: Mutex<Option<String>>,
+    runtime: RuntimeMetadata,
+    cpu_context: bool,
+    decoded: AtomicBool,
 }
 
 impl WhisperTranscriber {
@@ -83,6 +87,7 @@ impl WhisperTranscriber {
             tracing::info!("Flash attention enabled");
         }
 
+        let cpu_context = !ctx_params.use_gpu;
         let ctx = WhisperContext::new_with_params(
             model_path
                 .to_str()
@@ -92,6 +97,15 @@ impl WhisperTranscriber {
         .map_err(|e| TranscribeError::InitFailed(e.to_string()))?;
 
         tracing::info!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
+        let runtime = RuntimeMetadata {
+            model: Some(model_path.display().to_string()),
+            backend: None,
+            model_load_ms: Some(start.elapsed().as_millis() as u64),
+        };
+
+        if let Some(backend) = GPU_BACKEND {
+            report_gpu_outcome(backend, device_index.unwrap_or(0), &ggml_gpu_devices());
+        }
 
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
 
@@ -104,6 +118,9 @@ impl WhisperTranscriber {
             initial_prompt: config.initial_prompt.clone(),
             active_vocabulary: Mutex::new(Vec::new()),
             last_language: Mutex::new(None),
+            runtime,
+            cpu_context,
+            decoded: AtomicBool::new(false),
         })
     }
 
@@ -112,6 +129,7 @@ impl WhisperTranscriber {
         selected_language: Option<&'a str>,
         duration_secs: f32,
         retry: bool,
+        timed: bool,
         prompt: Option<&'a str>,
     ) -> FullParams<'a, 'b> {
         let mut params = if retry {
@@ -151,8 +169,9 @@ impl WhisperTranscriber {
         }
 
         // Single-segment mode is faster for normal short dictation, but when
-        // retrying a degenerate decode, let Whisper segment normally.
-        if duration_secs < 30.0 && !retry {
+        // retrying a degenerate decode, let Whisper segment normally. A timed
+        // decode wants Whisper's own segments, so it never merges them.
+        if duration_secs < 30.0 && !retry && !timed {
             params.set_single_segment(true);
         }
 
@@ -180,6 +199,23 @@ impl WhisperTranscriber {
         duration_secs: f32,
         retry: bool,
     ) -> Result<String, TranscribeError> {
+        let segments =
+            self.run_full_segments(samples, selected_language, duration_secs, retry, false)?;
+        let text: String = segments.iter().map(|s| s.text.as_str()).collect();
+        Ok(text.trim().to_string())
+    }
+
+    /// One decode, returning Whisper's segments with their timestamps.
+    /// `timed` keeps Whisper's own segmentation instead of asking for one
+    /// merged segment.
+    fn run_full_segments(
+        &self,
+        samples: &[f32],
+        selected_language: Option<&str>,
+        duration_secs: f32,
+        retry: bool,
+        timed: bool,
+    ) -> Result<Vec<RawSegment>, TranscribeError> {
         let mut state = self
             .ctx
             .create_state()
@@ -190,22 +226,69 @@ impl WhisperTranscriber {
             .map(|terms| terms.clone())
             .unwrap_or_default();
         let prompt = super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary);
-        let params = self.build_params(selected_language, duration_secs, retry, prompt.as_deref());
+        let params = self.build_params(
+            selected_language,
+            duration_secs,
+            retry,
+            timed,
+            prompt.as_deref(),
+        );
 
         state
             .full(params, samples)
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        self.decoded.store(true, Ordering::Relaxed);
 
-        let mut text = String::new();
+        let mut segments = Vec::new();
         for segment in state.as_iter() {
-            text.push_str(
-                segment
+            segments.push(RawSegment {
+                start_cs: segment.start_timestamp(),
+                end_cs: segment.end_timestamp(),
+                text: segment
                     .to_str()
-                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
-            );
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
+                    .to_string(),
+            });
         }
+        Ok(segments)
+    }
 
-        Ok(text.trim().to_string())
+    /// The language to decode in, per the configured mode, recorded for
+    /// [`Transcriber::last_detected_language`].
+    fn select_language(&self, samples: &[f32]) -> Result<Option<String>, TranscribeError> {
+        let selected_language: Option<String> = if self.language.is_auto() {
+            // Unconstrained auto-detection: let Whisper detect from all languages
+            tracing::debug!("Using unconstrained language auto-detection");
+            None
+        } else if self.language.is_multiple() {
+            // Constrained auto-detection: detect from allowed set only.
+            // The detection state is scoped to this branch so it is freed
+            // before run_full() allocates its own. Each state carries its own
+            // GPU compute buffers, so creating one up front for every request
+            // doubled per-request GPU allocations for no use (#814).
+            let allowed = self.language.as_vec();
+            tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            let mut state = self
+                .ctx
+                .create_state()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+        } else {
+            // Single language: use it directly
+            let lang = self.language.primary().to_string();
+            tracing::debug!("Using specified language: {}", lang);
+            Some(lang)
+        };
+
+        // Record the language for output methods that benefit from a layout
+        // hint (e.g. eitype --layout, dotool DOTOOL_XKB_LAYOUT). See
+        // `Transcriber::last_detected_language`. Unconstrained auto-detect
+        // leaves this as `None`; whisper-rs does not expose the language
+        // chosen inside `full()` so we cannot recover it after the fact.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = selected_language.clone();
+        }
+        Ok(selected_language)
     }
 
     /// Select the best language from allowed languages using Whisper's language detection.
@@ -278,6 +361,12 @@ impl Transcriber for WhisperTranscriber {
     }
 
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.decoded.store(false, Ordering::Relaxed);
+        // A failure below must not leave the previous call's language
+        // standing as this call's.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = None;
+        }
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -293,39 +382,7 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Determine language based on configuration mode
-        let selected_language: Option<String> = if self.language.is_auto() {
-            // Unconstrained auto-detection: let Whisper detect from all languages
-            tracing::debug!("Using unconstrained language auto-detection");
-            None
-        } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only.
-            // The detection state is scoped to this branch so it is freed
-            // before run_full() allocates its own. Each state carries its own
-            // GPU compute buffers, so creating one up front for every request
-            // doubled per-request GPU allocations for no use (#814).
-            let allowed = self.language.as_vec();
-            tracing::debug!("Using constrained language detection from: {:?}", allowed);
-            let mut state = self
-                .ctx
-                .create_state()
-                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
-        } else {
-            // Single language: use it directly
-            let lang = self.language.primary().to_string();
-            tracing::debug!("Using specified language: {}", lang);
-            Some(lang)
-        };
-
-        // Record the language for output methods that benefit from a layout
-        // hint (e.g. eitype --layout, dotool DOTOOL_XKB_LAYOUT). See
-        // `Transcriber::last_detected_language`. Unconstrained auto-detect
-        // leaves this as `None`; whisper-rs does not expose the language
-        // chosen inside `full()` so we cannot recover it after the fact.
-        if let Ok(mut guard) = self.last_language.lock() {
-            *guard = selected_language.clone();
-        }
+        let selected_language = self.select_language(samples)?;
 
         let mut result =
             self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
@@ -350,22 +407,95 @@ impl Transcriber for WhisperTranscriber {
             }
         }
 
-        tracing::info!(
-            "Transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if result.chars().count() > 50 {
-                format!("{}...", result.chars().take(50).collect::<String>())
-            } else {
-                result.clone()
-            }
-        );
+        super::log_transcription("Transcription", start, &result);
 
         Ok(result)
+    }
+
+    /// Whisper times its own segments, so one decode of a whole meeting
+    /// chunk yields one line per utterance (roughly a sentence or a
+    /// pause-delimited phrase) with real start and end times. Meeting mode
+    /// relies on this to keep a single call per chunk for Whisper.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        self.decoded.store(false, Ordering::Relaxed);
+        // A failure below must not leave the previous call's language
+        // standing as this call's.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = None;
+        }
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
+        }
+        let duration_secs = samples.len() as f32 / 16000.0;
+        let start = std::time::Instant::now();
+        let language = self.select_language(samples)?;
+
+        let raw =
+            self.run_full_segments(samples, language.as_deref(), duration_secs, false, true)?;
+        let mut segments = timed_segments(&raw, duration_secs);
+        if segments.is_empty() && duration_secs >= 1.0 && !raw.is_empty() {
+            tracing::warn!(
+                "Whisper returned only degenerate segments for {:.2}s audio; retrying with beam search",
+                duration_secs
+            );
+            let raw =
+                self.run_full_segments(samples, language.as_deref(), duration_secs, true, true)?;
+            segments = timed_segments(&raw, duration_secs);
+        }
+
+        tracing::info!(
+            "Timed transcription of {:.2}s completed in {:.2}s: {} segment(s)",
+            duration_secs,
+            start.elapsed().as_secs_f32(),
+            segments.len()
+        );
+        Ok(segments)
     }
 
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
     }
+
+    fn runtime_metadata(&self) -> RuntimeMetadata {
+        let mut runtime = self.runtime.clone();
+        // A completed decode with GPU disabled proves CPU execution. With GPU
+        // enabled the context may fall back, so do not guess from build flags
+        // or the requested device. Loading alone is not a completed decode.
+        if self.cpu_context && self.decoded.load(Ordering::Relaxed) {
+            runtime.backend = Some("cpu".into());
+        }
+        runtime
+    }
+}
+
+/// One segment as whisper.cpp reports it: times in centiseconds.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct RawSegment {
+    pub(super) start_cs: i64,
+    pub(super) end_cs: i64,
+    pub(super) text: String,
+}
+
+/// Whisper's segments as [`TimedSegment`]s: text trimmed, times clamped to
+/// the audio, and segments with no words (degenerate decodes) dropped.
+pub(super) fn timed_segments(raw: &[RawSegment], duration_secs: f32) -> Vec<TimedSegment> {
+    raw.iter()
+        .filter_map(|r| {
+            let text = r.text.trim();
+            if is_degenerate_transcript(text) {
+                return None;
+            }
+            let start = (r.start_cs.max(0) as f32 / 100.0).min(duration_secs);
+            let end = (r.end_cs.max(0) as f32 / 100.0).clamp(start, duration_secs);
+            Some(TimedSegment {
+                text: text.to_string(),
+                start_secs: start,
+                end_secs: end,
+            })
+        })
+        .collect()
 }
 
 fn is_degenerate_transcript(text: &str) -> bool {
@@ -440,11 +570,12 @@ pub(crate) fn resolve_model_path_in(
     }
 
     Err(TranscribeError::ModelNotFound(format!(
-        "Model '{}' not found. Looked in:\n  - {}\n  - {}\n  - {}\n\nDownload from: https://huggingface.co/ggerganov/whisper.cpp/tree/main",
+        "Model '{}' not found. Looked in:\n  - {}\n  - {}\n  - {}\n\nDownload with: voxtype setup --download --model {}",
         model,
         model_path.display(),
         cwd_path.display(),
-        local_models_path.display()
+        local_models_path.display(),
+        model
     )))
 }
 
@@ -491,25 +622,263 @@ pub fn get_model_filename(model: &str) -> String {
     .to_string()
 }
 
-/// Get the download URL for a model
-pub fn get_model_url(model: &str) -> String {
-    let filename = get_model_filename(model);
+/// The GPU backend compiled into whisper.cpp, if any. CPU-only builds never
+/// ask whisper.cpp for a GPU, so there is nothing to fall back from.
+const GPU_BACKEND: Option<&str> = if cfg!(feature = "gpu-vulkan") {
+    Some("vulkan")
+} else if cfg!(feature = "gpu-cuda") {
+    Some("cuda")
+} else if cfg!(feature = "gpu-hipblas") {
+    Some("hip")
+} else if cfg!(feature = "gpu-metal") {
+    Some("metal")
+} else {
+    None
+};
 
-    format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-        filename
-    )
+/// Names of the GPU devices ggml registered, in the order whisper.cpp counts
+/// them for `gpu_device`. This is the same enumeration
+/// `whisper_backend_init_gpu` walks, so an empty list (or one shorter than
+/// the requested index) is exactly the case where whisper.cpp logs
+/// `no GPU found` and quietly runs on CPU.
+#[cfg(any(
+    feature = "gpu-vulkan",
+    feature = "gpu-cuda",
+    feature = "gpu-hipblas",
+    feature = "gpu-metal"
+))]
+fn ggml_gpu_devices() -> Vec<String> {
+    use whisper_rs::whisper_rs_sys as sys;
+    let mut names = Vec::new();
+    // SAFETY: the ggml backend registry is a process-wide static that
+    // whisper.cpp has already initialized by loading the model; these calls
+    // only read it. Device names are NUL-terminated strings owned by ggml.
+    unsafe {
+        for i in 0..sys::ggml_backend_dev_count() {
+            let dev = sys::ggml_backend_dev_get(i);
+            let kind = sys::ggml_backend_dev_type(dev);
+            if kind == sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU
+                || kind == sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU
+            {
+                let desc = sys::ggml_backend_dev_description(dev);
+                let name = if desc.is_null() {
+                    sys::ggml_backend_dev_name(dev)
+                } else {
+                    desc
+                };
+                names.push(
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    names
+}
+
+#[cfg(not(any(
+    feature = "gpu-vulkan",
+    feature = "gpu-cuda",
+    feature = "gpu-hipblas",
+    feature = "gpu-metal"
+)))]
+fn ggml_gpu_devices() -> Vec<String> {
+    Vec::new()
+}
+
+/// What a model load on a GPU build actually got.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GpuOutcome {
+    /// Running on this device.
+    Gpu(String),
+    /// ggml registered no GPU at all.
+    NoGpu,
+    /// GPUs exist, but `[whisper] gpu_device` points past the end of the list.
+    BadIndex { requested: i32, found: usize },
+}
+
+pub(crate) fn gpu_outcome(devices: &[String], requested: i32) -> GpuOutcome {
+    match usize::try_from(requested).ok().and_then(|i| devices.get(i)) {
+        Some(name) => GpuOutcome::Gpu(name.clone()),
+        None if devices.is_empty() => GpuOutcome::NoGpu,
+        None => GpuOutcome::BadIndex {
+            requested,
+            found: devices.len(),
+        },
+    }
+}
+
+/// The notification for a CPU fallback: what happened and the exact fix.
+pub(crate) fn fallback_message(backend: &str, outcome: &GpuOutcome) -> Option<String> {
+    let fix = match backend {
+        "vulkan" => {
+            "Install your GPU's Vulkan driver (Arch: vulkan-radeon, vulkan-intel or \
+             nvidia-utils; Debian/Ubuntu/Fedora: mesa-vulkan-drivers, or the NVIDIA \
+             driver), check it with `vulkaninfo --summary`, then restart voxtype"
+        }
+        "cuda" => {
+            "Install the NVIDIA driver and CUDA runtime (Arch: nvidia-utils cuda), \
+             check it with `nvidia-smi`, then restart voxtype"
+        }
+        "hip" => {
+            "Install ROCm (Arch: rocm-hip-runtime), check it with `rocminfo`, \
+             then restart voxtype"
+        }
+        _ => "Check that this machine has a supported GPU, then restart voxtype",
+    };
+    match outcome {
+        GpuOutcome::Gpu(_) => None,
+        GpuOutcome::NoGpu => Some(format!(
+            "This GPU build of Whisper found no {} GPU and is transcribing on CPU. {}. \
+             Details: voxtype info accel",
+            backend_label(backend),
+            fix
+        )),
+        GpuOutcome::BadIndex { requested, found } => Some(format!(
+            "[whisper] gpu_device = {} but only {} GPU(s) were found (numbered from 0), \
+             so Whisper is transcribing on CPU. Fix gpu_device in config.toml, \
+             then restart voxtype. Details: voxtype info accel",
+            requested, found
+        )),
+    }
+}
+
+fn backend_label(backend: &str) -> &'static str {
+    match backend {
+        "vulkan" => "Vulkan",
+        "cuda" => "CUDA",
+        "hip" => "ROCm",
+        "metal" => "Metal",
+        _ => "usable",
+    }
+}
+
+/// Publish the outcome for `voxtype info accel`, and tell the user once per
+/// daemon start when a GPU build is running on CPU. Transcription carries on
+/// either way: CPU is slow, not broken.
+fn report_gpu_outcome(backend: &str, requested: i32, devices: &[String]) {
+    use crate::setup::accel::{self, AccelState};
+    let outcome = gpu_outcome(devices, requested);
+    match fallback_message(backend, &outcome) {
+        None => {
+            if let GpuOutcome::Gpu(name) = outcome {
+                tracing::info!("Whisper is running on GPU: {}", name);
+                accel::publish(AccelState::Gpu, Some(backend), Some(name));
+            }
+        }
+        Some(message) => {
+            tracing::warn!("{}", message);
+            let detail = match outcome {
+                GpuOutcome::BadIndex { requested, found } => {
+                    format!("gpu_device = {} but {} GPU(s) found", requested, found)
+                }
+                _ => format!("ggml found no {} GPU", backend_label(backend)),
+            };
+            if accel::publish(AccelState::CpuFallback, Some(backend), Some(detail)) {
+                crate::notification::send_sync("Voxtype: Whisper is running on CPU", &message);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn raw(start_cs: i64, end_cs: i64, text: &str) -> RawSegment {
+        RawSegment {
+            start_cs,
+            end_cs,
+            text: text.to_string(),
+        }
+    }
+
     #[test]
-    fn test_model_url() {
-        let url = get_model_url("base.en");
-        assert!(url.contains("ggml-base.en.bin"));
-        assert!(url.contains("huggingface.co"));
+    fn whisper_segments_become_timed_segments() {
+        let got = timed_segments(
+            &[
+                raw(0, 250, " We ship on Friday."),
+                raw(250, 400, " ..."),
+                raw(420, 980, " Agreed, Friday it is."),
+                // Whisper can run a timestamp past the end of the audio.
+                raw(2950, 3100, " Bye."),
+            ],
+            30.0,
+        );
+        let got: Vec<(String, f32, f32)> = got
+            .into_iter()
+            .map(|s| (s.text, s.start_secs, s.end_secs))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("We ship on Friday.".to_string(), 0.0, 2.5),
+                ("Agreed, Friday it is.".to_string(), 4.2, 9.8),
+                ("Bye.".to_string(), 29.5, 30.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn segment_times_never_run_backwards_or_negative() {
+        let got = timed_segments(&[raw(-5, 100, "a"), raw(500, 300, "b")], 10.0);
+        assert_eq!((got[0].start_secs, got[0].end_secs), (0.0, 1.0));
+        assert_eq!((got[1].start_secs, got[1].end_secs), (5.0, 5.0));
+    }
+
+    #[test]
+    fn test_model_filename() {
+        assert_eq!(get_model_filename("base.en"), "ggml-base.en.bin");
+        assert_eq!(
+            get_model_filename("/models/custom.bin"),
+            "/models/custom.bin"
+        );
+    }
+
+    #[test]
+    fn gpu_outcome_matches_whisper_cpp_device_selection() {
+        let gpus = vec![
+            "NVIDIA GeForce RTX 3090".to_string(),
+            "AMD iGPU".to_string(),
+        ];
+        assert_eq!(
+            gpu_outcome(&gpus, 0),
+            GpuOutcome::Gpu("NVIDIA GeForce RTX 3090".to_string())
+        );
+        assert_eq!(
+            gpu_outcome(&gpus, 1),
+            GpuOutcome::Gpu("AMD iGPU".to_string())
+        );
+        assert_eq!(
+            gpu_outcome(&gpus, 2),
+            GpuOutcome::BadIndex {
+                requested: 2,
+                found: 2
+            }
+        );
+        assert_eq!(gpu_outcome(&[], 0), GpuOutcome::NoGpu);
+    }
+
+    #[test]
+    fn fallback_message_names_the_fix() {
+        assert!(fallback_message("vulkan", &GpuOutcome::Gpu("x".into())).is_none());
+
+        let no_gpu = fallback_message("vulkan", &GpuOutcome::NoGpu).unwrap();
+        assert!(no_gpu.contains("no Vulkan GPU"));
+        assert!(no_gpu.contains("vulkaninfo --summary"));
+        assert!(no_gpu.contains("voxtype info accel"));
+
+        let bad = fallback_message(
+            "vulkan",
+            &GpuOutcome::BadIndex {
+                requested: 3,
+                found: 1,
+            },
+        )
+        .unwrap();
+        assert!(bad.contains("gpu_device = 3"));
+        assert!(bad.contains("only 1 GPU(s)"));
     }
 
     #[test]

@@ -541,6 +541,10 @@ impl MoonshineTranscriber {
 }
 
 impl Transcriber for MoonshineTranscriber {
+    fn short_clips_are_cheap(&self) -> bool {
+        true
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -571,15 +575,7 @@ impl Transcriber for MoonshineTranscriber {
 
         let result = text.trim().to_string();
 
-        tracing::info!(
-            "Moonshine transcription completed in {:.2}s: {:?}",
-            start.elapsed().as_secs_f32(),
-            if result.chars().count() > 50 {
-                format!("{}...", result.chars().take(50).collect::<String>())
-            } else {
-                result.clone()
-            }
-        );
+        super::log_transcription("Moonshine transcription", start, &result);
 
         Ok(result)
     }

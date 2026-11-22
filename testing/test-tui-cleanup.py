@@ -98,10 +98,17 @@ def main():
             send("\r\x15\rs", "clear path to default without disabling LARD")
             assert "lard_model_path" not in saved()["text"]
             assert saved()["text"]["lard_disfluency"] is True
+            send("j\r\x15en\rs", "declare the dictation language and save")
+            assert saved()["text"]["language"] == "en"
+            text = snapshot("tui-dictation-language.txt")
+            assert "Dictation language" in text, text
+            send("\r\x15\rs", "clear the dictation language back to auto")
+            assert "language" not in saved()["text"]
+            assert saved()["text"]["lard_disfluency"] is True
             send("j\r\x15renamed key\r\x15Renamed value\rs", "edit existing replacement key and value")
             replacements = saved()["text"]["replacements"]
             assert "word00" not in replacements and replacements["renamed key"] == "Renamed value"
-            send("k" * 9 + "k", "wrap from first control to Add new replacement")
+            send("k" * 10 + "k", "wrap from first control to Add new replacement")
             screen.resize(18, 110)
             fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 110, 0, 0))
             os.kill(pid, signal.SIGWINCH)
@@ -121,7 +128,7 @@ def main():
             assert "# preserve model" in config.read_text()
             (evidence / "persisted-config.toml").write_text(config.read_text())
             (evidence / "result.json").write_text(json.dumps({"result": "TUI_PTY_PASS", "binary": str(binary), "events": events, "daemon_restart": False, "config_is_disposable": True}, indent=2) + "\n")
-            print("TUI_PTY_PASS: navigation, independent switches, omitted keys, comments, model edit/cancel/clear, replacement edit/add/delete, resize/scroll and revert")
+            print("TUI_PTY_PASS: navigation, independent switches, omitted keys, comments, model edit/cancel/clear, dictation language set/clear, replacement edit/add/delete, resize/scroll and revert")
         finally:
             (evidence / "terminal.raw").write_bytes(raw)
             snapshot("tui-last.txt")

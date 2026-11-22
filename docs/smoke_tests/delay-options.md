@@ -10,5 +10,6 @@ voxtype record start && sleep 2 && voxtype record stop
 
 # Check debug logs for delay application:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -E "delay|sleeping"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -E "delay|sleeping"
 ```
 

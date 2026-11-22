@@ -382,7 +382,14 @@ PanelWindow {
         if ((position === "bottom-left") || (position === "bottom-right")) {
             return Math.max(margin, panel.height - _cardHeight() - margin);
         }
-        const y = panel.height * _styleTopMargin();
+        // Mirrors osd::placement::card_top: top-center mirrors a top_margin
+        // in the lower half (the 0.85 default), so the card keeps the same
+        // distance from the top that bottom-center keeps from the bottom
+        // instead of landing near the bottom of the screen.
+        const fraction = _styleTopMargin();
+        const y = position === "top-center" && fraction > 0.5
+            ? panel.height * (1.0 - fraction) - _cardHeight()
+            : panel.height * fraction;
         return Math.max(margin, Math.min(panel.height - _cardHeight() - margin, y));
     }
 

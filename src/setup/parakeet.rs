@@ -193,6 +193,58 @@ pub fn detect_cuda_runtime_major() -> Option<i32> {
     Some(version / 1000)
 }
 
+/// How to install cuDNN, which ONNX Runtime's CUDA execution provider links
+/// against (`libcudnn.so.9`) but the CUDA toolkit does not include.
+pub const CUDNN_INSTALL_HINT: &str = "Install cuDNN 9:\n  \
+     Arch: sudo pacman -S cudnn\n  \
+     Debian/Ubuntu/Fedora: install libcudnn9-cuda-12 or libcudnn9-cuda-13 \
+     (matching your voxtype-onnx-cuda variant) from NVIDIA's CUDA repository";
+
+/// Whether `libcudnn.so.9` can be loaded the way ONNX Runtime's CUDA provider
+/// will load it: through the normal library search path, or from the
+/// directory of the running binary, where the provider libraries live.
+pub fn cudnn_available() -> bool {
+    use std::ffi::CString;
+    let beside_binary = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().map(|dir| dir.join("libcudnn.so.9")))
+        .is_some_and(|lib| lib.exists());
+    if beside_binary {
+        return true;
+    }
+    ["libcudnn.so.9", "libcudnn.so"].iter().any(|name| {
+        let Ok(cstr) = CString::new(*name) else {
+            return false;
+        };
+        let handle = unsafe { libc::dlopen(cstr.as_ptr(), libc::RTLD_LAZY) };
+        if handle.is_null() {
+            return false;
+        }
+        unsafe { libc::dlclose(handle) };
+        true
+    })
+}
+
+/// Check for cuDNN before registering the CUDA execution provider. Without
+/// it ONNX Runtime prints a raw "libcudnn.so.9: cannot open shared object
+/// file" and silently runs on CPU; this says so plainly, once per process,
+/// with the fix. Returns whether the CUDA provider can load.
+pub fn cudnn_present_or_warn() -> bool {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let present = cudnn_available();
+    if !present {
+        WARNED.call_once(|| {
+            tracing::error!(
+                "CUDA is installed but cuDNN (libcudnn.so.9) is missing, so the CUDA \
+                 execution provider cannot load: falling back to CPU. {}",
+                CUDNN_INSTALL_HINT
+            );
+        });
+    }
+    present
+}
+
 /// Print the binary the running daemon executes, as `setup gpu --status`
 /// does. The package path is only what the next launch would use, and it is
 /// wrong when a wrapper or manual install points somewhere else.

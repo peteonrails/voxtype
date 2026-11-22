@@ -12,6 +12,7 @@ grep -c "simulate_paste_eitype\|is_eitype_available" src/output/paste.rs
 # 2. Hide wtype: sudo mv /usr/bin/wtype /usr/bin/wtype.bak
 # 3. Record and transcribe
 # 4. Check logs: journalctl --user -u voxtype --since "30 seconds ago" | grep -i eitype
+#    (if that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i eitype)
 # 5. Restore: sudo mv /usr/bin/wtype.bak /usr/bin/wtype
 ```
 

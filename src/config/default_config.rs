@@ -52,6 +52,12 @@ sample_rate = 16000
 # Maximum recording duration in seconds (safety limit)
 max_duration_secs = 60
 
+# Keep the audio of a recording whose transcription failed, so it can be
+# retried with `voxtype transcribe <file>`. The 20 most recent are kept in
+# ~/.local/state/voxtype/failed-audio/, readable only by you. Set to false to
+# write nothing; a dictation whose transcription fails is then lost.
+# keep_failed_recordings = true
+
 # Pause MPRIS media players (Spotify, Firefox, etc.) before recording starts,
 # then resume them as soon as recording stops. Talks D-Bus directly; no external
 # playerctl binary required.
@@ -206,6 +212,13 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
+# Keep the text of a transcription no output method could deliver, so it can
+# be recovered. The 200 most recent are kept in
+# ~/.local/state/voxtype/undelivered/, readable only by you, and the failure
+# notification names the file. Set to false to save no file and keep the text
+# out of the notification; an undelivered dictation is then lost.
+# keep_undelivered_text = true
+
 # Custom driver order for type mode (optional)
 # Default order: wtype -> dotool -> ydotool -> clipboard
 # Customize to prefer a specific driver or change the fallback order.
@@ -239,6 +252,14 @@ type_delay_ms = 0
 # Prefix wtype output with a Shift key press/release
 # Workaround for apps (e.g., Discord) that drop the first CJK character
 # wtype_shift_prefix = false
+
+# Keystroke for paste mode (default: "auto")
+# "auto" sends ctrl+v to GUI apps and paste_keys_terminal to terminals,
+# detected on Hyprland, Sway and niri. Terminals pass ctrl+v to the program
+# inside them (Codex CLI reads it as "paste an image"), so they need their
+# own keystroke. An explicit value such as "shift+insert" is sent everywhere.
+# paste_keys = "auto"
+# paste_keys_terminal = "ctrl+shift+v"
 
 # Restore clipboard content after paste mode (default: false)
 # Saves clipboard before transcription, restores it after paste keystroke
@@ -310,10 +331,22 @@ show_edits = true
 # urgency = "normal"
 
 [text]
-# Optional English-only trained cleanup. Install the separately licensed model
-# explicitly with: voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+# Optional English-only trained cleanup. Download its model first with:
+#   voxtype setup lard
+# The model is licensed CC BY-SA 4.0, separately from Voxtype's MIT code:
+#   https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md
+# Turning this on does not download anything. Without the model the stage is
+# skipped and voxtype doctor says so.
 # lard_disfluency = false
 # lard_model_path = "/path/to/lard-disfluency-v1.vxdf"
+#
+# The language you dictate in, for cleanup that depends on it (the stage above
+# is English-only). Leave it on "auto" unless your model handles several
+# languages and detects them automatically: an engine language that is set,
+# or an English-only model, already answers the question and wins over this.
+# It is not sent to the transcription engine.
+# language = "auto"
+#
 # Text processing options (word replacements, spoken punctuation)
 #
 # Restore punctuation, sentence boundaries, and casing for plain CTC engines
@@ -414,11 +447,31 @@ backend = "energy"
 threshold = 0.5      # 0.0 = sensitive, 1.0 = aggressive
 min_speech_duration_ms = 100  # Minimum speech required
 
+[meeting]
+# Meeting mode: record and transcribe calls and long sessions with
+# `voxtype meeting start`, the tray, or Voxtype Meetings.
+enabled = true
+
+[history]
+# Dictation history: every dictation, including failed and cancelled ones,
+# as one plain JSON line in ~/.local/share/voxtype/history/YYYY-MM-DD.jsonl.
+# Browse it with `voxtype history`, search it with `voxtype history search`,
+# and pause it with `voxtype history pause` before dictating something private.
+enabled = true
+# Days to keep; older days are deleted. 0 keeps history forever.
+# retention_days = 30
+# Apps whose dictations are never recorded, matched against the focused
+# window's class (Hyprland, Sway and niri can report it).
+# exclude_apps = ["KeePassXC", "Bitwarden", "1Password", "Proton Pass"]
+# record_app = true
+# Window titles can hold email subjects, document names and URLs.
+# record_window_title = false
+
 # Native Linux system tray is enabled by default. Set false to opt out.
 # [tray]
 # enabled = true
 
-# On Omarchy, the daemon links the packaged Voxtype Settings panel into
+# On Omarchy, the daemon links the packaged Voxtype panel into
 # ~/.config/omarchy/plugins on first start. Set false to opt out; run
 # `voxtype setup omarchy` to link it by hand.
 # [omarchy]
@@ -510,6 +563,12 @@ mod tests {
 
         assert!(config.output.notification.on_no_speech);
         assert!(config.output.notification.show_edits);
+
+        assert!(config.meeting.enabled, "new installs get meeting mode");
+        assert!(config.history.enabled, "new installs get dictation history");
+        assert!(!config.history.paused);
+        assert!(!config.history.record_window_title);
+        assert_eq!(config.history.retention_days, 30);
     }
 
     #[test]
@@ -523,6 +582,12 @@ mod tests {
         assert!(!config.text.collapse_restarts);
         assert!(config.vad.enabled);
         assert_eq!(config.vad.backend, VadBackend::Energy);
+        // This file is installed as /etc/voxtype/config.toml, which users
+        // without their own config already run on. Turning meetings on here
+        // would flip them on upgrade; they get the tray offer instead.
+        assert!(!config.meeting.enabled);
+        // Same reason: history must never start on an upgrade.
+        assert!(!config.history.enabled);
     }
 
     #[test]
@@ -540,6 +605,15 @@ mod tests {
         assert!(!config.text.collapse_restarts);
         assert!(!config.vad.enabled);
         assert_eq!(config.vad.backend, VadBackend::Auto);
+        assert!(!config.meeting.enabled, "upgrades keep meeting mode off");
+        assert!(
+            !config.history.enabled,
+            "upgrades never start writing dictations to disk"
+        );
+        assert!(
+            config.meeting.offer_enable,
+            "and get the tray offer instead"
+        );
     }
 
     #[test]
@@ -550,9 +624,15 @@ mod tests {
         let prose = "What we need is a switch. No one knows. We shipped it. iPhone users benefit. Version one point two point three.";
         assert_eq!(processor.process(prose), prose);
 
+        let cleaned = processor.process("Um, one of the things we need costs twenty five dollars.");
+        #[cfg(feature = "itn")]
+        assert_eq!(cleaned, "One of the things we need costs $25.");
+        // Without the optional number formatter, filler/casing cleanup still
+        // runs, but spoken quantities must not pretend ITN was compiled in.
+        #[cfg(not(feature = "itn"))]
         assert_eq!(
-            processor.process("Um, one of the things we need costs twenty five dollars."),
-            "One of the things we need costs $25."
+            cleaned,
+            "One of the things we need costs twenty five dollars."
         );
     }
 }

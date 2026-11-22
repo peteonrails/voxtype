@@ -4,7 +4,10 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum SetupAction {
-    /// Check system configuration and dependencies
+    /// Check system configuration and dependencies (same report as `voxtype doctor`)
+    ///
+    /// Kept for existing scripts and docs. Always exits 0; use `voxtype
+    /// doctor` for a non-zero exit status on failures, or `--json` output.
     Check,
 
     /// Interactive macOS setup wizard
@@ -113,9 +116,9 @@ pub enum SetupAction {
         qml: bool,
     },
 
-    /// Link the packaged Voxtype Settings panel into Omarchy
+    /// Link the packaged Voxtype panel into Omarchy
     #[command(long_about = "\
-        Link the packaged Voxtype Settings panel into Omarchy\n\n\
+        Link the packaged Voxtype panel into Omarchy\n\n\
         Packages install the panel at \
         /usr/share/voxtype/omarchy-plugin/io.voxtype.settings. This command \
         links it into ~/.config/omarchy/plugins/io.voxtype.settings, asks \
@@ -402,15 +405,20 @@ pub enum SetupAction {
         status: bool,
     },
 
-    /// Install or inspect the optional English LARD disfluency model
+    /// Download, install or inspect the optional English LARD disfluency model
+    ///
+    /// With no option, downloads the model from the Voxtype model mirror and
+    /// verifies its pinned checksum. The model is CC BY-SA 4.0, separate from
+    /// Voxtype's MIT code. Enable it afterwards with
+    /// `voxtype config set text.lard_disfluency true`.
     Lard {
-        /// Install a local model with the pinned release checksum
+        /// Install from a local file instead of downloading (must be the pinned model)
         #[arg(long, conflicts_with = "url")]
         source: Option<std::path::PathBuf>,
-        /// Explicit HTTPS model URL (publication is a separate release approval)
+        /// Download from this HTTPS URL instead of the Voxtype mirror (must serve the pinned model)
         #[arg(long)]
         url: Option<String>,
-        /// Inspect the local model without downloading
+        /// Show the installed model and whether the stage is running, without downloading
         #[arg(long, conflicts_with_all = ["source", "url"])]
         status: bool,
     },

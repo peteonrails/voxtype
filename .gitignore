@@ -29,6 +29,8 @@
 # Exception: test fixtures are intentionally committed
 !tests/fixtures/vad/*.wav
 !tests/fixtures/sensevoice/*.wav
+# The built-in recording announcement ships in the binary
+!assets/sounds/*.wav
 
 # Claude Code
 .claude/settings.local.json

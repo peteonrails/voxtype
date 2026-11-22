@@ -13,7 +13,6 @@ mod app;
 
 use app::sigpipe;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 use voxtype::{config, cpu, Cli, Commands};
 
 #[tokio::main]
@@ -28,37 +27,48 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Check if this is the worker command (needs stderr-only logging)
-    let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
+    // Import, retranscribe, the sound check and the waveform print their
+    // own progress, meters or result, so only warnings show unless -v asks
+    // for more.
+    let is_import = matches!(
+        cli.command,
+        Some(Commands::Meeting {
+            action: voxtype::MeetingAction::Import { .. }
+                | voxtype::MeetingAction::Retranscribe { .. }
+                | voxtype::MeetingAction::Soundcheck { .. }
+                | voxtype::MeetingAction::Waveform { .. }
+        })
+    );
 
     // Initialize logging
     let log_level = if cli.quiet {
         "error"
     } else {
         match cli.verbose {
+            0 if is_import => "warn",
             0 => "info",
             1 => "debug",
             _ => "trace",
         }
     };
 
-    if is_worker {
-        // Worker uses stderr for logging (stdout is reserved for IPC protocol)
+    // ureq logs each request's full URL at debug, and a calendar's iCal
+    // link is a secret: its debug lines stay off whatever RUST_LOG asks.
+    let log_filter = |level: &str| {
+        voxtype::logging::env_filter(&format!("voxtype={},warn", level))
+            .add_directive("ureq=info".parse().expect("a valid directive"))
+    };
+
+    if logs_to_stdout(cli.command.as_ref()) {
         tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
-            )
+            .with_env_filter(log_filter(log_level))
             .with_target(false)
-            .with_writer(std::io::stderr)
             .init();
     } else {
         tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
-            )
+            .with_env_filter(log_filter(log_level))
             .with_target(false)
+            .with_writer(std::io::stderr)
             .init();
     }
 
@@ -78,4 +88,24 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load_config(cli.config.as_deref())?;
 
     app::run(cli, config_path, config).await
+}
+
+/// Whether this command's log belongs on stdout.
+///
+/// Only the long-running services log there: their stdout carries nothing
+/// else, and existing setups read it (`voxtype > voxtype.log`, the macOS
+/// app's `stdout.log`). Every other command prints its result on stdout,
+/// where a script, a pipe or a frontend parses it (`config get`, `status`,
+/// `transcribe`, anything with `--json`, the worker's IPC protocol), so its
+/// log goes to stderr. Logging to stdout used to be the default, with the
+/// commands known to need stderr listed one by one, and each command left
+/// off that list leaked log lines into its output: a warning about an
+/// unreadable config section came out of `config get` ahead of the value.
+fn logs_to_stdout(command: Option<&Commands>) -> bool {
+    match command {
+        None | Some(Commands::Daemon) => true,
+        #[cfg(target_os = "macos")]
+        Some(Commands::Menubar | Commands::AppLaunch) => true,
+        Some(_) => false,
+    }
 }

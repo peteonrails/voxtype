@@ -42,6 +42,7 @@ pub const SECTIONS: &[&str] = &[
     "Text Cleanup",
     "VAD",
     "Meeting",
+    "History",
     "Notifications",
     "OSD",
     "Status",
@@ -220,6 +221,8 @@ const WHISPER_MODE_CHOICES: &[&str] = &["local", "remote", "cli"];
 const WHISPER_LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
+/// Presets for `text.language`. Any language code is accepted.
+const TEXT_LANG_CHOICES: &[&str] = WHISPER_LANG_CHOICES;
 const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
@@ -244,6 +247,7 @@ const HOTKEY_KEY_CHOICES: &[&str] = &[
     "CAPSLOCK",
 ];
 const HOTKEY_CANCEL_CHOICES: &[&str] = &["ESC", "BACKSPACE", "F12", "DELETE", "END"];
+const HOTKEY_PASTE_LAST_CHOICES: &[&str] = &["CTRL+ALT+V", "F9", "F10", "SUPER+ALT+V"];
 const HOTKEY_MODIFIER_CHOICES: &[&str] =
     &["LEFTSHIFT", "RIGHTSHIFT", "LEFTCTRL", "LEFTALT", "LEFTMETA"];
 
@@ -251,7 +255,7 @@ const FEEDBACK_THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const OUTPUT_MODE_CHOICES: &[&str] = &["type", "clipboard", "paste", "file"];
 const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
-const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
+const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "webrtc", "gtcrn", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
@@ -285,6 +289,19 @@ const ICON_THEME_CHOICES: &[&str] = &[
     "text",
 ];
 
+/// Old names a closed key still accepts, written as their current name.
+/// They are not offered as choices; a config that still holds one loads as
+/// before, since the field itself is a plain string.
+fn choice_alias(key: &str, raw: &str) -> Option<&'static str> {
+    match (key, raw) {
+        // Renamed in 1.3.0 before release: "aec" and "off" shipped in test
+        // builds.
+        ("meeting.audio.echo_cancel", "aec") => Some("webrtc"),
+        ("meeting.audio.echo_cancel", "off") => Some("disabled"),
+        _ => None,
+    }
+}
+
 const fn closed(choices: &'static [&'static str]) -> KeyType {
     KeyType::Enum {
         choices,
@@ -308,11 +325,12 @@ pub const REPLACEMENTS_TABLE: &str = "text.replacements";
 
 const FILE_MODE_CHOICES: &[&str] = &["overwrite", "append"];
 const URGENCY_CHOICES: &[&str] = &["low", "normal", "critical"];
-const PASTE_KEY_CHOICES: &[&str] = &["shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
+const PASTE_KEY_CHOICES: &[&str] = &["auto", "shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
-const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml"];
-const SUMMARY_BACKEND_CHOICES: &[&str] = &["local", "remote", "disabled"];
+const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml", "hybrid"];
+const SUMMARY_BACKEND_CHOICES: &[&str] = &["agent", "local", "remote", "disabled"];
+const ASSISTANT_AGENT_CHOICES: &[&str] = crate::meeting::assistant::SUPPORTED_AGENTS;
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
     // -- Engine -------------------------------------------------------------
@@ -1038,6 +1056,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Key that aborts an in-flight recording or transcription.",
     ),
     spec(
+        "hotkey.paste_last_key",
+        "hotkey",
+        "paste_last_key",
+        open(HOTKEY_PASTE_LAST_CHOICES),
+        "Hotkey",
+        "Paste last dictation key",
+        "Key, or modifiers and a key joined with +, that sends your last dictation again. Built-in hotkey detection only, and history must be on.",
+    ),
+    spec(
         "hotkey.model_modifier",
         "hotkey",
         "model_modifier",
@@ -1064,6 +1091,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Audio",
         "Max recording length",
         "Safety cap in seconds; recording stops on its own at this point.",
+    ),
+    spec(
+        "audio.keep_failed_recordings",
+        "audio",
+        "keep_failed_recordings",
+        KeyType::Bool,
+        "Audio",
+        "Keep failed recordings",
+        "Save the audio when transcription fails so it can be retried. The 20 most recent are kept, readable only by you.",
     ),
     spec(
         "audio.pause_media",
@@ -1146,6 +1182,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Output",
         "Fall back to clipboard",
         "Copy the text instead of dropping it when every typing driver fails.",
+    ),
+    spec(
+        "output.keep_undelivered_text",
+        "output",
+        "keep_undelivered_text",
+        KeyType::Bool,
+        "Output",
+        "Keep undelivered text",
+        "Save a transcription to a file when no output method can deliver it. The 200 most recent are kept, readable only by you.",
     ),
     spec(
         "output.auto_submit",
@@ -1236,7 +1281,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Text Cleanup",
         "LARD disfluency cleanup",
-        "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+        "Opt in to the local English-only LARD model. Download it first with voxtype setup lard: without the model this stage is skipped and the other cleanup stages still run.",
     ),
     spec(
         "text.lard_model_path",
@@ -1246,6 +1291,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Text Cleanup",
         "LARD model file",
         "Path to the local VXDF model. By default use the model installed by voxtype setup lard in the XDG data directory.",
+    ),
+    spec(
+        "text.language",
+        "text",
+        "language",
+        open(TEXT_LANG_CHOICES),
+        "Text Cleanup",
+        "Dictation language",
+        "The language you dictate in (en, en-US, pt-BR), for cleanup that depends on it: LARD is English-only. Set it when a multilingual model detects the language automatically. auto declares nothing. It is not sent to the engine, and an engine language that is set or a single-language model wins over it.",
     ),
     spec(
         "text.punctuation_casing",
@@ -1358,6 +1412,45 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Allow `voxtype meeting` to record and transcribe long sessions.",
     ),
     spec(
+        "meeting.offer_enable",
+        "meeting",
+        "offer_enable",
+        KeyType::Bool,
+        "Meeting",
+        "Offer meeting mode",
+        "While meeting mode is off, the tray offers to turn it on. Set false to stop the offer.",
+    ),
+    spec(
+        "meeting.status_notifications",
+        "meeting",
+        "status_notifications",
+        closed(crate::meeting::status_notice::STATUS_MODES),
+        "Meeting",
+        "Meeting status notifications",
+        "Started, paused, resumed and ended notifications. auto skips them while a meeting view is on screen. Errors always notify.",
+    ),
+    // `meeting start` reads these itself and hands them to the daemon, so
+    // the next meeting follows a change without a restart.
+    spec(
+        "meeting.announce_recording",
+        "meeting",
+        "announce_recording",
+        KeyType::Bool,
+        "Meeting",
+        "Announce recording",
+        "When a meeting starts, play \"This meeting is being recorded and transcribed with Voxtype\" into the call app's microphone so the others hear it, and on your speakers. A courtesy, not consent: recording laws still apply.",
+    )
+    .live(),
+    spec(
+        "meeting.my_name",
+        "meeting",
+        "my_name",
+        KeyType::String,
+        "Meeting",
+        "Your name",
+        "Shown instead of \"You\" for your side of a meeting, in the view, exports, summaries and search.",
+    ),
+    spec(
         "meeting.audio.loopback_device",
         "meeting.audio",
         "loopback_device",
@@ -1373,7 +1466,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(ECHO_CANCEL_CHOICES),
         "Meeting",
         "Echo cancellation",
-        "auto runs GTCRN enhancement plus transcript dedup on the mic track. Set disabled if PipeWire already cancels echo.",
+        "auto cancels speaker echo with PipeWire's WebRTC canceller unless the output is headphones, GTCRN otherwise. webrtc forces it, gtcrn is the old behaviour, disabled is neither.",
     ),
     spec(
         "meeting.diarization.enabled",
@@ -1451,7 +1544,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Status",
         "Link Omarchy Settings panel",
-        "On Omarchy, let the daemon link the packaged Voxtype Settings panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
+        "On Omarchy, let the daemon link the packaged Voxtype panel into ~/.config/omarchy/plugins on its first start and refresh it after upgrades. It never replaces your own copy and never re-adds a panel you removed. `voxtype setup omarchy` works either way.",
     ),
     // -- OSD ----------------------------------------------------------------
     spec(
@@ -1542,7 +1635,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 0, max: 512 },
         "OSD",
         "Edge margin",
-        "Gap from the screen edge in physical pixels. Corner anchors use this for both axes.",
+        "Gap from the screen edge in logical pixels. Corner anchors use it for both axes; centered anchors never sit closer to the top or bottom edge than this.",
     ),
     spec(
         "osd.top_margin",
@@ -1551,7 +1644,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Vertical position",
-        "Top edge as a fraction of monitor height, matching swayosd. Only used by the centered anchors.",
+        "Top edge as a fraction of the focused output's height, matching swayosd. Only used by the centered anchors; top-center mirrors values above 0.5.",
     ),
     spec(
         "osd.opacity",
@@ -1560,7 +1653,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Opacity",
-        "Background opacity of the panel.",
+        "Opacity of the GTK4 and native OSD card. It stays the same while the card is shown.",
     ),
     spec(
         "osd.waveform_window_secs",
@@ -1590,7 +1683,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.1, max: 50.0 },
         "OSD",
         "Waveform gain",
-        "Visual gain applied before drawing. Lower for hot mics, raise for quiet ones.",
+        "Waveform sensitivity on its fixed dB scale. 10 is neutral, each doubling shows input 6 dB louder. Lower for hot mics, raise for quiet ones.",
     ),
     spec(
         "osd.frame.background",
@@ -1822,7 +1915,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         open(PASTE_KEY_CHOICES),
         "Output",
         "Paste keystroke",
-        "Keystroke paste mode sends after copying, e.g. shift+insert or ctrl+shift+v for terminals.",
+        "Keystroke paste mode sends after copying. auto (the default) sends ctrl+v to GUI apps and the terminal keystroke to terminals.",
+    ),
+    spec(
+        "output.paste_keys_terminal",
+        "output",
+        "paste_keys_terminal",
+        open(PASTE_KEY_CHOICES),
+        "Output",
+        "Terminal paste keystroke",
+        "Keystroke paste mode sends when the focused window is a terminal (Hyprland, Sway, niri). Default ctrl+shift+v.",
     ),
     spec(
         "output.restore_clipboard",
@@ -2198,13 +2300,125 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Minutes before a meeting stops on its own. 0 is unlimited.",
     ),
     spec(
+        "meeting.show_view_on_start",
+        "meeting",
+        "show_view_on_start",
+        KeyType::Bool,
+        "Meeting",
+        "Show meeting view on start",
+        "Open the live meeting view when a meeting starts: the Quickshell view, or the GTK4 window when the meeting view resolves to it.",
+    ),
+    spec(
+        "meeting.view",
+        "meeting",
+        "view",
+        closed(crate::meeting::view::frontend::VIEW_CHOICES),
+        "Meeting",
+        "Meeting view",
+        "Which meeting view opens: auto uses Quickshell, then the GTK4 window; terminal runs `meeting watch` and is never automatic.",
+    )
+    .live(),
+    spec(
+        "meeting.calendar.command",
+        "meeting.calendar",
+        "command",
+        KeyType::String,
+        "Meeting",
+        "Calendar command",
+        "Command printing the next meeting as JSON (the Omarchy Next Meeting plugin's format). Empty uses that plugin's command when it is on the bar.",
+    ),
+    spec(
+        "meeting.calendar.window_mins",
+        "meeting.calendar",
+        "window_mins",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Calendar window",
+        "Minutes either side of a meeting's start within which a calendar event names it.",
+    ),
+    spec(
+        "meeting.calendar.timeout_secs",
+        "meeting.calendar",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 60 },
+        "Meeting",
+        "Calendar timeout",
+        "Seconds to wait for the calendar command.",
+    ),
+    spec(
+        "meeting.view_opacity",
+        "meeting",
+        "view_opacity",
+        KeyType::Float { min: 0.3, max: 1.0 },
+        "Meeting",
+        "Meeting view opacity",
+        "Background opacity of the meeting view while the pointer is elsewhere. Text stays opaque.",
+    ),
+    spec(
+        "meeting.auto_label_from_title",
+        "meeting",
+        "auto_label_from_title",
+        KeyType::Bool,
+        "Meeting",
+        "Name speakers from the title",
+        "In a two-person meeting titled like \"Pete <> Andrew standup\", name your microphone and every remote voice from the title. Names given by hand are kept.",
+    ),
+    spec(
         "meeting.retain_audio",
         "meeting",
         "retain_audio",
         KeyType::Bool,
         "Meeting",
         "Keep audio",
-        "Keep the raw meeting audio after transcription.",
+        "Keep the meeting's mic, loopback and mixed audio as Opus in its folder.",
+    ),
+    spec(
+        "meeting.announcement_voice",
+        "meeting",
+        "announcement_voice",
+        closed(crate::meeting::announce::VOICES),
+        "Meeting",
+        "Announcement voice",
+        "kokoro is built in and MIT. jessica is an ElevenLabs voice downloaded once on first use, under its own terms: not MIT, redistributable unmodified, no AI training. An announcement audio file overrides both.",
+    )
+    .live(),
+    spec(
+        "meeting.announcement_volume",
+        "meeting",
+        "announcement_volume",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "Meeting",
+        "Announcement volume",
+        "How loud the people on the call hear the announcement, as a linear gain: 1.0 is the clip at full level, 0.5 about 6 dB down, about 0.3 (10 dB down) sounds roughly half as loud, 0.0 is silent. The copy on your own speakers follows your mixer.",
+    )
+    .live(),
+    spec(
+        "meeting.announcement_file",
+        "meeting",
+        "announcement_file",
+        KeyType::String,
+        "Meeting",
+        "Announcement audio",
+        "Audio file (WAV, FLAC or Ogg) played instead of the built-in announcement, for your own wording or language. Empty uses the built-in clip.",
+    )
+    .live(),
+    spec(
+        "meeting.post_meeting_command",
+        "meeting",
+        "post_meeting_command",
+        KeyType::String,
+        "Meeting",
+        "Post-meeting command",
+        "Shell command run once a meeting's folder is final. Gets VOXTYPE_MEETING_DIR.",
+    ),
+    spec(
+        "meeting.post_meeting_timeout_secs",
+        "meeting",
+        "post_meeting_timeout_secs",
+        KeyType::Int { min: 1, max: 86400 },
+        "Meeting",
+        "Post-meeting timeout",
+        "Seconds before the post-meeting command is killed.",
     ),
     spec(
         "meeting.storage_path",
@@ -2214,6 +2428,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting",
         "Storage path",
         "Where meetings are stored. auto uses ~/.local/share/voxtype/meetings.",
+    ),
+    spec(
+        "meeting.audio.echo_guard",
+        "meeting.audio",
+        "echo_guard",
+        KeyType::Bool,
+        "Meeting",
+        "Echo guard",
+        "Keep the call heard through your speakers out of your lines: drop mic lines that are only its echo, unless the mic level shows you speaking.",
+    ),
+    spec(
+        "meeting.audio.echo_fuzzy_max_words",
+        "meeting.audio",
+        "echo_fuzzy_max_words",
+        KeyType::Int { min: 1, max: 12 },
+        "Meeting",
+        "Misheard echo length",
+        "Longest mic line, in words, checked for misheard echo.",
     ),
     spec(
         "meeting.audio.mic_device",
@@ -2240,7 +2472,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(DIARIZATION_BACKEND_CHOICES),
         "Meeting",
         "Diarization backend",
-        "simple or ml speaker labelling.",
+        "simple (You/Remote), ml (clusters every voice) or hybrid (You, then Remote 1, Remote 2 by clustering the loopback).",
     ),
     spec(
         "meeting.diarization.max_speakers",
@@ -2312,7 +2544,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(SUMMARY_BACKEND_CHOICES),
         "Meeting",
         "Summary backend",
-        "local uses Ollama, remote an API, disabled turns summaries off.",
+        "Backend for `meeting summarize`: agent (the meeting assistant), local (Ollama) or remote (an API). disabled, the default, also uses the assistant.",
     ),
     spec(
         "meeting.summary.ollama_url",
@@ -2351,6 +2583,60 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "API key for the remote summary backend.",
     ),
     spec(
+        "meeting.actions.remind_in_mins",
+        "meeting.actions",
+        "remind_in_mins",
+        KeyType::Int { min: 1, max: 10080 },
+        "Meeting",
+        "Reminder delay",
+        "Minutes until an Omarchy reminder for an action item goes off, unless a time later today was said.",
+    ),
+    spec(
+        "meeting.actions.todoist_project_id",
+        "meeting.actions",
+        "todoist_project_id",
+        KeyType::String,
+        "Meeting",
+        "Todoist project",
+        "Todoist project ID action items are added to. Empty is the Inbox.",
+    ),
+    spec(
+        "meeting.actions.todoist_token_file",
+        "meeting.actions",
+        "todoist_token_file",
+        KeyType::String,
+        "Meeting",
+        "Todoist token file",
+        "A file holding a Todoist personal API token, instead of connecting in a browser. The token never goes in config.toml.",
+    ),
+    spec(
+        "meeting.share.command",
+        "meeting.share",
+        "command",
+        KeyType::String,
+        "Meeting",
+        "Share command",
+        "Shell command `meeting share --to command` pipes a meeting's notes to, such as a chat webhook or pandoc.",
+    ),
+    spec(
+        "meeting.share.timeout_secs",
+        "meeting.share",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "Meeting",
+        "Share command timeout",
+        "Seconds before the share command is killed.",
+    ),
+    spec(
+        "meeting.share.folder",
+        "meeting.share",
+        "folder",
+        KeyType::String,
+        "Meeting",
+        "Share folder",
+        "Folder `meeting share --to file` saves into. \"auto\" is Documents/Voxtype.",
+    ),
+    spec(
         "meeting.summary.timeout_secs",
         "meeting.summary",
         "timeout_secs",
@@ -2359,6 +2645,177 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Summary timeout",
         "Seconds to wait for a summary request.",
     ),
+    spec(
+        "meeting.detect.enabled",
+        "meeting.detect",
+        "enabled",
+        KeyType::Bool,
+        "Meeting",
+        "Offer to record calls",
+        "Notice a Zoom, Teams or Google Meet call starting and offer to record it. Unset is on for Omarchy, off elsewhere. Needs meeting mode on.",
+    ),
+    spec(
+        "meeting.detect.auto_record_apps",
+        "meeting.detect",
+        "auto_record_apps",
+        KeyType::String,
+        "Meeting",
+        "Record without asking",
+        "Comma-separated call apps (Zoom, Google Meet, Microsoft Teams) whose calls are recorded without a prompt.",
+    ),
+    spec(
+        "meeting.detect.debounce_secs",
+        "meeting.detect",
+        "debounce_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Meeting",
+        "Call detection delay",
+        "Seconds a call app must hold the mic before the prompt, so a quick mic test does not count.",
+    ),
+    spec(
+        "meeting.detect.on_call_end",
+        "meeting.detect",
+        "on_call_end",
+        closed(super::CALL_END_CHOICES),
+        "Meeting",
+        "When the call ends",
+        "stop ends the recording after the grace period (with Keep recording), ask offers to stop it, keep leaves it running. Only meetings with a detected call.",
+    ),
+    spec(
+        "meeting.detect.stop_grace_secs",
+        "meeting.detect",
+        "stop_grace_secs",
+        KeyType::Int { min: 0, max: 600 },
+        "Meeting",
+        "Stop grace period",
+        "Seconds between \"Call ended\" and the automatic stop, to choose Keep recording.",
+    ),
+    spec(
+        "meeting.summary.auto",
+        "meeting.summary",
+        "auto",
+        KeyType::Bool,
+        "Meeting",
+        "Summarize at stop",
+        "Summarize each meeting when it stops. Unset is on once an agent is allowed.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.local_only",
+        "meeting.assistant",
+        "local_only",
+        KeyType::Bool,
+        "Meeting",
+        "Local model only",
+        "Never send transcripts to an agent; answer and summarize with the local Ollama model.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.agent",
+        "meeting.assistant",
+        "agent",
+        open(ASSISTANT_AGENT_CHOICES),
+        "Meeting",
+        "Assistant agent",
+        "Agent that answers questions and writes summaries. Unset uses the Omarchy default, then PATH.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.timeout_secs",
+        "meeting.assistant",
+        "timeout_secs",
+        KeyType::Int { min: 5, max: 3600 },
+        "Meeting",
+        "Assistant timeout",
+        "Seconds to wait for an answer or a summary.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.max_transcript_chars",
+        "meeting.assistant",
+        "max_transcript_chars",
+        KeyType::Int {
+            min: 2_000,
+            max: 2_000_000,
+        },
+        "Meeting",
+        "Assistant transcript budget",
+        "Transcript characters sent verbatim; longer meetings send a summary of the earlier part.",
+    )
+    .live(),
+    spec(
+        "meeting.assistant.open_command",
+        "meeting.assistant",
+        "open_command",
+        KeyType::String,
+        "Meeting",
+        "Answer Open command",
+        "Command the Open action of an ask notification runs. Unset opens the meeting view's Ask tab; empty turns Open off.",
+    )
+    .live(),
+    // -- History --------------------------------------------------------------
+    // The daemon re-reads [history] when the file changes, so none of these
+    // needs a restart.
+    spec(
+        "history.enabled",
+        "history",
+        "enabled",
+        KeyType::Bool,
+        "History",
+        "Dictation history",
+        "Keep a record of every dictation, including failed and cancelled ones, in ~/.local/share/voxtype/history/. Search it with `voxtype history search`.",
+    )
+    .live(),
+    spec(
+        "history.paused",
+        "history",
+        "paused",
+        KeyType::Bool,
+        "History",
+        "Pause history",
+        "Stop recording dictations until resumed. Nothing dictated while paused is written anywhere.",
+    )
+    .live(),
+    spec(
+        "history.retention_days",
+        "history",
+        "retention_days",
+        KeyType::Int { min: 0, max: 36500 },
+        "History",
+        "Keep history for (days)",
+        "Days of history to keep; older days are deleted. 0 keeps history forever.",
+    )
+    .live(),
+    spec(
+        "history.exclude_apps",
+        "history",
+        "exclude_apps",
+        KeyType::String,
+        "History",
+        "Never record in these apps",
+        "Comma-separated apps whose dictations are never recorded, matched against the focused window's class. Ships with KeePassXC, Bitwarden, 1Password and Proton Pass. Needs a desktop voxtype can ask for the focused window (Hyprland, Sway, niri).",
+    )
+    .live(),
+    spec(
+        "history.record_app",
+        "history",
+        "record_app",
+        KeyType::Bool,
+        "History",
+        "Record the app",
+        "Save which app each dictation went to, such as kitty or firefox.",
+    )
+    .live(),
+    spec(
+        "history.record_window_title",
+        "history",
+        "record_window_title",
+        KeyType::Bool,
+        "History",
+        "Record window titles",
+        "Also save the focused window's title. Off by default: titles can hold email subjects, document names and URLs.",
+    )
+    .live(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -2401,7 +2858,7 @@ impl Found {
     pub fn dotted_key(&self) -> String {
         match self {
             Found::Key(s) => s.key.to_string(),
-            Found::MapEntry { spec, entry } => format!("{}.{}", spec.table, entry),
+            Found::MapEntry { spec, entry } => format!("{}.{}", spec.table, path_segment(entry)),
         }
     }
 }
@@ -2410,10 +2867,16 @@ impl Found {
 ///
 /// Exact matches win. Failing that, a key under a [`KeyType::MapString`]
 /// family's table (`text.replacements.btw`) resolves to that family with the
-/// remaining segment as the entry name. Map entry names cannot themselves be
-/// dotted, since the tail would be ambiguous with a nested table.
+/// remaining segment as the entry name.
+///
+/// Segments may be quoted the way TOML quotes keys, so
+/// `text.replacements."vox type"`, `text.replacements.'vox type'` and
+/// `text.replacements.vox type` all name the same entry, and a quoted entry
+/// may contain dots (`text.replacements."e.g."`). See [`split_key_path`].
 pub fn find_key(dotted: &str) -> Option<Found> {
-    if let Some(s) = CONFIG_KEYS.iter().find(|s| s.key == dotted) {
+    let segments = split_key_path(dotted)?;
+    let matches = |path: &str| path.split('.').eq(segments.iter().map(String::as_str));
+    if let Some(s) = CONFIG_KEYS.iter().find(|s| matches(s.key)) {
         // The literal placeholder form ("text.replacements.<from>") is a
         // documentation artifact, not a settable key.
         if matches!(s.ty, KeyType::MapString) {
@@ -2421,18 +2884,55 @@ pub fn find_key(dotted: &str) -> Option<Found> {
         }
         return Some(Found::Key(s));
     }
-    for s in CONFIG_KEYS.iter().filter(|s| s.ty == KeyType::MapString) {
-        let prefix = format!("{}.", s.table);
-        if let Some(entry) = dotted.strip_prefix(&prefix) {
-            if !entry.is_empty() && !entry.contains('.') {
-                return Some(Found::MapEntry {
-                    spec: s,
-                    entry: entry.to_string(),
-                });
-            }
-        }
+    let (entry, table) = segments.split_last()?;
+    if entry.is_empty() {
+        return None;
     }
-    None
+    CONFIG_KEYS
+        .iter()
+        .filter(|s| s.ty == KeyType::MapString)
+        .find(|s| s.table.split('.').eq(table.iter().map(String::as_str)))
+        .map(|s| Found::MapEntry {
+            spec: s,
+            entry: entry.clone(),
+        })
+}
+
+/// Split a user-supplied key path into its segments, unquoting TOML-quoted
+/// ones (`"..."` with escapes, or literal `'...'`).
+///
+/// Anything TOML itself parses as a dotted key is read that way. A path it
+/// rejects, typically a bare entry with a space like
+/// `text.replacements.vox type`, is split on dots as written, which is how
+/// every key was read before quoting was supported. A segment there that
+/// starts with a quote is a malformed quoted key, not a name, so the path is
+/// refused rather than written with literal quote characters.
+pub fn split_key_path(dotted: &str) -> Option<Vec<String>> {
+    if let Ok(keys) = toml_edit::Key::parse(dotted) {
+        return Some(keys.iter().map(|k| k.get().to_string()).collect());
+    }
+    let segments: Vec<String> = dotted.split('.').map(str::to_string).collect();
+    if segments
+        .iter()
+        .any(|s| s.trim_start().starts_with(['"', '\'']))
+    {
+        return None;
+    }
+    Some(segments)
+}
+
+/// A key segment as the user can type it back: bare when splitting on dots
+/// would recover it, TOML-quoted otherwise.
+fn path_segment(segment: &str) -> String {
+    if segment.is_empty()
+        || segment.contains('.')
+        || segment.trim() != segment
+        || segment.starts_with(['"', '\''])
+    {
+        toml_edit::Key::new(segment).display_repr().into_owned()
+    } else {
+        segment.to_string()
+    }
 }
 
 /// Where a top-level `[name]` table belongs when voxtype only reads a section
@@ -2570,9 +3070,28 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
             }
             Ok(TypedValue::Float(f))
         }
+        KeyType::Enum { .. } if spec.key == "text.language" => {
+            // Stored as the config loader normalizes it, and never anything
+            // that is not a language code: the loader would ignore it.
+            let value = super::text::normalize_language(raw);
+            if value == "auto" || super::text::is_language_tag(&value) {
+                Ok(TypedValue::Str(value))
+            } else if value.is_empty() {
+                Err(ValueError::Empty { key: spec.key })
+            } else {
+                Err(ValueError::NotAChoice {
+                    key: spec.key,
+                    value: raw.to_string(),
+                    choices: "auto, or a language code such as en, en-US or pt-BR".to_string(),
+                })
+            }
+        }
         KeyType::Enum { choices, open } => {
             if choices.contains(&raw) {
                 return Ok(TypedValue::Str(raw.to_string()));
+            }
+            if let Some(canonical) = choice_alias(spec.key, raw) {
+                return Ok(TypedValue::Str(canonical.to_string()));
             }
             if open {
                 if raw.is_empty() {
@@ -2587,7 +3106,7 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
             })
         }
         KeyType::String | KeyType::DynamicEnum { .. } | KeyType::MapString => {
-            if raw.is_empty() {
+            if raw.is_empty() && spec.key != "history.exclude_apps" {
                 return Err(ValueError::Empty { key: spec.key });
             }
             Ok(TypedValue::Str(raw.to_string()))
@@ -2822,10 +3341,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             ActivationMode::Toggle => "toggle",
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
+        "hotkey.paste_last_key" => opt_str(cfg.hotkey.paste_last_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
+        "audio.keep_failed_recordings" => json!(cfg.audio.keep_failed_recordings),
         "audio.pause_media" => json!(cfg.audio.pause_media),
         "audio.duck_media" => json!(cfg.audio.duck_media),
         "audio.duck_media_volume_percent" => json!(cfg.audio.duck_media_volume_percent),
@@ -2836,6 +3357,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "output.mode" => serde_json::to_value(cfg.output.mode.clone()).ok()?,
         "output.fallback_to_clipboard" => json!(cfg.output.fallback_to_clipboard),
+        "output.keep_undelivered_text" => json!(cfg.output.keep_undelivered_text),
         "output.auto_submit" => json!(cfg.output.auto_submit),
         "output.shift_enter_newlines" => json!(cfg.output.shift_enter_newlines),
         "output.pre_type_delay_ms" => json!(cfg.output.pre_type_delay_ms),
@@ -2851,6 +3373,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
         "text.lard_model_path" => json!(cfg.text.lard_model_path),
+        "text.language" => json!(cfg.text.language),
         "text.punctuation_casing" => json!(cfg.text.punctuation_casing),
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
@@ -2873,6 +3396,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "vad.threshold" => f32_json(cfg.vad.threshold),
 
         "meeting.enabled" => json!(cfg.meeting.enabled),
+        "meeting.offer_enable" => json!(cfg.meeting.offer_enable),
+        "meeting.status_notifications" => json!(cfg.meeting.status_notifications),
+        "meeting.my_name" => opt_str(cfg.meeting.my_name.as_ref()),
         "meeting.audio.loopback_device" => json!(cfg.meeting.audio.loopback_device),
         "meeting.audio.echo_cancel" => json!(cfg.meeting.audio.echo_cancel),
         "meeting.diarization.enabled" => json!(cfg.meeting.diarization.enabled),
@@ -2932,6 +3458,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.file_mode" => json!(cfg.output.file_mode),
         "output.type_delay_ms" => json!(cfg.output.type_delay_ms),
         "output.paste_keys" => opt_str(cfg.output.paste_keys.as_ref()),
+        "output.paste_keys_terminal" => opt_str(cfg.output.paste_keys_terminal.as_ref()),
         "output.restore_clipboard" => json!(cfg.output.restore_clipboard),
         "output.restore_clipboard_delay_ms" => json!(cfg.output.restore_clipboard_delay_ms),
         "output.wait_for_modifier_release" => json!(cfg.output.wait_for_modifier_release),
@@ -2981,8 +3508,35 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.chunk_duration_secs" => json!(cfg.meeting.chunk_duration_secs),
         "meeting.max_duration_mins" => json!(cfg.meeting.max_duration_mins),
         "meeting.retain_audio" => json!(cfg.meeting.retain_audio),
+        "meeting.post_meeting_command" => opt_str(cfg.meeting.post_meeting_command.as_ref()),
+        "meeting.share.command" => opt_str(cfg.meeting.share.command.as_ref()),
+        "meeting.actions.remind_in_mins" => json!(cfg.meeting.actions.remind_in_mins),
+        "meeting.actions.todoist_project_id" => {
+            opt_str(cfg.meeting.actions.todoist_project_id.as_ref())
+        }
+        "meeting.actions.todoist_token_file" => {
+            opt_str(cfg.meeting.actions.todoist_token_file.as_ref())
+        }
+        "meeting.share.timeout_secs" => json!(cfg.meeting.share.timeout_secs),
+        "meeting.share.folder" => json!(cfg.meeting.share.folder),
+        "meeting.post_meeting_timeout_secs" => json!(cfg.meeting.post_meeting_timeout_secs),
+        "meeting.show_view_on_start" => json!(cfg.meeting.show_view_on_start),
+        "meeting.view" => json!(cfg.meeting.view),
+        // Two places are all an opacity needs, and an f32 such as 0.8 would
+        // otherwise read back as 0.800000011920929.
+        "meeting.view_opacity" => json!((cfg.meeting.view_opacity as f64 * 100.0).round() / 100.0),
+        "meeting.calendar.command" => json!(cfg.meeting.calendar.command),
+        "meeting.calendar.window_mins" => json!(cfg.meeting.calendar.window_mins),
+        "meeting.calendar.timeout_secs" => json!(cfg.meeting.calendar.timeout_secs),
+        "meeting.auto_label_from_title" => json!(cfg.meeting.auto_label_from_title),
+        "meeting.announce_recording" => json!(cfg.meeting.announce_recording),
+        "meeting.announcement_file" => opt_str(cfg.meeting.announcement_file.as_ref()),
+        "meeting.announcement_voice" => json!(cfg.meeting.announcement_voice),
+        "meeting.announcement_volume" => f32_json(cfg.meeting.announcement_volume),
         "meeting.storage_path" => json!(cfg.meeting.storage_path),
         "meeting.audio.mic_device" => json!(cfg.meeting.audio.mic_device),
+        "meeting.audio.echo_guard" => json!(cfg.meeting.audio.echo_guard),
+        "meeting.audio.echo_fuzzy_max_words" => json!(cfg.meeting.audio.echo_fuzzy_max_words),
         "meeting.audio.vad_threshold" => json!(cfg.meeting.audio.vad_threshold),
         "meeting.diarization.backend" => json!(cfg.meeting.diarization.backend),
         "meeting.diarization.max_speakers" => json!(cfg.meeting.diarization.max_speakers),
@@ -3000,6 +3554,28 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
         "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
+        "meeting.detect.enabled" => json!(cfg.meeting.detect.is_enabled()),
+        "meeting.detect.auto_record_apps" => match cfg.meeting.detect.auto_record_apps.as_slice() {
+            [] => Json::Null,
+            apps => json!(apps.join(",")),
+        },
+        "meeting.detect.debounce_secs" => json!(cfg.meeting.detect.debounce_secs),
+        "meeting.detect.on_call_end" => json!(cfg.meeting.detect.on_call_end),
+        "meeting.detect.stop_grace_secs" => json!(cfg.meeting.detect.stop_grace_secs),
+        "meeting.summary.auto" => json!(cfg.meeting.summary.auto),
+        "meeting.assistant.local_only" => json!(cfg.meeting.assistant.local_only),
+        "meeting.assistant.agent" => opt_str(cfg.meeting.assistant.agent.as_ref()),
+        "meeting.assistant.timeout_secs" => json!(cfg.meeting.assistant.timeout_secs),
+        "meeting.assistant.max_transcript_chars" => {
+            json!(cfg.meeting.assistant.max_transcript_chars)
+        }
+        "meeting.assistant.open_command" => opt_str(cfg.meeting.assistant.open_command.as_ref()),
+        "history.enabled" => json!(cfg.history.enabled),
+        "history.paused" => json!(cfg.history.paused),
+        "history.retention_days" => json!(cfg.history.retention_days),
+        "history.exclude_apps" => json!(cfg.history.exclude_apps.join(",")),
+        "history.record_app" => json!(cfg.history.record_app),
+        "history.record_window_title" => json!(cfg.history.record_window_title),
 
         _ => return None,
     };
@@ -3037,6 +3613,21 @@ fn file_value(editor: &ConfigEditor, spec: &KeySpec) -> Json {
                 })
                 .unwrap_or(Json::Null),
         },
+    }
+}
+
+/// What is wrong with a key's current value, when the value asks for
+/// something that cannot run. A settings UI shows it under the row, so the
+/// switch is never on without saying why it is doing nothing.
+///
+/// LARD cleanup has one when it is on with no model installed, or with
+/// dictation that is not known to be English (#696). The declared dictation
+/// language has one when the engine's language or the model overrides it.
+pub fn key_notice(spec: &KeySpec, cfg: &Config) -> Option<String> {
+    match spec.key {
+        "text.lard_disfluency" => crate::setup::lard::problem(cfg).map(|p| p.summary()),
+        "text.language" => cfg.text_language_conflict(),
+        _ => None,
     }
 }
 
@@ -3082,6 +3673,10 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
     if spec.onnx_model_only {
         o.insert("onnx_model_only".into(), json!(true));
     }
+    // Additive too, and only present while there is something to say.
+    if let Some(notice) = key_notice(spec, cfg) {
+        o.insert("notice".into(), json!(notice));
+    }
     Json::Object(o)
 }
 
@@ -3111,6 +3706,12 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         "config_path": path.display().to_string(),
         "engine": cfg.engine.name(),
         "keys": keys,
+        // Values set through a command and never stored in config.toml.
+        "secrets": [crate::meeting::calendar::source::schema_entry(
+            &crate::meeting::calendar::source::Store::new(
+                crate::meeting::calendar::source::Store::default_dir(),
+            ),
+        )],
         "replacements": Json::Object(replacements),
         "profiles": profiles,
     })
@@ -3374,9 +3975,81 @@ mod tests {
         }
         // The placeholder form is documentation, not a settable key.
         assert!(find_key("text.replacements.<from>").is_none());
-        // A dotted tail would be ambiguous with a nested table.
+        // A bare dotted tail would be ambiguous with a nested table; quote it.
         assert!(find_key("text.replacements.a.b").is_none());
         assert!(find_key("text.replacements.").is_none());
+    }
+
+    fn entry_of(key: &str) -> Option<String> {
+        match find_key(key)? {
+            Found::MapEntry { entry, .. } => Some(entry),
+            Found::Key(s) => panic!("{key} resolved to scalar {}", s.key),
+        }
+    }
+
+    #[test]
+    fn quoted_and_bare_segments_name_the_same_key() {
+        for key in [
+            "text.replacements.vox type",
+            "text.replacements.\"vox type\"",
+            "text.replacements.'vox type'",
+            "\"text\".'replacements'.\"vox type\"",
+            "text . replacements . \"vox type\"",
+        ] {
+            assert_eq!(entry_of(key).as_deref(), Some("vox type"), "{key}");
+        }
+        for key in ["osd.position", "\"osd\".\"position\"", "'osd'.position"] {
+            match find_key(key) {
+                Some(Found::Key(s)) => assert_eq!(s.key, "osd.position", "{key}"),
+                other => panic!("{key}: {other:?}"),
+            }
+        }
+        // Escapes in basic strings are decoded; literal strings keep them.
+        assert_eq!(
+            entry_of("text.replacements.\"say \\\"hi\\\"\"").as_deref(),
+            Some("say \"hi\"")
+        );
+        assert_eq!(
+            entry_of("text.replacements.'C:\\path'").as_deref(),
+            Some("C:\\path")
+        );
+    }
+
+    #[test]
+    fn quoted_entries_may_contain_dots() {
+        assert_eq!(
+            entry_of("text.replacements.\"e.g.\"").as_deref(),
+            Some("e.g.")
+        );
+        assert!(find_key("text.replacements.e.g.").is_none());
+        // Echoed keys can be pasted back to name the same entry.
+        for entry in ["e.g.", "btw", "vox type", " padded", "\"quoted\""] {
+            let found = Found::MapEntry {
+                spec: CONFIG_KEYS
+                    .iter()
+                    .find(|s| s.ty == KeyType::MapString)
+                    .unwrap(),
+                entry: entry.to_string(),
+            };
+            assert_eq!(
+                entry_of(&found.dotted_key()).as_deref(),
+                Some(entry),
+                "{}",
+                found.dotted_key()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_quotes_never_become_part_of_a_name() {
+        for key in [
+            "text.replacements.\"cone ogres",
+            "text.replacements.'cone ogres",
+            "text.replacements.\"cone\" ogres",
+            "text.replacements.\"\"",
+        ] {
+            assert!(find_key(key).is_none(), "{key} should be refused");
+        }
     }
 
     #[test]
@@ -3457,6 +4130,41 @@ mod tests {
             validate_value(dur, "1.5"),
             Err(ValueError::NotInt { .. })
         ));
+    }
+
+    #[test]
+    fn announcement_volume_is_a_live_float_from_silent_to_full() {
+        let spec = scalar_keys()
+            .find(|s| s.key == "meeting.announcement_volume")
+            .unwrap();
+        // `meeting start` reads it, so a change applies to the next meeting.
+        assert!(!spec.restart_required);
+        assert!(matches!(
+            validate_value(spec, "0.5"),
+            Ok(TypedValue::Float(v)) if v == 0.5
+        ));
+        assert!(matches!(
+            validate_value(spec, "0"),
+            Ok(TypedValue::Float(_))
+        ));
+        assert!(matches!(
+            validate_value(spec, "1"),
+            Ok(TypedValue::Float(_))
+        ));
+        for bad in ["1.01", "-0.1", "NaN"] {
+            let err = validate_value(spec, bad).unwrap_err();
+            assert!(matches!(err, ValueError::OutOfRange { .. }), "{bad}");
+            assert!(err.to_string().contains("expected 0 to 1"), "{err}");
+        }
+        assert!(matches!(
+            validate_value(spec, "loud"),
+            Err(ValueError::NotFloat { .. })
+        ));
+        // Read back as written, without f32 widening noise.
+        assert_eq!(
+            resolve("meeting.announcement_volume", &Config::default()),
+            Some(serde_json::json!(0.5))
+        );
     }
 
     #[test]
@@ -3573,6 +4281,9 @@ mod tests {
         assert_eq!(doc["engine"], json!("whisper"));
         assert!(doc["replacements"].is_object());
         assert!(doc["profiles"].is_object());
+        let secrets = doc["secrets"].as_array().unwrap();
+        assert_eq!(secrets[0]["key"], "meeting.calendar.ics_link");
+        assert_eq!(secrets[0]["label"], "Calendar (iCal link)");
 
         let keys = doc["keys"].as_array().unwrap();
         assert_eq!(keys.len(), scalar_keys().count());
@@ -3668,6 +4379,105 @@ mod tests {
             .unwrap();
         assert!(spec.onnx_model_only);
         assert_eq!(spec.engine, Some("parakeet"));
+    }
+
+    /// The settings panel is built from this document. A LARD switch that is
+    /// on with nothing to run carries a notice; otherwise the field is absent.
+    #[test]
+    fn lard_key_carries_a_notice_only_while_it_cannot_run() {
+        let (_dir, path) = temp_config();
+        let ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut cfg = load_config(Some(&path)).unwrap();
+        cfg.whisper.language = LanguageConfig::Single("en".into());
+        cfg.text.lard_model_path = Some("/nonexistent/voxtype-test/lard.vxdf".into());
+
+        let notices = |cfg: &Config| -> Vec<(String, String)> {
+            schema_json(cfg, &path, &ed)["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|k| {
+                    Some((
+                        k["key"].as_str()?.to_string(),
+                        k.get("notice")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        };
+
+        // Off: nothing to say, whatever the model path is.
+        assert_eq!(notices(&cfg), []);
+
+        cfg.text.lard_disfluency = true;
+        let found = notices(&cfg);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "text.lard_disfluency");
+        assert!(found[0].1.contains("/nonexistent/voxtype-test/lard.vxdf"));
+        assert!(found[0]
+            .1
+            .contains("voxtype config set text.lard_disfluency false"));
+
+        // Installed and English: the field goes away again.
+        cfg.text.lard_model_path = Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(crate::setup::lard::SOURCE_TREE_PATH),
+        );
+        assert_eq!(notices(&cfg), []);
+    }
+
+    /// The declared dictation language is an open choice that only takes
+    /// language codes, and the panel is told when it is not what cleanup
+    /// uses.
+    #[test]
+    fn text_language_is_a_language_code_and_reports_being_overridden() {
+        let spec = CONFIG_KEYS
+            .iter()
+            .find(|s| s.key == "text.language")
+            .expect("text.language is settable");
+        assert_eq!(spec.section, "Text Cleanup");
+        assert!(matches!(spec.ty, KeyType::Enum { open: true, .. }));
+        assert!(spec.restart_required);
+        assert_eq!(spec.engine, None, "one key for every engine");
+
+        let valid = |raw: &str| match validate_value(spec, raw) {
+            Ok(TypedValue::Str(value)) => Some(value),
+            _ => None,
+        };
+        assert_eq!(valid("auto").as_deref(), Some("auto"));
+        assert_eq!(valid("en").as_deref(), Some("en"));
+        assert_eq!(valid("EN").as_deref(), Some("en"));
+        assert_eq!(valid(" en-US ").as_deref(), Some("en-US"));
+        assert_eq!(valid("pt_BR").as_deref(), Some("pt_BR"));
+        assert_eq!(valid("yue").as_deref(), Some("yue"));
+        for bad in ["english", "e", "en us", "", "en,fr"] {
+            assert_eq!(valid(bad), None, "{bad:?}");
+        }
+
+        let cfg = Config::default();
+        assert_eq!(resolve("text.language", &cfg), Some(json!("auto")));
+        assert_eq!(key_notice(spec, &cfg), None);
+
+        // Declared and in effect: nothing to say.
+        let mut cfg = Config::default();
+        cfg.set_model_for(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v3",
+        );
+        cfg.text.language = "en".into();
+        assert_eq!(resolve("text.language", &cfg), Some(json!("en")));
+        assert_eq!(key_notice(spec, &cfg), None);
+
+        // Declared and overridden: the row says by what.
+        let mut cfg = Config::default();
+        cfg.whisper.language = LanguageConfig::Single("fr".into());
+        cfg.text.language = "en".into();
+        assert_eq!(
+            key_notice(spec, &cfg).as_deref(),
+            Some(
+                "text.language is en, but text cleanup treats dictation as fr: \
+                 whisper.language is fr, and the engine's language wins"
+            )
+        );
     }
 
     #[test]

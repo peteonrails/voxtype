@@ -6,8 +6,36 @@
 use voxtype::{
     config,
     daemon_status::is_daemon_running,
-    status_json::{format_state_json, ExtendedStatusInfo},
+    status_json::{format_state_json, ExtendedStatusInfo, MeetingStatusInfo},
 };
+
+/// Read `$XDG_RUNTIME_DIR/voxtype/meeting_state` (two lines: status,
+/// meeting_id — see `write_meeting_state_file` in `src/daemon.rs`) and build
+/// the `MeetingStatusInfo` `format_state_json` appends to extended output.
+///
+/// Absent file, empty file, or a bare "idle" line all mean the same thing:
+/// no meeting in progress. This never fails; a read error just means no
+/// meeting info gets shown, which is also correct if the daemon isn't running.
+fn read_meeting_status_info() -> MeetingStatusInfo {
+    let path = config::Config::runtime_dir().join("meeting_state");
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines = contents.lines();
+    let status = lines.next().unwrap_or("idle").trim();
+
+    if status.is_empty() || status == "idle" {
+        return MeetingStatusInfo {
+            active: false,
+            status: "idle".to_string(),
+            meeting_id: None,
+        };
+    }
+
+    MeetingStatusInfo {
+        active: true,
+        status: status.to_string(),
+        meeting_id: lines.next().map(|s| s.trim().to_string()),
+    }
+}
 
 /// Run the status command - show current daemon state
 pub(crate) async fn run_status(
@@ -57,7 +85,11 @@ pub(crate) async fn run_status(
         let state = state.trim();
 
         if format == "json" {
-            println!("{}", format_state_json(state, &icons, ext_info.as_ref()));
+            let meeting_info = ext_info.as_ref().map(|_| read_meeting_status_info());
+            println!(
+                "{}",
+                format_state_json(state, &icons, ext_info.as_ref(), meeting_info.as_ref())
+            );
         } else {
             println!("{}", state);
         }
@@ -77,7 +109,11 @@ pub(crate) async fn run_status(
     };
     let state = state.trim();
     if format == "json" {
-        println!("{}", format_state_json(state, &icons, ext_info.as_ref()));
+        let meeting_info = ext_info.as_ref().map(|_| read_meeting_status_info());
+        println!(
+            "{}",
+            format_state_json(state, &icons, ext_info.as_ref(), meeting_info.as_ref())
+        );
     } else {
         println!("{}", state);
     }
@@ -119,9 +155,16 @@ pub(crate) async fn run_status(
                             info.refresh_model_upgrade(&current);
                         }
                         if format == "json" {
+                            let meeting_info =
+                                ext_info.as_ref().map(|_| read_meeting_status_info());
                             println!(
                                 "{}",
-                                format_state_json(&new_state, &icons, ext_info.as_ref())
+                                format_state_json(
+                                    &new_state,
+                                    &icons,
+                                    ext_info.as_ref(),
+                                    meeting_info.as_ref()
+                                )
                             );
                         } else {
                             println!("{}", new_state);
@@ -137,9 +180,10 @@ pub(crate) async fn run_status(
                 // Check if daemon stopped (file deleted or process died)
                 if (!state_path.exists() || !is_daemon_running()) && last_state != "stopped" {
                     if format == "json" {
+                        // Daemon isn't running, so no meeting can be active either.
                         println!(
                             "{}",
-                            format_state_json("stopped", &icons, ext_info.as_ref())
+                            format_state_json("stopped", &icons, ext_info.as_ref(), None)
                         );
                     } else {
                         println!("stopped");

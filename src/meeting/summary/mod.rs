@@ -12,10 +12,15 @@
 pub mod local;
 pub mod remote;
 
-use crate::meeting::data::{ActionItem, MeetingData, MeetingSummary};
+use crate::meeting::data::{ActionItem, Chapter, MeetingData, MeetingSummary};
 use chrono::Utc;
 use serde::Deserialize;
 use thiserror::Error;
+
+/// How a [`SummaryError::Parse`] message starts. The rest of it can quote
+/// the model's answer, so a log line at the default level stops here (see
+/// `assistant::summarize::error_for_log`).
+pub(crate) const PARSE_FAILED: &str = "Failed to parse LLM response";
 
 /// Summary-related errors
 #[derive(Error, Debug)]
@@ -26,7 +31,7 @@ pub enum SummaryError {
     #[error("LLM request failed: {0}")]
     Request(String),
 
-    #[error("Failed to parse LLM response: {0}")]
+    #[error("{}: {0}", PARSE_FAILED)]
     Parse(String),
 
     #[error("Transcript is empty")]
@@ -34,6 +39,10 @@ pub enum SummaryError {
 
     #[error("Ollama not available at {0}")]
     OllamaUnavailable(String),
+
+    /// A backend's own explanation, already naming the backend.
+    #[error("{0}")]
+    Backend(String),
 }
 
 /// Format a MeetingSummary as markdown
@@ -75,6 +84,18 @@ pub fn summary_to_markdown(summary: &MeetingSummary) -> String {
         output.push_str("## Decisions\n\n");
         for decision in &summary.decisions {
             output.push_str(&format!("- {}\n", decision));
+        }
+        output.push('\n');
+    }
+
+    if !summary.chapters.is_empty() {
+        output.push_str("## Chapters\n\n");
+        for chapter in &summary.chapters {
+            output.push_str(&format!(
+                "- [{}] {}\n",
+                crate::meeting::assistant::prompt::ts(chapter.start_ms),
+                chapter.title
+            ));
         }
         output.push('\n');
     }
@@ -207,9 +228,11 @@ pub fn parse_summary_response(
     #[derive(Deserialize)]
     struct RawSummary {
         summary: Option<String>,
+        overview: Option<String>, // The assistant prompt asks for "overview"
         key_points: Option<Vec<String>>,
         action_items: Option<Vec<RawActionItem>>,
         decisions: Option<Vec<String>>,
+        chapters: Option<Vec<RawChapter>>,
     }
 
     #[derive(Deserialize)]
@@ -217,15 +240,37 @@ pub fn parse_summary_response(
         description: Option<String>,
         task: Option<String>, // Some LLMs use "task" instead of "description"
         assignee: Option<String>,
+        owner: Option<String>, // The assistant prompt asks for "owner"
         due_date: Option<String>,
         due: Option<String>, // Alternative name
+        /// The [mm:ss] where the item was given (the assistant prompt)
+        at: Option<serde_json::Value>,
     }
+
+    #[derive(Deserialize)]
+    struct RawChapter {
+        start: Option<serde_json::Value>,
+        start_ms: Option<u64>,
+        title: Option<String>,
+    }
+
+    // "mm:ss", "[mm:ss]" or seconds.
+    let time = |v: serde_json::Value| match v {
+        serde_json::Value::String(s) => crate::meeting::assistant::prompt::parse_ts(
+            s.trim().trim_matches(|c| c == '[' || c == ']'),
+        ),
+        serde_json::Value::Number(n) => n.as_u64().map(|secs| secs * 1000),
+        _ => None,
+    };
+
+    // "null" as a string is a model's way of saying no owner or no date.
+    let present = |v: Option<String>| v.filter(|s| !s.trim().is_empty() && s.trim() != "null");
 
     let raw: RawSummary =
         serde_json::from_str(json_str).map_err(|e| SummaryError::Parse(e.to_string()))?;
 
     Ok(MeetingSummary {
-        summary: raw.summary.unwrap_or_default(),
+        summary: raw.overview.or(raw.summary).unwrap_or_default(),
         key_points: raw.key_points.unwrap_or_default(),
         action_items: raw
             .action_items
@@ -233,12 +278,27 @@ pub fn parse_summary_response(
             .into_iter()
             .map(|item| ActionItem {
                 description: item.description.or(item.task).unwrap_or_default(),
-                assignee: item.assignee,
-                due_date: item.due_date.or(item.due),
+                assignee: present(item.owner.or(item.assignee)),
+                due_date: present(item.due_date.or(item.due)),
                 completed: false,
+                due_on: None,
+                source_ms: item.at.and_then(time),
             })
+            .filter(|item| !item.description.trim().is_empty())
             .collect(),
         decisions: raw.decisions.unwrap_or_default(),
+        chapters: raw
+            .chapters
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|c| {
+                let start_ms = c.start_ms.or_else(|| time(c.start?))?;
+                Some(Chapter {
+                    start_ms,
+                    title: c.title.filter(|t| !t.trim().is_empty())?,
+                })
+            })
+            .collect(),
         generated_at: Utc::now(),
         model,
     })
@@ -306,8 +366,13 @@ mod tests {
                 assignee: Some("Alice".to_string()),
                 due_date: None,
                 completed: false,
+                ..Default::default()
             }],
             decisions: vec!["Decision 1".to_string()],
+            chapters: vec![Chapter {
+                start_ms: 65_000,
+                title: "Budget".to_string(),
+            }],
             generated_at: Utc::now(),
             model: None,
         };
@@ -317,6 +382,35 @@ mod tests {
         assert!(md.contains("Test meeting summary"));
         assert!(md.contains("## Action Items"));
         assert!(md.contains("[ ] Do thing (Alice)"));
+        assert!(md.contains("## Chapters\n\n- [01:05] Budget"));
+    }
+
+    #[test]
+    fn test_parse_assistant_summary_shape() {
+        let response = r#"Sure: {"overview": "We planned the release.",
+            "decisions": ["Ship Friday"],
+            "action_items": [{"description": "Tag rc", "owner": "Steve", "due": "null"},
+                             {"description": "", "owner": null}],
+            "chapters": [{"start": "00:41", "title": "Release"}, {"start": "[1:02:03]", "title": "Later"},
+                         {"start": "soon", "title": "Bad"}]}"#;
+        let summary = parse_summary_response(response, Some("claude".to_string())).unwrap();
+        assert_eq!(summary.summary, "We planned the release.");
+        assert_eq!(summary.action_items.len(), 1);
+        assert_eq!(summary.action_items[0].assignee.as_deref(), Some("Steve"));
+        assert_eq!(summary.action_items[0].due_date, None);
+        assert_eq!(
+            summary.chapters,
+            vec![
+                Chapter {
+                    start_ms: 41_000,
+                    title: "Release".into()
+                },
+                Chapter {
+                    start_ms: 3_723_000,
+                    title: "Later".into()
+                },
+            ]
+        );
     }
 
     #[test]
@@ -325,5 +419,26 @@ mod tests {
         assert_eq!(config.backend, "disabled");
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.ollama_model, "llama3.2");
+    }
+
+    #[test]
+    fn action_items_carry_where_they_were_given() {
+        let response = r#"{"overview": "x", "action_items": [
+            {"description": "Tag", "owner": "Dana", "due": "Friday", "at": "01:05"},
+            {"description": "Notes", "at": "[1:02:03]"},
+            {"description": "Room", "at": 90},
+            {"description": "Lunch", "at": "soon"}]}"#;
+        let s = parse_summary_response(response, None).unwrap();
+        let at: Vec<Option<u64>> = s.action_items.iter().map(|a| a.source_ms).collect();
+        assert_eq!(at, [Some(65_000), Some(3_723_000), Some(90_000), None]);
+        assert_eq!(s.action_items[0].due_date.as_deref(), Some("Friday"));
+        assert_eq!(
+            s.action_items[0].due_on, None,
+            "resolved against the meeting later"
+        );
+        // Older summaries without the new fields still load.
+        let old: crate::meeting::data::ActionItem =
+            serde_json::from_str(r#"{"description": "Tag", "completed": false}"#).unwrap();
+        assert_eq!((old.due_on, old.source_ms), (None, None));
     }
 }

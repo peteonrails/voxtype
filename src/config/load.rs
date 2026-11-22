@@ -89,10 +89,35 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
                      Rebuild with `--features itn` to use it."
                 );
             }
+            if config.text.language_is_malformed() {
+                tracing::warn!(
+                    "[text] language = {:?} is not a language code and is ignored. \
+                     Use one such as \"en\", \"en-US\" or \"pt-BR\", or \"auto\".",
+                    config.text.language
+                );
+            }
             // No punctuation_casing capability check here: helper binaries
             // such as voxtype-osd-quickshell load this config without the
             // engine features, so their build says nothing about the
             // engine's. TextProcessor warns from the transcribing binary.
+        } else if is_symlink(path) {
+            // A dangling link is still the user's config: never fall back to
+            // the system file, which a later save would then try to write.
+            match resolve_config_file(path) {
+                Ok(target) => tracing::warn!(
+                    "Config file {} is a symlink to {}, which does not exist. \
+                     Using built-in defaults; saving a setting creates {}.",
+                    path.display(),
+                    target.display(),
+                    target.display()
+                ),
+                Err(error) => tracing::warn!(
+                    "Config file {} is a symlink that cannot be followed ({}). \
+                     Using built-in defaults.",
+                    path.display(),
+                    error
+                ),
+            }
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
@@ -107,6 +132,32 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.omarchy.link_settings_plugin = parse_bool_env(&value);
     }
 
+    // Dictation history
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_ENABLED") {
+        config.history.enabled = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_PAUSED") {
+        config.history.paused = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_RETENTION_DAYS") {
+        match value.trim().parse() {
+            Ok(days) => config.history.retention_days = days,
+            Err(_) => tracing::warn!(
+                "VOXTYPE_HISTORY_RETENTION_DAYS must be a whole number of days, ignoring {:?}",
+                value
+            ),
+        }
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_EXCLUDE_APPS") {
+        config.history.exclude_apps = super::parse_history_app_list(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_RECORD_APP") {
+        config.history.record_app = parse_bool_env(&value);
+    }
+    if let Ok(value) = std::env::var("VOXTYPE_HISTORY_RECORD_WINDOW_TITLE") {
+        config.history.record_window_title = parse_bool_env(&value);
+    }
+
     // Override from environment variables
     // Hotkey
     if let Ok(key) = std::env::var("VOXTYPE_HOTKEY") {
@@ -117,6 +168,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(key) = std::env::var("VOXTYPE_CANCEL_KEY") {
         config.hotkey.cancel_key = Some(key);
+    }
+    if let Ok(key) = std::env::var("VOXTYPE_PASTE_LAST_KEY") {
+        config.hotkey.paste_last_key = Some(key);
     }
 
     // Whisper / engine
@@ -205,6 +259,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_AUDIO_FEEDBACK") {
         config.audio.feedback.enabled = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_KEEP_FAILED_RECORDINGS") {
+        config.audio.keep_failed_recordings = parse_bool_env(&val);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_PAUSE_MEDIA") {
         config.audio.pause_media = parse_bool_env(&val);
     }
@@ -259,8 +316,26 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_FALLBACK_TO_CLIPBOARD") {
         config.output.fallback_to_clipboard = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_KEEP_UNDELIVERED_TEXT") {
+        config.output.keep_undelivered_text = parse_bool_env(&val);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_SPOKEN_PUNCTUATION") {
         config.text.spoken_punctuation = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_MEETING_ANNOUNCE_RECORDING") {
+        config.meeting.announce_recording = parse_bool_env(&val);
+    }
+    if let Ok(voice) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_VOICE") {
+        config.meeting.announcement_voice = voice.trim().to_lowercase();
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME") {
+        match crate::meeting::announce::parse_volume(&val) {
+            Ok(volume) => config.meeting.announcement_volume = volume,
+            Err(e) => tracing::warn!("Ignoring VOXTYPE_MEETING_ANNOUNCEMENT_VOLUME: {}", e),
+        }
+    }
+    if let Ok(path) = std::env::var("VOXTYPE_MEETING_ANNOUNCEMENT_FILE") {
+        config.meeting.announcement_file = Some(path).filter(|p| !p.trim().is_empty());
     }
     if let Ok(val) = std::env::var("VOXTYPE_LARD_DISFLUENCY") {
         config.text.lard_disfluency = parse_bool_env(&val);
@@ -268,11 +343,19 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Some(path) = std::env::var_os("VOXTYPE_LARD_MODEL_PATH") {
         config.text.lard_model_path = Some(path.into());
     }
+    if let Ok(language) = std::env::var("VOXTYPE_TEXT_LANGUAGE") {
+        if let Err(message) = config.text.set_language(&language) {
+            tracing::warn!("VOXTYPE_TEXT_LANGUAGE is ignored: {message}");
+        }
+    }
     if let Ok(val) = std::env::var("VOXTYPE_PUNCTUATION_CASING") {
         config.text.punctuation_casing = parse_bool_env(&val);
     }
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
+    }
+    if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS_TERMINAL") {
+        config.output.paste_keys_terminal = Some(keys);
     }
     if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
         config.output.dotool_xkb_layout = Some(layout);
@@ -327,6 +410,43 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     Ok(config)
+}
+
+/// Whether `path` itself is a symlink, whether or not its target exists.
+pub(crate) fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// The file a config path names once symlinks are followed: the target of
+/// a link, the last target of a chain of links, or `path` itself.
+///
+/// Writers that replace the config by renaming a temp file over it must
+/// rename over this path, or they replace a symlink (a GNU Stow or dotfiles
+/// link) with a regular file and leave the real file stale. A relative link
+/// target is taken from the link's own directory, as the kernel does. A
+/// dangling link resolves to the missing file it points at, so a save
+/// creates that file and the link starts working again.
+pub fn resolve_config_file(path: &Path) -> std::io::Result<PathBuf> {
+    // Linux's MAXSYMLINKS: the most links the kernel follows in one lookup.
+    const MAX_LINKS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)?;
+                // Join, never normalize: `..` must cross the link's real
+                // directory, which a lexical cleanup would get wrong.
+                current = match current.parent() {
+                    Some(dir) => dir.join(target),
+                    None => target,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::from_raw_os_error(libc::ELOOP))
 }
 
 /// Save configuration to file

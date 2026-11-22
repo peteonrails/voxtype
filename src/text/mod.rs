@@ -129,22 +129,37 @@ impl TextProcessor {
     /// Only the built-in default is narrowed. A user who lists filler words
     /// explicitly gets exactly what they asked for.
     pub fn new_for_language(config: &TextConfig, language: Option<&str>) -> Self {
-        Self::build(config, language, false)
+        Self::build(config, language, false, None)
     }
 
     /// Build a processor for finished output from the active transcription
     /// configuration. Punctuation restoration is activated only when both
     /// the user opted in and that exact engine configuration emits plain CTC
     /// output (for example SenseVoice with its own ITN disabled).
+    ///
+    /// `language` is the language of the text, which callers take from
+    /// [`Config::text_language`](crate::config::Config::text_language): the
+    /// engine's language, else a single-language model's, else the one the
+    /// user declared.
     pub fn new_for_config(
         config: &TextConfig,
         language: Option<&str>,
         root: &crate::config::Config,
     ) -> Self {
-        Self::build(config, language, root.needs_punctuation_casing())
+        Self::build(
+            config,
+            language,
+            root.needs_punctuation_casing(),
+            Some(root),
+        )
     }
 
-    fn build(config: &TextConfig, language: Option<&str>, engine_needs_punctuation: bool) -> Self {
+    fn build(
+        config: &TextConfig,
+        language: Option<&str>,
+        engine_needs_punctuation: bool,
+        root: Option<&crate::config::Config>,
+    ) -> Self {
         #[cfg(not(feature = "punctuation-casing"))]
         if config.punctuation_casing && engine_needs_punctuation {
             tracing::warn!(
@@ -213,29 +228,25 @@ impl TextProcessor {
             "BUG: connector-before-terminator regex is a compile-time constant and must be valid",
         );
 
+        // Fail open: a stage that cannot run leaves the text alone. The same
+        // `Problem` drives `voxtype doctor` and the startup notification, so
+        // this log line is no longer the only sign (#696).
         let disfluency_tagger = if config.lard_disfluency {
-            if language.and_then(|l| l.split(['-', '_']).next()) == Some("en") {
-                let path = config
-                    .lard_model_path
-                    .clone()
-                    .unwrap_or_else(crate::setup::lard::model_path);
-                match std::fs::read(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| {
-                        disfluency::DisfluencyTagger::from_bytes(&bytes).map_err(|e| e.to_string())
-                    }) {
-                    Ok(model) => Some(model),
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error,
-                            "LARD cleanup unavailable; preserving text. Run voxtype setup lard --source <verified-model.vxdf>");
-                        None
-                    }
+            match crate::setup::lard::load_tagger(config, language) {
+                Ok(model) => Some(model),
+                Err(problem) => {
+                    // With the whole configuration at hand, say what in it
+                    // makes the dictation not English.
+                    let problem = root
+                        .and_then(crate::setup::lard::problem)
+                        .unwrap_or(problem);
+                    tracing::warn!(
+                        "LARD cleanup unavailable; preserving text. {}. Fix: {}",
+                        problem.message(),
+                        problem.fix()
+                    );
+                    None
                 }
-            } else {
-                tracing::warn!(
-                    "LARD cleanup requires an explicit English language; preserving text"
-                );
-                None
             }
         } else {
             None
@@ -273,6 +284,22 @@ impl TextProcessor {
 
     /// Process text with the vocabulary selected by the active profile.
     pub fn process_with_vocabulary(&self, text: &str, vocabulary: Option<&Vocabulary>) -> String {
+        self.process_recording(text, vocabulary, true)
+    }
+
+    /// Process the text of one recording. `english` is false when this
+    /// recording came from a model other than the configured one (a
+    /// `--model` override) and that model's text is not known to be English:
+    /// the English-only LARD stage is then skipped for it, whatever language
+    /// this processor was built for. It deletes words, so it must never run
+    /// on text that may not be English (#696). Every other stage runs as
+    /// configured.
+    pub fn process_recording(
+        &self,
+        text: &str,
+        vocabulary: Option<&Vocabulary>,
+        english: bool,
+    ) -> String {
         let mut result = text.to_string();
 
         // Vocabulary is the first cleanup stage so every later stage sees the
@@ -300,30 +327,15 @@ impl TextProcessor {
             result = self.apply_spoken_punctuation(&result);
         }
 
-        // Restart collapsing keys on sentence boundaries, so it has to run
-        // after spoken punctuation has turned a dictated "period" into a real
-        // ".". Running it earlier would make every boundary invisible for
-        // anyone using spoken_punctuation. Filler removal has already gone,
-        // so a filler mid-stutter ("the uh the point") cannot hide the repeat
-        // either, and the replacements pass below still gets the last word.
-        if let Some(tagger) = &self.disfluency_tagger {
-            let tokens = tagger.tag(&result);
-            let mut cleaned = String::with_capacity(result.len());
-            let mut cursor = 0;
-            for token in tokens.iter().filter(|token| token.disfluent) {
-                cleaned.push_str(&result[cursor..token.start]);
-                cursor = token.end;
-                while result[cursor..].starts_with(char::is_whitespace) {
-                    cursor += result[cursor..].chars().next().unwrap().len_utf8();
-                }
-            }
-            cleaned.push_str(&result[cursor..]);
-            // A model that labels everything must never erase a dictation.
-            if !cleaned.trim().is_empty() {
-                // Segment separators belong to the streaming protocol. Do not
-                // trim them or adjacent fluent Final events will join words.
-                result = cleaned;
-            }
+        // Disfluency removal and restart collapsing both key on sentence
+        // boundaries, so they have to run after spoken punctuation has turned
+        // a dictated "period" into a real ".". Running them earlier would
+        // make every boundary invisible for anyone using spoken_punctuation.
+        // Filler removal has already gone, so a filler mid-stutter ("the uh
+        // the point") cannot hide the repeat either, and the replacements
+        // pass below still gets the last word.
+        if let Some(tagger) = self.disfluency_tagger.as_ref().filter(|_| english) {
+            result = remove_disfluencies(&result, &tagger.tag(&result));
         }
 
         if self.collapse_restarts {
@@ -572,8 +584,9 @@ fn load_punctuation_caser(
     }
 }
 
-/// Stand-ins for a removed filler while its surroundings are cleaned up.
-/// Private-use code points, so they cannot collide with transcribed text.
+/// Stand-ins for a removed filler or disfluent word while its surroundings
+/// are cleaned up. Private-use code points, so they cannot collide with
+/// transcribed text.
 const FILLER_UPPER: char = '\u{E000}';
 const FILLER_LOWER: char = '\u{E001}';
 
@@ -725,6 +738,78 @@ fn finish_filler_runs(text: String) -> String {
     }
 }
 
+/// Remove the words the disfluency tagger labeled and repair the
+/// punctuation and capital they leave behind.
+///
+/// The tagger labels tokens. What a label may delete is decided here, and it
+/// is less than the model asks for:
+///
+/// - Whole written words only. The model splits "that's", "1.2" and
+///   "well-known" into several tokens and can label one of them, which used
+///   to leave "'s", ".2" or "-known" in the text. A word goes when every
+///   part of it is labeled, and not otherwise.
+/// - Never a punctuation mark by its label. A labeled comma used to be cut
+///   out along with the space after it, joining its neighbours ("a flight,
+///   no" became "a flightno"). A removed word takes the connector that
+///   closes it, and the rest is settled by `remove_filler_runs`, the same
+///   rules that tidy up after a filler: the capital of a removed sentence
+///   opener moves to the word that now opens the sentence, a connector
+///   stranded at either end of a sentence goes, and no space is left in
+///   front of a full stop.
+/// - Never a whole sentence. If the model labels every word of one, that
+///   sentence is kept as it was, so a dictation cannot be erased either.
+fn remove_disfluencies(text: &str, tokens: &[disfluency::TaggedToken]) -> String {
+    let spoken = |token: &&disfluency::TaggedToken| token.text.contains(char::is_alphanumeric);
+
+    let sentences = tokens.last().map_or(0, |token| token.sentence + 1);
+    let mut keeps_a_word = vec![false; sentences];
+    for token in tokens.iter().filter(spoken) {
+        keeps_a_word[token.sentence] |= !token.disfluent;
+    }
+
+    let mut marked = String::with_capacity(text.len());
+    let mut cursor = 0;
+    // The tokenizer covers every character that is not whitespace, so tokens
+    // that touch make up one written word with its punctuation.
+    for word in tokens.chunk_by(|left, right| left.end == right.start) {
+        let (Some(first), Some(last)) = (word.iter().find(spoken), word.iter().rfind(spoken))
+        else {
+            continue;
+        };
+        let labeled = word.iter().filter(spoken).all(|token| token.disfluent);
+        if !labeled || !keeps_a_word[first.sentence] {
+            continue;
+        }
+        marked.push_str(&text[cursor..first.start]);
+        marked.push(if first.text.starts_with(char::is_uppercase) {
+            FILLER_UPPER
+        } else {
+            FILLER_LOWER
+        });
+        // A connector that closes a removed word marks where the speaker
+        // broke off, so it goes with the word ("to the store, the store on
+        // Main Street").
+        cursor = word
+            .iter()
+            .skip_while(|token| token.end <= last.end)
+            .take_while(|token| token.text.chars().all(is_connector))
+            .last()
+            .map_or(last.end, |token| token.end);
+    }
+    // Fluent streaming deltas carry their own separators. With nothing
+    // removed there is nothing to clean up.
+    if cursor == 0 {
+        return text.to_string();
+    }
+    marked.push_str(&text[cursor..]);
+
+    // Only discard separators created by removing a word, not the original
+    // segment boundary carried by a streaming backend.
+    let leading = &text[..text.len() - text.trim_start().len()];
+    let trailing = &text[text.trim_end().len()..];
+    format!("{leading}{}{trailing}", remove_filler_runs(&marked).trim())
+}
+
 /// Replace a word/phrase case-insensitively using regex for proper word boundaries
 fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
     // Escape regex special characters in the search phrase
@@ -734,7 +819,8 @@ fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
     let pattern = format!(r"(?i)\b{}\b", escaped);
 
     match Regex::new(&pattern) {
-        Ok(re) => re.replace_all(text, to).into_owned(),
+        // the replacement is plain text, so don't let regex expand $name or $1 in it
+        Ok(re) => re.replace_all(text, regex::NoExpand(to)).into_owned(),
         Err(_) => text.to_string(),
     }
 }
@@ -824,6 +910,149 @@ mod tests {
         super::TextProcessor::new_for_language(&config, Some(language))
     }
 
+    /// The daemon's processor for a whole configuration with LARD on and the
+    /// pinned model: what `Daemon::new` builds.
+    fn lard_processor_for(mut config: crate::config::Config) -> super::TextProcessor {
+        config.text.lard_disfluency = true;
+        config.text.filter_filler_words = false;
+        config.text.lard_model_path = Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/models/lard-disfluency-v1.vxdf"),
+        );
+        super::TextProcessor::new_for_config(&config.text, config.text_language(), &config)
+    }
+
+    const DISFLUENT: &str = "I need a flight no I need a hotel";
+    const CLEANED: &str = "I need a hotel";
+
+    fn engine_config(
+        engine: crate::config::TranscriptionEngine,
+        model: &str,
+    ) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.set_model_for(engine, model);
+        config
+    }
+
+    /// LARD used to be unreachable for engines with no language setting.
+    /// It now runs when the model can only write English.
+    #[test]
+    fn lard_runs_for_an_english_only_model_without_a_language_setting() {
+        use crate::config::TranscriptionEngine::*;
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v2"),
+            (Parakeet, "parakeet-tdt-0.6b-v2-int8"),
+            (Parakeet, "parakeet-unified-en-0.6b"),
+            (Moonshine, "base"),
+            (Moonshine, "tiny"),
+            (Paraformer, "paraformer-en"),
+        ] {
+            let processor = lard_processor_for(engine_config(engine, model));
+            assert_eq!(processor.process(DISFLUENT), CLEANED, "{model}");
+        }
+
+        // Engines with a language key left on automatic detection.
+        let mut whisper = engine_config(Whisper, "base.en");
+        whisper.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        assert_eq!(lard_processor_for(whisper).process(DISFLUENT), CLEANED);
+        let gguf = engine_config(Gguf, "moonshine-streaming-small-Q8_0.gguf");
+        assert_eq!(gguf.gguf.as_ref().unwrap().language, "auto");
+        assert_eq!(lard_processor_for(gguf).process(DISFLUENT), CLEANED);
+        let mut openvino = engine_config(OpenVino, "base.en-int8");
+        openvino.openvino.as_mut().unwrap().language = "auto".into();
+        assert_eq!(lard_processor_for(openvino).process(DISFLUENT), CLEANED);
+    }
+
+    /// The default that must not move: a multilingual model on automatic
+    /// detection with nothing declared keeps every word.
+    #[test]
+    fn lard_stays_off_for_a_multilingual_model_on_automatic() {
+        use crate::config::TranscriptionEngine::*;
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Parakeet, "parakeet-tdt-0.6b-v3-int8"),
+            (Parakeet, "parakeet-ultra-Q8_0.gguf"),
+            (Parakeet, "/models/parakeet-tdt-0.6b-v2"),
+            (Moonshine, "base-ja"),
+            (SenseVoice, "sensevoice-small"),
+            (Paraformer, "paraformer-zh"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Gguf, "Qwen3-ASR-0.6B-Q8_0.gguf"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            let processor = lard_processor_for(engine_config(engine, model));
+            assert_eq!(processor.process(DISFLUENT), DISFLUENT, "{model}");
+        }
+        let mut whisper = engine_config(Whisper, "large-v3-turbo");
+        whisper.whisper.language = crate::config::LanguageConfig::Single("auto".into());
+        assert_eq!(lard_processor_for(whisper).process(DISFLUENT), DISFLUENT);
+    }
+
+    /// Declaring the dictation language is what turns it on for those
+    /// models, and only a declaration of English does.
+    #[test]
+    fn lard_runs_for_a_multilingual_model_once_english_is_declared() {
+        use crate::config::TranscriptionEngine::*;
+        for (engine, model) in [
+            (Parakeet, "parakeet-tdt-0.6b-v3"),
+            (Parakeet, "parakeet-ultra-Q8_0.gguf"),
+            (SenseVoice, "sensevoice-small"),
+            (Dolphin, "dolphin-base"),
+            (Omnilingual, "omnilingual-300m"),
+            (Soniox, "stt-rt-v4"),
+        ] {
+            for (declared, expected) in [
+                ("en", CLEANED),
+                ("en-US", CLEANED),
+                ("fr", DISFLUENT),
+                ("auto", DISFLUENT),
+            ] {
+                let mut config = engine_config(engine, model);
+                config.text.language = declared.into();
+                assert_eq!(
+                    lard_processor_for(config).process(DISFLUENT),
+                    expected,
+                    "{model} / {declared}"
+                );
+            }
+        }
+
+        // A declaration never overrides what the engine was told, or a
+        // model that only writes another language.
+        let mut french = engine_config(Whisper, "large-v3-turbo");
+        french.whisper.language = crate::config::LanguageConfig::Single("fr".into());
+        french.text.language = "en".into();
+        assert_eq!(lard_processor_for(french).process(DISFLUENT), DISFLUENT);
+        let mut japanese = engine_config(Moonshine, "base-ja");
+        japanese.text.language = "en".into();
+        assert_eq!(lard_processor_for(japanese).process(DISFLUENT), DISFLUENT);
+    }
+
+    /// A `--model` override recording whose model is not known to write
+    /// English skips LARD and nothing else.
+    #[test]
+    fn a_recording_that_is_not_english_skips_lard_only() {
+        let mut config = engine_config(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v2",
+        );
+        config
+            .text
+            .replacements
+            .insert("hotel".into(), "Hotel".into());
+        let processor = lard_processor_for(config);
+        assert_eq!(processor.process(DISFLUENT), "I need a Hotel");
+        assert_eq!(
+            processor.process_recording(DISFLUENT, None, true),
+            "I need a Hotel"
+        );
+        assert_eq!(
+            processor.process_recording(DISFLUENT, None, false),
+            "I need a flight no I need a Hotel"
+        );
+    }
+
     #[test]
     fn lard_preserves_fluent_streaming_segment_spacing() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -861,6 +1090,183 @@ mod tests {
             lard_processor("en", &path).process("Please book a hotel in Boston for Tuesday"),
             "Please book a hotel in Boston for Tuesday"
         );
+    }
+
+    fn lard(text: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/models/lard-disfluency-v1.vxdf");
+        lard_processor("en", &path).process(text)
+    }
+
+    /// Reported against 1.3.1-rc1: the first "owl" was deleted because the
+    /// word comes back in the next sentence, leaving "an old gray . The owl".
+    /// Whether "that that" should lose a "that" is the model's call and not
+    /// what this test is about.
+    #[test]
+    fn lard_keeps_a_word_that_the_next_sentence_repeats() {
+        assert_eq!(
+            lard(
+                "After that, the fox walked slowly back to the forest, where it met an old \
+                 gray owl. The owl said that that was the best story it had heard all week."
+            ),
+            "After that, the fox walked slowly back to the forest, where it met an old \
+             gray owl. The owl said that was the best story it had heard all week."
+        );
+        for text in [
+            "Send it to Bob. Bob will know.",
+            "It works! It works really well.",
+            "Is it done? It is done. Good. Good work everyone.",
+        ] {
+            assert_eq!(lard(text), text);
+        }
+    }
+
+    /// Reported against 1.3.1-rc1: the first "Hello world" went and
+    /// ", hello world!" was typed.
+    #[test]
+    fn lard_repairs_the_punctuation_and_capital_a_deletion_leaves() {
+        assert_eq!(lard("Hello world, hello world!"), "Hello world!");
+    }
+
+    #[test]
+    fn lard_keeps_numbers_that_differ() {
+        for text in [
+            "between 10 and 20 people came",
+            "In 2025 and 2026 we shipped a lot.",
+            "It costs 4.50 dollars",
+        ] {
+            assert_eq!(lard(text), text);
+        }
+        assert_eq!(lard("a table for 2 for 2 people"), "a table for 2 people");
+    }
+
+    #[test]
+    fn lard_still_removes_a_restart_inside_a_sentence() {
+        assert_eq!(lard("I want I want to go"), "I want to go");
+        assert_eq!(
+            lard("Okay. I want I want to go home. That is all."),
+            "Okay. I want to go home. That is all."
+        );
+        assert_eq!(
+            lard("Can you can you hear me? I can hear you."),
+            "Can you hear me? I can hear you."
+        );
+        assert_eq!(
+            lard("We went to the the store. The store was closed."),
+            "We went to the store. The store was closed."
+        );
+    }
+
+    /// Run the removal step on hand-labeled text: `[word]` is a token the
+    /// model labeled. The real tagger supplies the tokens and sentences, and
+    /// its own labels are thrown away.
+    fn removal(labeled: &str) -> String {
+        let model = include_bytes!("../../assets/models/lard-disfluency-v1.vxdf");
+        let tagger = super::disfluency::DisfluencyTagger::from_bytes(model).unwrap();
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for (index, part) in labeled.split(['[', ']']).enumerate() {
+            if index % 2 == 1 {
+                spans.push(text.len()..text.len() + part.len());
+            }
+            text.push_str(part);
+        }
+        let mut tokens = tagger.tag(&text);
+        for token in &mut tokens {
+            token.disfluent = spans
+                .iter()
+                .any(|span| span.start <= token.start && token.end <= span.end);
+        }
+        super::remove_disfluencies(&text, &tokens)
+    }
+
+    #[test]
+    fn removing_a_sentence_opener_hands_on_its_capital() {
+        assert_eq!(removal("[Hello] [world], hello world!"), "Hello world!");
+        assert_eq!(removal("[The] the owl sat."), "The owl sat.");
+        assert_eq!(
+            removal("Okay. [I] [want] I want to go."),
+            "Okay. I want to go."
+        );
+        assert_eq!(
+            removal("[I] [need] [a] [flight][,] [no][,] I need a hotel"),
+            "I need a hotel"
+        );
+        // Lower case stays lower case: plain CTC output has no capitals.
+        assert_eq!(removal("[i] [want] i want to go"), "i want to go");
+        // A capital in the middle of a sentence is a name, not an opener.
+        assert_eq!(removal("so [I] I think so"), "so I think so");
+    }
+
+    #[test]
+    fn removing_the_end_of_a_sentence_leaves_no_space_before_the_mark() {
+        assert_eq!(
+            removal("an old gray [owl]. The owl said"),
+            "an old gray. The owl said"
+        );
+        assert_eq!(removal("We can go, [we] [can]."), "We can go.");
+        assert_eq!(removal("Is that it [it]? Yes."), "Is that it? Yes.");
+    }
+
+    #[test]
+    fn a_removed_word_takes_the_connector_that_closes_it() {
+        assert_eq!(
+            removal("I went to [the] [store], the store on Main Street"),
+            "I went to the store on Main Street"
+        );
+        assert_eq!(
+            removal("we could go, [we] [could], we could leave"),
+            "we could go, we could leave"
+        );
+        assert_eq!(removal("(see [above], above)"), "(see above)");
+    }
+
+    /// A label on a punctuation mark alone used to delete the mark and the
+    /// space after it, joining two words.
+    #[test]
+    fn a_labeled_punctuation_mark_is_not_removed() {
+        for text in [
+            "I need a flight[,] no, I need a hotel.",
+            "It is done[.] No more.",
+            "a push[-]to-talk tool",
+            "Wait[.].. what",
+        ] {
+            assert_eq!(removal(text), text.replace(['[', ']'], ""));
+        }
+    }
+
+    #[test]
+    fn only_whole_words_are_removed() {
+        for text in [
+            "It costs [4].50 dollars",
+            "[that]'s fine",
+            "a [well]-known tool",
+            "at [3]:30 today",
+        ] {
+            assert_eq!(removal(text), text.replace(['[', ']'], ""));
+        }
+        assert_eq!(removal("[That]['s] that's fine"), "That's fine");
+        assert_eq!(
+            removal("a [well][-][known] well-known tool"),
+            "a well-known tool"
+        );
+    }
+
+    #[test]
+    fn a_sentence_the_model_labels_whole_is_kept() {
+        assert_eq!(
+            removal("It is done. [Good]. Good work."),
+            "It is done. Good. Good work."
+        );
+        assert_eq!(removal("[No] [no] [no]"), "No no no");
+        assert_eq!(removal("[Yes][.] [Yes] yes I can."), "Yes. Yes I can.");
+    }
+
+    #[test]
+    fn removal_keeps_streaming_segment_separators() {
+        assert_eq!(removal(" [I] [want] I want to go "), " I want to go ");
+        assert_eq!(removal(" I want to go [go] "), " I want to go ");
+        assert_eq!(removal(" nothing labeled "), " nothing labeled ");
     }
 
     /// #566: "um" is the masculine indefinite article in Portuguese, so the
@@ -1059,6 +1465,23 @@ mod tests {
 
         assert_eq!(processor.process("I love RUST"), "I love Rust");
         assert_eq!(processor.process("rust is great"), "Rust is great");
+    }
+
+    #[test]
+    fn test_word_replacements_keep_dollar_sign() {
+        let config = make_config(
+            false,
+            &[
+                ("my home", "$HOME"),
+                ("five bucks", "$5"),
+                ("one dollar", "$1"),
+            ],
+        );
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("echo my home"), "echo $HOME");
+        assert_eq!(processor.process("it costs five bucks"), "it costs $5");
+        assert_eq!(processor.process("it costs one dollar"), "it costs $1");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::path::Path;
 use super::advanced_section::AdvancedState;
 use super::audio::AudioState;
 use super::engine::EngineState;
+use super::history_section::HistoryState;
 use super::hotkey::HotkeyState;
 use super::meeting_section::MeetingState;
 use super::notifications_section::NotificationsState;
@@ -116,6 +117,7 @@ pub struct App {
     pub text: Option<TextState>,
     pub vad: Option<VadState>,
     pub meeting: Option<MeetingState>,
+    pub history: Option<HistoryState>,
     pub notifications: Option<NotificationsState>,
     pub osd: Option<OsdState>,
     pub waybar: Option<WaybarState>,
@@ -180,6 +182,7 @@ impl App {
             text: None,
             vad: None,
             meeting: None,
+            history: None,
             notifications: None,
             osd: None,
             waybar: None,
@@ -210,6 +213,9 @@ impl App {
             }
             Section::Meeting if self.meeting.is_none() => {
                 self.meeting = MeetingState::load().ok();
+            }
+            Section::History if self.history.is_none() => {
+                self.history = HistoryState::load().ok();
             }
             Section::Notifications if self.notifications.is_none() => {
                 self.notifications = NotificationsState::load().ok();
@@ -275,14 +281,21 @@ impl App {
         match self.current_section {
             Section::Engine => self.engine.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
-            Section::Text => self
-                .text
-                .as_ref()
-                .is_some_and(|s| s.editing.is_some() || s.model_edit.is_some()),
+            Section::Text => self.text.as_ref().is_some_and(|s| {
+                s.editing.is_some() || s.model_edit.is_some() || s.language_edit.is_some()
+            }),
             Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Osd => self.osd.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Meeting => self
+                .meeting
+                .as_ref()
+                .is_some_and(|s| s.form.editing.is_some()),
+            Section::History => self
+                .history
+                .as_ref()
+                .is_some_and(|s| s.form.editing.is_some()),
             _ => false,
         }
     }
@@ -314,6 +327,7 @@ impl App {
             || self.text.is_some()
             || self.vad.is_some()
             || self.meeting.is_some()
+            || self.history.is_some()
             || self.notifications.is_some()
             || self.osd.is_some()
             || self.waybar.is_some()
@@ -353,6 +367,10 @@ impl App {
             count += 1;
         }
         if let Some(s) = self.meeting.as_mut() {
+            s.save();
+            count += 1;
+        }
+        if let Some(s) = self.history.as_mut() {
             s.save();
             count += 1;
         }

@@ -228,7 +228,7 @@
     },
     {
       "compiled": true,
-      "description": "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+      "description": "Opt in to the local English-only LARD model. Download it first with voxtype setup lard: without the model this stage is skipped and the other cleanup stages still run.",
       "engine": null,
       "file_value": null,
       "key": "text.lard_disfluency",
@@ -249,6 +249,20 @@
       "section": "Text Cleanup",
       "type": "string",
       "value": null
+    },
+    {
+      "choices": ["auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar"],
+      "compiled": true,
+      "description": "The language you dictate in (en, en-US, pt-BR), for cleanup that depends on it: LARD is English-only. Set it when a multilingual model detects the language automatically. auto declares nothing. It is not sent to the engine, and an engine language that is set or a single-language model wins over it.",
+      "engine": null,
+      "file_value": null,
+      "key": "text.language",
+      "label": "Dictation language",
+      "open": true,
+      "restart_required": true,
+      "section": "Text Cleanup",
+      "type": "enum",
+      "value": "auto"
     },
     {
       "compiled": true,

@@ -77,10 +77,7 @@ const SHELL_SUBDIR: &str = "voxtype/quickshell";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(voxtype::logging::env_filter("info"))
         .init();
 
     let raw_args: Vec<String> = env::args().skip(1).collect();

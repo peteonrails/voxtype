@@ -6,6 +6,7 @@
 //!
 //! Requires the user to be in the 'input' group.
 
+pub mod access;
 pub mod evdev_listener;
 
 use crate::config::HotkeyConfig;
@@ -26,6 +27,8 @@ pub enum HotkeyEvent {
     Released,
     /// The cancel key was pressed (abort recording/transcription)
     Cancel,
+    /// The paste-last key was pressed (send the last dictation again)
+    PasteLast,
 }
 
 /// Trait for hotkey detection implementations

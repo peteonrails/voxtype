@@ -47,6 +47,17 @@ state["values"] for exactly those keys and reject anything else (exit 2);
 `config validate-selection` exits 0, so the panel's restart flow runs through
 to `systemctl --user restart voxtype` (see fake-systemctl.py).
 
+state["calendar"] makes `meeting calendar` answer (detect-140's contract,
+0654756f), adds the Meeting section's calendar keys to the schema, with a
+key either side, and lists the iCal link in the schema's `secrets` (f2f27cc3). Absent, `meeting calendar` exits 2 like a CLI without it.
+It holds {"link": {"host", "events", "next", "last_error"} or None,
+"source_without_link": "command"|"plugin"|None}. `set-ics - --json` reads
+the link from stdin (an argv link is refused here, so a panel that passes it
+there fails) and records each one read in state["calendar_stdin"].
+state["calendar_set_fail"] is a stderr line to fail with (exit 1; the link
+is kept as it was). `clear --json` drops the link. state["calendar_keys"]
+adds the keys alone, as a schema from a CLI without `secrets`.
+
 Accept behavior is scripted per attempt by state["accept_script"]: "fail",
 "slow" (one progress line, then wait to be cancelled) or "ok". After the script
 runs out, attempts succeed.
@@ -100,7 +111,8 @@ FRONTENDS = ["auto", "gtk4", "native", "quickshell"]
 # config_set::ENGINE_NAMES: what the real select-model accepts.
 SELECTABLE = ("whisper", "parakeet", "moonshine", "sensevoice", "paraformer", "dolphin", "omnilingual",
               "cohere", "gguf", "openvino")
-SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads"}
+SETTABLE = {"osd.style", "osd.frontend", "parakeet.threads", "meeting.my_name", "meeting.view",
+            "meeting.audio.echo_guard"}
 
 
 def osd_status(state):
@@ -144,6 +156,16 @@ def schema(state):
          "engine": "parakeet", "compiled": True, "restart_required": True},
         model_type,
     ]
+    if state.get("lard") is not None:
+        # text.lard_disfluency as `config schema --json` prints it. `notice` is
+        # only present while the switch is on with nothing to run; a voxtype
+        # that predates the field never sends it.
+        lard = {"key": "text.lard_disfluency", "type": "bool", "section": "Text Cleanup",
+                "label": "LARD disfluency cleanup", "description": "", "value": True, "file_value": True,
+                "engine": None, "compiled": True, "restart_required": True}
+        if state["lard"].get("notice"):
+            lard["notice"] = state["lard"]["notice"]
+        keys.append(lard)
     if "cohere_models" in state:
         cohere = state.get("cohere_model", state["cohere_models"][0])
         keys.append({"key": "cohere.model", "type": "dynamic_enum", "source": "models", "section": "Engine",
@@ -180,10 +202,58 @@ def schema(state):
              "description": "Quickshell style name.", "value": style or "hud",
              "file_value": style, "engine": None, "compiled": True, "restart_required": True},
         ]
-    return {
+    if state.get("meeting_keys"):
+        # The 1.3.1 meeting entries, as `config schema --json` prints them.
+        my_name = value_of(state, "meeting.my_name")
+        view = value_of(state, "meeting.view", "auto")
+        guard = value_of(state, "meeting.audio.echo_guard", True)
+        keys += [
+            {"key": "meeting.my_name", "type": "string", "section": "Meeting", "label": "Your name",
+             "description": "Shown instead of \"You\" for your side of a meeting, in the view, exports, "
+                            "summaries and search.",
+             "value": my_name, "file_value": my_name, "engine": None, "compiled": True, "restart_required": True},
+            {"key": "meeting.view", "type": "enum", "choices": ["auto", "quickshell", "gtk4", "terminal", "none"],
+             "section": "Meeting", "label": "Meeting view",
+             "description": "Which meeting view opens: auto uses Quickshell, then the GTK4 window; terminal "
+                            "runs `meeting watch` and is never automatic.",
+             "value": view, "file_value": None, "engine": None, "compiled": True, "restart_required": False},
+            {"key": "meeting.audio.echo_guard", "type": "bool", "section": "Meeting", "label": "Echo guard",
+             "description": "Keep the call heard through your speakers out of your lines: drop mic lines that "
+                            "are only its echo, unless the mic level shows you speaking.",
+             "value": guard, "file_value": None, "engine": None, "compiled": True, "restart_required": True},
+        ]
+    if state.get("calendar") is not None or state.get("calendar_keys"):
+        def meeting_key(key, kind, label, value, **extra):
+            spec = {"key": key, "type": kind, "section": "Meeting", "label": label, "description": "",
+                    "value": value, "file_value": None, "engine": None, "compiled": True,
+                    "restart_required": False}
+            spec.update(extra)
+            return spec
+        keys += [
+            meeting_key("meeting.show_view_on_start", "bool", "Show meeting view on start", True),
+            meeting_key("meeting.calendar.command", "string", "Calendar command", ""),
+            meeting_key("meeting.calendar.window_mins", "int", "Calendar window", 10, min=0, max=120),
+            meeting_key("meeting.calendar.timeout_secs", "int", "Calendar timeout", 5, min=1, max=60),
+            meeting_key("meeting.view_opacity", "float", "View opacity", 0.8, min=0.2, max=1.0),
+        ]
+    doc = {
         "schema_version": 1, "voxtype_version": "1.2.0-rc4", "config_path": "",
         "engine": engine, "replacements": {}, "keys": keys,
     }
+    if state.get("calendar") is not None:
+        link = state["calendar"].get("link")
+        doc["secrets"] = [{
+            "key": "meeting.calendar.ics_link", "type": "secret", "section": "Meeting",
+            "label": "Calendar (iCal link)",
+            "description": "Your calendar's private iCal link. Meetings that start without a title you chose "
+                           "are named after the calendar event happening then.",
+            "help": LINK_HELP, "set": link is not None, "host": link.get("host") if link else None,
+            "last_error": link.get("last_error") if link else None,
+            "set_command": ["meeting", "calendar", "set-ics", "-", "--json"],
+            "clear_command": ["meeting", "calendar", "clear", "--json"],
+            "status_command": ["meeting", "calendar", "status", "--json"],
+        }]
+    return doc
 
 
 def models(state):
@@ -263,6 +333,65 @@ def omarchy_status(state):
     } | ({} if state.get("copy_dismissed") is None else {"copy_dismissed": state["copy_dismissed"]})
 
 
+LINK_HELP = ("Where to find your calendar's private iCal link:\n"
+             "  Google Calendar: Settings, your calendar, Integrate calendar,\n"
+             "    then \"Secret address in iCal format\".")
+
+
+def calendar(state, args):
+    cal = state.get("calendar")
+    if cal is None:
+        print("error: unrecognized subcommand 'calendar'", file=sys.stderr)
+        return 2
+    if args == ["status", "--json"]:
+        link = cal.get("link")
+        source = "calendar_link" if link else cal.get("source_without_link")
+        print(json.dumps({
+            "source": source,
+            "calendar_link": {
+                "set": link is not None,
+                "host": link.get("host") if link else None,
+                "fetched_at": link.get("fetched_at") if link else None,
+                "last_error": link.get("last_error") if link else None,
+                "events": link.get("events") if link else None,
+                "next": link.get("next") if link else None,
+            },
+            "command": "next-meeting --json" if source == "command" else None,
+            "plugin_command": "omarchy-next-meeting" if source == "plugin" else None,
+            "window_mins": 10,
+            "link_help": LINK_HELP,
+        }, indent=2))
+        return 0
+    if args[:1] == ["set-ics"]:
+        if args[1:2] != ["-"]:
+            print("error: the fake only takes the link on stdin", file=sys.stderr)
+            return 2
+        line = sys.stdin.readline()
+        state.setdefault("calendar_stdin", []).append(line)
+        save(state)
+        link = line.strip()
+        if state.get("calendar_set_fail"):
+            print("Error: " + state["calendar_set_fail"], file=sys.stderr)
+            return 1
+        if not link.startswith(("https://", "http://", "webcal://")):
+            print("Error: That is not a calendar link: it must start with https://, http:// or webcal://",
+                  file=sys.stderr)
+            return 1
+        host = link.split("://", 1)[1].split("/", 1)[0]
+        cal["link"] = {"host": host, "events": 2, "fetched_at": int(time.time()), "last_error": None,
+                       "next": {"title": "Design review", "start": "2026-11-13T15:00:00Z"}}
+        save(state)
+        print(json.dumps({"set": True, "host": host, "events": 2}))
+        return 0
+    if args == ["clear", "--json"]:
+        had = cal.get("link") is not None
+        cal["link"] = None
+        save(state)
+        print(json.dumps({"cleared": had}))
+        return 0
+    return 2
+
+
 def main():
     args = sys.argv[1:]
     with open(LOG, "a") as f:
@@ -291,6 +420,10 @@ def main():
         if state.get("osd_keys"):
             styles.append({"name": "pill", "description": "Compact pill"})
         print(json.dumps(styles))
+    elif args[:3] == ["meeting", "my-name", "--json"] and "my_name_suggestion" in state:
+        # The account's full name while my_name is unset, as the real one.
+        mine = value_of(state, "meeting.my_name")
+        print(json.dumps({"my_name": mine, "suggestion": None if mine else state["my_name_suggestion"]}))
     elif args[:2] == ["config", "validate-selection"]:
         return 0
     elif args[:2] in (["config", "set"], ["config", "unset"]) and len(args) >= 3 and args[2] in SETTABLE:
@@ -359,6 +492,8 @@ def main():
             save(state)
         else:
             return 2
+    elif args[:2] == ["meeting", "calendar"]:
+        return calendar(state, args[2:])
     elif args[:2] == ["setup", "migrate"]:
         if state.get("no_migrate"):
             print("error: unrecognized subcommand 'migrate'", file=sys.stderr)

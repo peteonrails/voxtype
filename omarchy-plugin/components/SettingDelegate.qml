@@ -35,6 +35,8 @@ Item {
   // about what the panel just did on this row's behalf.
   property string helpNote: ""
   property string noticeText: ""
+  // Shown in an empty text field (not for a custom enum value).
+  property string placeholder: ""
   property int labelColumnWidth: Style.space(280)
 
   // The form's keyboard cursor is on this row: ring the control so it is clear
@@ -428,12 +430,13 @@ Item {
 
     TextField {
       id: textField
+      objectName: "settingTextField"
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       visible: root.controlKind === "text"
       text: root.currentText
-      placeholderText: root.openEnum ? "Custom value" : ""
+      placeholderText: root.openEnum ? "Custom value" : root.placeholder
       hasCursor: root.highlighted
       onEditingFinished: {
         if (text === root.currentText) return

@@ -165,6 +165,26 @@ The deb, rpm and AUR packages also install the Omarchy Settings panel at
 links it into `~/.config/omarchy/plugins` on first start, or run
 `voxtype setup omarchy`. See the user manual's "Omarchy Settings panel" section.
 
+#### Development source package
+
+For unreleased fixes, the repository includes a [`voxtype-git` PKGBUILD](https://github.com/peteonrails/voxtype/blob/dev/packaging/arch-git/README.md)
+that builds the latest `dev` branch: the Whisper CPU and Vulkan builds, an ONNX
+build that uses the system ONNX Runtime, the GGUF workers, the OSD frontends
+and, from 1.3.0, the GTK4 meetings window. It is prepared for AUR publication
+by the upstream maintainer; until it is published, build it locally from a
+repository checkout:
+
+```bash
+cd packaging/arch-git
+makepkg -si
+```
+
+This replaces the installed stable package. Development builds may contain
+regressions and require compilation on each update. The package is tuned for
+the CPU it is built on, so build it on the machine that will run it. See the
+packaging README for included engines, optional runtime dependencies, CPU
+tuning, and rebuild instructions.
+
 ### Debian / Ubuntu
 
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
@@ -218,12 +238,20 @@ A flake ships every variant:
 # Imperative install
 nix profile install github:peteonrails/voxtype/v1.0.1#vulkan
 
-# Available outputs: default, vulkan, cuda, rocm, osdGtk4, osdNative
-nix build github:peteonrails/voxtype/v1.0.1#osdGtk4
+# Available outputs: default, vulkan, rocm, onnx, onnx-cuda, onnx-migraphx,
+# osd-gtk4, osd-native, meetings-gtk4
+nix build github:peteonrails/voxtype/v1.0.1#osd-gtk4
 
 # Or pin in your flake inputs
 inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";
 ```
+
+Each voxtype package includes the GGUF worker, the Quickshell QML tree (the OSD and the Voxtype Meetings view), the Voxtype Configuration and Voxtype Meetings desktop entries, and the `voxtype` icon. The GTK4 meetings window, which `voxtype meeting view` opens on desktops without Quickshell, is its own output, `meetings-gtk4`; install it beside the voxtype package so the daemon finds it on `PATH`. The wrapper puts the typing and clipboard tools on `PATH`, and appends ffmpeg, the PulseAudio client tools (`parec`, `pactl`, `paplay`), xdg-utils and bubblewrap for the meeting features, plus curl for model downloads and `which` for the output driver probes, so the system's own copies take precedence when present.
+
+Two things the meeting features use are not included:
+
+- **PipeWire tools** (`pw-dump` for call detection, `pw-play` for playback). They only work against a running PipeWire, and `services.pipewire.enable = true` already installs them.
+- **Quickshell.** The meeting view and the Quickshell OSD need it, so add `pkgs.quickshell` to your packages to use them.
 
 ### Linux arm64 (aarch64) — manual install
 
@@ -307,6 +335,7 @@ sudo install -Dm755 target/release/voxtype /usr/local/bin/voxtype
 | `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere` | Additional ONNX engines |
 | `osd-gtk4` | GTK4 on-screen visualizer |
 | `osd-native` | wgpu + egui on-screen visualizer |
+| `meetings-gtk4` | GTK4 meetings window (`voxtype-meetings-gtk4`) |
 
 Example: full ONNX engine set with MIGraphX:
 
@@ -376,7 +405,7 @@ For the other engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup 
 systemctl --user enable --now voxtype
 
 # Or run in foreground for testing
-voxtype daemon -v
+voxtype -v daemon  # -v goes before the subcommand
 ```
 
 ### 4. Wire up a hotkey
@@ -415,6 +444,21 @@ riverctl map -release normal Super V spawn 'voxtype record stop'
 KDE Plasma: System Settings → Shortcuts → Custom Shortcuts. See [USER_MANUAL.md](USER_MANUAL.md#kde-plasma) for the full walkthrough.
 
 GNOME / X11 / other: leave evdev enabled (`[hotkey] enabled = true`) and use the configured key.
+
+### 5. Dictation history (optional)
+
+Voxtype can keep a private record of your dictations: what the engine heard, the text after cleanup, and whether it reached the window. It is stored as one file per day in `~/.local/share/voxtype/history`, readable only by you, and kept for 30 days. Audio is not kept.
+
+A config written by `voxtype setup` turns history on. A config from before 1.3.1 keeps it off after an upgrade, and so does the system-wide `/etc/voxtype/config.toml`. `voxtype setup check` shows whether it is on and prints the command to change it:
+
+```bash
+voxtype setup check       # shows the history state
+voxtype history enable    # turn it on
+voxtype history disable   # turn it off
+voxtype history pause     # stop recording for a while, e.g. before dictating a password
+```
+
+See [USER_MANUAL.md](USER_MANUAL.md#voxtype-history) for searching, copying and correcting past dictations.
 
 ---
 
@@ -479,6 +523,7 @@ Or use the smoke-test command which exercises the full pipeline:
 voxtype info             # daemon state, active binary, engine, model
 systemctl --user status voxtype
 journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
 ```
 
 ---

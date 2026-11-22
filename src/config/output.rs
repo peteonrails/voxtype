@@ -23,6 +23,14 @@ pub struct OutputConfig {
     #[serde(default = "default_true")]
     pub fallback_to_clipboard: bool,
 
+    /// Keep the text of a transcription no output method could deliver, as
+    /// a file under the state directory's `undelivered/`, readable only by
+    /// the user, and name that file in the failure notification. Off means
+    /// no file is saved, the notification does not quote the text, and an
+    /// undelivered dictation is gone.
+    #[serde(default = "default_true")]
+    pub keep_undelivered_text: bool,
+
     /// Custom driver order for type mode (overrides default: wtype -> dotool -> ydotool -> clipboard)
     /// Specify which drivers to try and in what order.
     /// Example: ["ydotool", "wtype"] to prefer ydotool over wtype
@@ -97,10 +105,18 @@ pub struct OutputConfig {
     #[serde(default)]
     pub post_process: Option<PostProcessConfig>,
 
-    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v")
-    /// Defaults to "ctrl+v" if not specified
+    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v"),
+    /// or "auto" to send ctrl+v to GUI apps and `paste_keys_terminal` to terminals.
+    /// Defaults to "auto" if not specified
     #[serde(default)]
     pub paste_keys: Option<String>,
+
+    /// Keystroke paste mode sends when the focused window is a terminal
+    /// (detected on Hyprland, Sway and niri). Defaults to "ctrl+shift+v".
+    /// Setting it alongside an explicit `paste_keys` makes that keystroke
+    /// terminal-aware too.
+    #[serde(default)]
+    pub paste_keys_terminal: Option<String>,
 
     /// Keyboard layout for dotool (e.g., "de" for German, "fr" for French)
     /// Required for non-US keyboard layouts when using dotool
@@ -192,6 +208,7 @@ impl Default for OutputConfig {
         Self {
             mode: OutputMode::default(),
             fallback_to_clipboard: true,
+            keep_undelivered_text: true,
             driver_order: None,
             notification: NotificationConfig::default(),
             type_delay_ms: 0,
@@ -206,6 +223,7 @@ impl Default for OutputConfig {
             post_output_command: None,
             post_process: None,
             paste_keys: None,
+            paste_keys_terminal: None,
             dotool_xkb_layout: None,
             dotool_xkb_variant: None,
             eitype_xkb_layout: None,

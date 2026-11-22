@@ -57,7 +57,9 @@ pub enum ConfigAction {
         against that key before anything is written. Comments and unrelated \
         fields are preserved.\n\n\
         Word replacements are addressed by their spoken form: \
-        `text.replacements.<from>`.\n\n\
+        `text.replacements.<from>`. Segments may be quoted as in TOML, so \
+        `text.replacements.\"vox type\"` and `text.replacements.vox type` \
+        name the same entry; quote an entry that contains a dot.\n\n\
         Exit codes: 0 on success, 2 for an unknown key, an invalid value, or \
         a key belonging to an engine this binary wasn't built with, 1 for \
         filesystem and validation failures.\n\n\
@@ -80,7 +82,8 @@ pub enum ConfigAction {
     /// Remove a configuration value, restoring its built-in default
     #[command(long_about = "\
         Remove a configuration value, restoring its built-in default\n\n\
-        Removing a key that isn't present succeeds. Use this rather than \
+        Removing a key that isn't present succeeds (exit 0) and says it was \
+        not set, without touching the file. Use this rather than \
         setting an empty string — an empty value is rejected, because for \
         most keys it isn't the same thing as \"unset\".\n\n\
         Examples:\n  \

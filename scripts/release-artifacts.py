@@ -11,7 +11,9 @@ import sys
 
 VARIANTS = ("baseline", "cpu", "avx2", "avx512", "vulkan", "onnx", "onnx-avx2",
             "onnx-avx512", "onnx-cuda-12", "onnx-cuda-13", "onnx-migraphx")
-HELPERS = ("osd", "osd-gtk4", "osd-quickshell", "audio-bridge")
+HELPERS = ("osd", "osd-gtk4", "osd-quickshell", "audio-bridge", "meetings-gtk4")
+# Helpers that link GTK and are checked from a build-stage runtime proof.
+GTK_HELPERS = ("osd-gtk4", "meetings-gtk4")
 CROSS = ("avx512", "onnx-avx512")
 
 
@@ -72,8 +74,8 @@ def record(path, version, kind, source):
         proof.update(cargo_toml_sha256=digest(source / "Cargo.toml"),
                      cargo_lock_sha256=digest(source / "Cargo.lock"), executed=False)
     else:
-        if suffix != "osd-gtk4":
-            raise ValueError("runtime proof is only needed for the GTK-linked helper")
+        if suffix not in GTK_HELPERS:
+            raise ValueError("runtime proof is only needed for the GTK-linked helpers")
         proof.update(stdout=runtime_stdout(path, program, version), executed=True)
     proof_path(path).write_text(json.dumps(proof, indent=2) + "\n")
 
@@ -82,7 +84,7 @@ def check(path, version):
     suffix, program = identity(path, version)
     if not os.access(path, os.X_OK):
         raise ValueError("binary is not executable: " + str(path))
-    if suffix in CROSS or suffix == "osd-gtk4" and proof_path(path).is_file():
+    if suffix in CROSS or suffix in GTK_HELPERS and proof_path(path).is_file():
         proof = json.loads(proof_path(path).read_text())
         expected_kind = "cross-compiled-manifest" if suffix in CROSS else "runtime"
         if any(proof.get(k) != v for k, v in {

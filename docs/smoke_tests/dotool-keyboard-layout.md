@@ -17,6 +17,7 @@ voxtype record start && sleep 2 && voxtype record stop
 
 # 4. Verify layout is applied (check dotool receives DOTOOL_XKB_LAYOUT env var):
 journalctl --user -u voxtype --since "30 seconds ago" | grep -i "keyboard layout"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -i "keyboard layout"
 
 # 5. Restore wtype
 sudo mv /usr/bin/wtype.bak /usr/bin/wtype

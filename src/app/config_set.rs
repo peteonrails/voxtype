@@ -44,6 +44,14 @@ fn restart_hint(restart_required: bool) {
     }
 }
 
+/// A write that succeeded but left something switched on that cannot run.
+/// On stderr so scripts reading stdout are unaffected; the exit code stays 0.
+fn print_warning(warning: Option<&str>) {
+    if let Some(warning) = warning {
+        eprintln!("warning: {warning}");
+    }
+}
+
 /// Dispatcher for `voxtype config set <KEY> <VALUE>`.
 pub(crate) fn run_config_set(
     cli_override: Option<PathBuf>,
@@ -60,6 +68,7 @@ pub(crate) fn run_config_set(
                 out.path.display()
             );
             restart_hint(out.restart_required);
+            print_warning(out.warning.as_deref());
             Ok(())
         }
         Err(e) => fail(e),
@@ -70,9 +79,16 @@ pub(crate) fn run_config_set(
 pub(crate) fn run_config_unset(cli_override: Option<PathBuf>, key: &str) -> anyhow::Result<()> {
     let path = resolve_config_path_for_write(cli_override)?;
     match config_set::unset_key(path, key) {
+        Ok(out) if !out.changed => {
+            // Not an error: the key already has its default, which is what
+            // `config get` reports for it too (exit 0).
+            println!("{} is not set in {}", out.key, out.path.display());
+            Ok(())
+        }
         Ok(out) => {
             println!("Unset {} in {}", out.key, out.path.display());
             restart_hint(out.restart_required);
+            print_warning(out.warning.as_deref());
             Ok(())
         }
         Err(e) => fail(e),

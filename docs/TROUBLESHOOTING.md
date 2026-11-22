@@ -11,6 +11,26 @@ download, config-key workaround or service restart is required merely to browse.
 
 Solutions to common issues when using Voxtype.
 
+## Start Here: `voxtype doctor`
+
+Before reading further, run:
+
+```bash
+voxtype doctor
+```
+
+It checks your model files, VAD model, LARD cleanup model, GPU runtime libraries, audio device,
+output tools, display environment of the systemd service, input device
+access, notifications, OSD and meeting-mode tools, and the systemd unit, and
+prints the exact fix for anything that is wrong (`✗` means broken, `!` means
+degraded). Only features enabled in your config are checked. Most of the
+problems below show up there with the fix on the next line.
+
+The daemon also runs the quick part of these checks at startup and sends one
+desktop notification listing any errors. If you got a "Voxtype: N problems
+need attention" notification, `voxtype doctor` shows the same problems in
+full.
+
 ## Ultra is missing, cannot download, or is not the current model
 
 Use `voxtype info models --json` to distinguish catalogued, supported and locally
@@ -20,8 +40,8 @@ default. Install a compatible build deliberately rather than renaming a file.
 An existing explicit v3 selection is intentionally preserved, even when Ultra
 weights are installed. Select Ultra explicitly to change it.
 
-Ultra's pinned upstream Hugging Face downloads need network access to that host;
-they do not use an unpublished R2 object. Size/hash rejection does not replace an
+Ultra downloads come from Voxtype's model mirror at `models.voxtype.io`, like
+every other model, and need network access to that host. Size/hash rejection does not replace an
 existing good model. Retry a failed explicit download, not a settings save.
 The automatic, read-only Ultra language display is expected: this runtime has
 no selectable language hint for Parakeet. No translation or streaming is added.
@@ -39,7 +59,9 @@ no selectable language hint for Parakeet. No translation or streaming is added.
   step. A failed download needs network access to the model host; a busy daemon
   needs the current dictation or meeting to finish first. If the restarted
   daemon did not come up, voxtype puts the previous config back and restarts it;
-  `journalctl --user -u voxtype -n 50` shows why the new model failed.
+  `journalctl --user -u voxtype -n 50` shows why the new model failed (or
+  `journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50` when
+  [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
 - **Without a terminal**, accepting needs `--yes`.
 - **The offer still shows after declining.** That is intended: declined offers
   stay listed, marked declined, so you can accept later. The tooltip line goes
@@ -98,6 +120,27 @@ Upgrade to a build where `voxtype status --format json --extended` reports
 `gguf_backend = "auto"` the label reads `GGUF (transcribe.cpp)` until the worker
 has loaded the model and reported Vulkan or CPU; with `on_demand_loading = true`
 that happens at the first dictation.
+
+## `voxtype info accel` with a GGUF model
+
+A `.gguf` model runs in `voxtype-gguf-worker`, not in the main binary, so the
+binary variant, the daemon's journal and the daemon's VRAM say nothing about
+it. `voxtype info accel` reports what the worker bound instead: `State: gpu`,
+the `Backend` (`vulkan`, `cuda`, `rocm` or `metal`) and the `Device`, or
+`cpu-fallback` with backend `cpu` when the model runs on the CPU. The evidence
+line says why: `<engine>.gguf_backend = "cpu"` asks for the CPU, while `auto`
+lands there when the worker finds no usable GPU.
+
+Before the first dictation, or with `on_demand_loading = true`, the worker has
+not loaded the model yet. The state is `unknown` and the backend is the
+configured `gguf_backend`. Dictate once and run it again.
+
+`voxtype setup gpu --status` gives GGUF-specific advice too. The ONNX and
+Vulkan variants ship a worker that can use Vulkan, so the backend is set with
+`voxtype config set <engine>.gguf_backend vulkan` (or `cpu`) and
+`setup gpu --enable` is not needed. The CPU variants ship a CPU-only worker;
+there, `sudo voxtype setup gpu --enable` switches to the Vulkan variant and its
+worker.
 
 ## Parakeet is compiled but startup requests an unavailable ONNX feature
 
@@ -179,7 +222,7 @@ graphical frontend is installed, install a supported terminal or run
   `voxtype setup omarchy --restart-shell`.
 - **Removed it and want it back.** Run `voxtype setup omarchy`. The daemon never
   re-adds it on its own.
-- **"Voxtype Settings could not run ..."** The panel could not start the voxtype
+- **"The Voxtype panel could not run ..."** The panel could not start the voxtype
   binary it names, so it shows nothing rather than stale values. If the message
   names a `dev.json` (next to the plugin's `manifest.json`), that file points at
   a build that no longer exists: fix the path, or delete the file to use
@@ -191,10 +234,105 @@ graphical frontend is installed, install a supported terminal or run
   availability, input devices, OSD styles) is left empty rather than showing old
   entries. Run the same command with `--json` in a terminal for the full error.
 
+## Dictation history
+
+### No entries after upgrading
+
+Existing configurations keep history off unless you choose it. Run
+`voxtype history status --json`, then `voxtype history enable` if you want
+dictations stored. Enable and resume are different: an enabled but paused
+history still writes nothing. The daemon reloads valid history settings without
+a restart. Explicit daemon flags or environment overrides can keep the
+effective setting different from the saved file.
+
+Commands return nonzero on failure. If a config write fails validation or the
+config cannot be read, do not assume that history was paused or disabled. Fix
+the reported config error and read the state back before private dictation.
+
+### An exclusion did not stop an entry
+
+Exclusions use the focused app's class or app ID, not its window title. They
+apply when either the starting or ending window is identified as excluded.
+Unknown focus is still recorded: unsupported desktops, a failed compositor
+connection, a timeout or an unrecognized response can leave the app unknown.
+A password manager running inside a browser is seen as the browser. Pause
+history before sensitive dictation when app identification cannot protect it.
+Turning `record_app` off hides the recorded app field; it does not disable
+exclusion checks or make unknown focus fail closed.
+
+### History files exist but search is missing or stale
+
+Day files are authoritative; `index.db` is derived. Run
+`voxtype history reindex --json` and inspect both stdout and its exit status.
+Unreadable day files are reported, not silently certified as a complete rebuild.
+Days older than a week can be `.jsonl.gz`; do not rename them to `.jsonl`.
+
+A symlinked history directory or day file is rejected rather than followed.
+Rewrites use exclusively created, randomly named temporary files instead of
+opening a pre-existing temporary path. Check the path reported by the error. Do not solve
+this by broadly changing permissions or recursively deleting files. Preserve
+the data before correcting an unintended link or ownership problem.
+
+### A delete reports that SQLite readers block WAL cleanup
+
+The authoritative file change may already have completed, but cleanup is not
+finished. Close other history and meeting views, then run
+`voxtype history reindex --json` and require a successful exit. A successful
+file rewrite alone does not mean old WAL pages were cleared. Filesystem
+snapshots, backups and previously allocated disk blocks are outside SQLite's
+secure-delete guarantee; use full-disk encryption for data at rest.
+
+### A correction is refused for a newer schema
+
+Upgrade Voxtype before editing that entry. The original file is left unchanged
+so unknown nested fields are not lost. An empty correction is intentional: it
+must not restore the original text when copying or re-sending.
+
+### `history copy` or `history paste` says there is no text
+
+The entry is empty: the engine returned nothing, or you saved an empty
+correction. There is nothing to copy or type, so the command exits nonzero
+and leaves the clipboard unchanged. Give the entry text with
+`voxtype history correct <ID> "TEXT"` if you want to copy it.
+
+## Meeting view
+
+The meeting view (in the Omarchy plugin and in voxtype's Quickshell shell) says
+what is wrong instead of showing an empty pane:
+
+- **"Voxtype is not running"**: the daemon is down. Start it with
+  `systemctl --user start voxtype`. Past meetings still list and open.
+- **"Voxtype is running without its meeting socket"**: the daemon answers but
+  does not publish `$XDG_RUNTIME_DIR/voxtype/meeting.sock`, usually because it
+  is older than 1.3.0. Update voxtype and `systemctl --user restart voxtype`.
+- **"Could not run voxtype. Is voxtype installed and on PATH?"**: the shell
+  cannot start the voxtype command. In the Omarchy plugin, check `dev.json` as
+  for the Settings panel above.
+- **"This voxtype is too old for …"**: the command for notes, Ask, summaries or
+  moving lines does not exist in the installed voxtype. Update it, then reopen
+  the view (and restart the shell after an install, so it loads the new view).
+- **"No agent or local model was found"** on the Ask or Summary tab: questions
+  and summaries need Claude Code or Codex on `PATH`, or Ollama for a local
+  model. `voxtype meeting assistant status` shows what was found and why an
+  agent cannot be used. Codex needs `bwrap` to run in its jail; without it the
+  agent menu shows it disabled, with the reason.
+- **"Copying needs wl-copy"**: install `wl-clipboard`.
+- **"Couldn't write the summary"** at the top of the Summary tab: the backend
+  that writes summaries failed, and the card says which and why. The chip in
+  the tab's header names that backend; it can be a local model (an older
+  `[meeting.summary]` backend such as Ollama) even when questions go to an
+  agent. "status code 500" from `localhost:11434` means Ollama is running but
+  failed: check `ollama list` for the model, or choose **Use Claude instead**
+  (shown when a local model failed and you have allowed an agent), which runs
+  `voxtype meeting summarize <id> --agent claude` for this meeting only.
+
 ## Table of Contents
+
+- [Start Here: `voxtype doctor`](#start-here-voxtype-doctor)
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
 - [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
+- [Hotkey Detection with Key Remappers (keyd)](#hotkey-detection-with-key-remappers-keyd)
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
@@ -205,10 +343,19 @@ graphical frontend is installed, install a supported terminal or run
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
   - [Edit-list post-processing keeps the original text](#edit-list-post-processing-keeps-the-original-text)
+  - [Copied to clipboard, paste manually](#copied-to-clipboard-paste-manually-notification)
+  - [Transcription not delivered](#transcription-not-delivered-notification)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
+- [Meeting Audio and Post-Meeting Command](#meeting-audio-and-post-meeting-command)
+  - [The recording announcement only played on my speakers](#the-recording-announcement-only-played-on-my-speakers)
+  - [The announcement used the built-in voice instead of Jessica](#the-announcement-used-the-built-in-voice-instead-of-jessica)
+- [Meeting Assistant: Summaries Don't Appear](#meeting-assistant-summaries-dont-appear)
+- [No Meeting Window Appears](#no-meeting-window-appears)
+- [Action Items: Todoist and Reminders](#action-items-todoist-and-reminders)
+- [Meeting Titles: The Calendar Title Was Not Used](#meeting-titles-the-calendar-title-was-not-used)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -381,6 +528,25 @@ Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout
 
 ---
 
+## Hotkey Detection with Key Remappers (keyd)
+
+### Right Ctrl, Right Shift, or Right Meta arrives as the left key
+
+**Symptoms:** With [keyd](https://github.com/rvaiya/keyd) running, a hotkey set to `RIGHTCTRL`, `RIGHTSHIFT`, or `RIGHTMETA` never fires, and a `modifiers` entry for one of those keys never matches. `sudo evtest` on the "keyd virtual keyboard" device shows `KEY_LEFTCTRL` (or `KEY_LEFTSHIFT` / `KEY_LEFTMETA`) when you press the right-hand key, and never the right-hand name.
+
+**Cause:** keyd grabs the physical keyboard and re-emits every event from its own "keyd virtual keyboard" device, which is the device evdev hotkey detection reads. keyd's built-in defaults treat the left and right variants of Ctrl, Shift, and Meta as one key: `rightcontrol = control`, `rightshift = shift`, and `rightmeta = meta` are bound to the matching modifier layer, and that layer emits the **left** key. This is keyd's design, not a voxtype bug. The defaults are the same in keyd v2.6.0, the latest release at the time of writing, so upgrading keyd does not change it.
+
+`RIGHTALT` is not merged by default: it maps to keyd's `altgr` layer, which emits `RIGHTALT`. It is affected only if your keyd config binds it to another layer (for example `rightalt = layer(alt)` or `rightalt = overload(alt, ...)`), in which case holding it emits `LEFTALT`.
+
+**Check what voxtype receives:** run `sudo evtest`, pick the "keyd virtual keyboard" device, press your key, and read the event name. That name is what `[hotkey] key` has to match.
+
+**Workarounds:**
+
+- Use a key that keyd does not remap, such as `SCROLLLOCK`, `PAUSE`, or `F13` through `F24`. A key with no binding in your keyd config passes through unchanged.
+- If any Ctrl key is acceptable, set `key = "LEFTCTRL"`. Under keyd, it fires for both Ctrl keys.
+
+---
+
 ## Permission Issues
 
 ### "Cannot open input device" or "Permission denied"
@@ -396,6 +562,15 @@ sudo usermod -aG input $USER
 # Verify membership
 groups | grep input
 ```
+
+When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: built-in hotkey unavailable" desktop notification. It is shown once, not on every start, and again only if the cause changes or the built-in hotkey breaks after having worked; the daemon log has the warning on every start. The notification names the cause:
+
+- **Not in the `input` group:** run `sudo usermod -aG input $USER`, then log out and back in.
+- **In the group, but this session started before you were added:** `/etc/group` lists you, but the running daemon does not have the group yet. Log out completely and back in, or reboot. A systemd user service keeps the old groups until every session of yours has ended.
+- **In the group and still denied:** the device nodes have unusual ownership or permissions. Check `ls -l /dev/input/event*`.
+- **No keyboard found:** nothing in `/dev/input` looks like a keyboard. Plug one in and restart voxtype.
+
+If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`. If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
 
 ### "Failed to access /dev/input/event*"
 
@@ -429,6 +604,14 @@ systemctl --user status ydotool
 ---
 
 ## Audio Problems
+
+### "Voxtype: microphone not found" or "could not open the microphone" notification
+
+The daemon posts this notification when you start a recording and the microphone can't be opened. It appears once per distinct failure (again after five minutes if the failure persists), so pressing the hotkey repeatedly doesn't stack notifications. The full error is in the log (`journalctl --user -u voxtype`, or `journalctl _SYSTEMD_USER_UNIT=voxtype.service` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
+
+- **microphone not found:** the device named in `[audio] device` isn't connected. List what is available with `voxtype info devices`, then `voxtype config set audio.device <name>` (or `default` to follow the system default) and restart voxtype.
+- **no microphone found:** the system has no default input source. Plug in or unmute a microphone and check `wpctl status` or `pactl list sources short`.
+- **could not open the microphone:** the audio server refused the stream. Check that PipeWire or PulseAudio is running: `systemctl --user status pipewire wireplumber`.
 
 ### "No audio captured" or empty transcriptions
 
@@ -497,13 +680,71 @@ aplay test.wav
 
 ### Recording stops unexpectedly
 
-**Cause:** `max_duration_secs` limit reached.
+**Cause:** `max_duration_secs` limit reached. Voxtype shows a "Recording Limit Approaching" notification shortly before the limit (30 seconds before for limits of two minutes or more, 10 seconds before for shorter ones) and a "Recording Limit Reached" notification when it stops. What was captured up to the limit is still transcribed.
 
 **Solution:** Increase the limit:
 ```toml
 [audio]
 max_duration_secs = 120  # 2 minutes
 ```
+
+Or from the command line: `voxtype config set audio.max_duration_secs 1800`, or `voxtype --max-duration 1800` for a single daemon run.
+
+### Transcription failed and I lost my dictation
+
+A recording whose transcription fails is not thrown away. Voxtype saves it as a WAV file in `~/.local/state/voxtype/failed-audio/` (or `$XDG_STATE_HOME/voxtype/failed-audio/`), logs the path, and shows a "Transcription Failed" notification with the command to retry it:
+
+```bash
+voxtype transcribe ~/.local/state/voxtype/failed-audio/recording-20261020-143015.wav
+```
+
+The 20 most recent failed recordings are kept; older ones are removed automatically. The directory and the files in it are private to your user: other accounts on the machine can't read them.
+
+To stop Voxtype keeping these recordings:
+
+```bash
+voxtype config set audio.keep_failed_recordings false
+systemctl --user restart voxtype
+```
+
+With it off nothing is written, so a dictation whose transcription fails can't be retried, and the "Transcription Failed" notification says the recording was not kept. Recordings saved before you turned it off stay until you delete them: `rm -r ~/.local/state/voxtype/failed-audio/`.
+
+### Meeting transcript has no remote participants
+
+**Cause:** Meeting mode records other participants through a PulseAudio/PipeWire monitor source via `pactl` and `parec`. When those tools, the PulseAudio server, or a monitor source are missing, the meeting records the microphone only. The daemon shows a "Meeting started with limitations" notification saying which one.
+
+**Solution:** Install `libpulse` (Arch) or `pulseaudio-utils` (Debian, Ubuntu, Fedora); on PipeWire, make sure `pipewire-pulse` is running; or set `[meeting.audio] loopback_device` to a source from `pactl list short sources`. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for the other meeting notifications.
+
+### One side of the meeting is not being transcribed
+
+**Symptom:** A notification with this title during a meeting (or "Neither side of the meeting is being transcribed" when it is both), a `Not transcribed:` line in `voxtype meeting status`, or a transcript that has one side of the conversation and nothing from the other, although that side was talking.
+
+**Cause:** Each chunk of a track has to pass a speech check before it is transcribed: 300 ms of it louder than `[meeting.audio] vad_threshold` (default `0.01`). When the threshold is above the level a track reaches, every chunk of it is skipped as silence. The usual way to get there is raising `vad_threshold` to keep noise out and going past the level of your own voice. The check to see it for yourself:
+
+```bash
+voxtype config get meeting.audio.vad_threshold
+voxtype meeting status     # Not transcribed: Your microphone has sound, but nothing you say is transcribed: it reaches about 0.052 and [meeting.audio] vad_threshold is 0.11. ...
+journalctl --user -u voxtype | grep "not being transcribed"
+```
+
+**Solution:** Lower the threshold with the command the notification gives, then restart voxtype once the meeting is over (the running meeting keeps the threshold it started with, and a restart interrupts it):
+
+```bash
+voxtype config set meeting.audio.vad_threshold 0.01
+systemctl --user restart voxtype
+```
+
+If the meeting keeps its audio (`[meeting] retain_audio = true`), get the missing lines back after it ends:
+
+```bash
+voxtype meeting retranscribe latest
+```
+
+If the notification says the threshold is already at or below the default, the track is too quiet: raise the microphone's input volume, or the call's volume in the app that plays it, or lower the threshold to the value the notification gives. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for when it is raised and where else it shows.
+
+The notification is shown whatever `[meeting] status_notifications` is set to, like the other meeting error notifications; it comes at most once per side per meeting.
+
+The notification does not cover a track with no sound at all: a muted or wrong microphone, a loopback that records nothing, or an echo canceller that delivers silence. Check those with `voxtype meeting soundcheck`.
 
 ---
 
@@ -570,15 +811,36 @@ is installed.
 
 **Cause:** Whisper model not downloaded or wrong path.
 
+The daemon also posts a "model missing" or "model failed to load" notification naming the engine and model, for every engine, either when a recording needs the model (on-demand loading) or when the daemon fails to start because of it. Under systemd, the startup notification is posted once, not on every automatic restart.
+
 **Solution:**
 ```bash
 # Download the model
 voxtype setup --download
 
-# Or manually download
+# Download a specific model, for any engine
+voxtype setup --download --model parakeet-tdt-0.6b-v3
+
+# Pick an installed model interactively
+voxtype setup model
+```
+
+Whisper models download from Voxtype's model mirror at `models.voxtype.io`, and
+each file is checked against the SHA-256 in the mirror's manifest before it is
+saved. A download that does not match is deleted and the command fails, so a
+partial or corrupted file never ends up where the daemon looks for it. If the
+download fails, check that the machine can reach `https://models.voxtype.io`
+(for example `curl -sI https://models.voxtype.io/whisper/base.en/manifest.json`).
+
+To download by hand instead, fetch the file and compare its SHA-256 with the
+one listed in the manifest:
+
+```bash
 mkdir -p ~/.local/share/voxtype/models
 curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
-    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+    https://models.voxtype.io/whisper/base.en/ggml-base.en.bin
+curl -s https://models.voxtype.io/whisper/base.en/manifest.json   # lists the sha256
+sha256sum ~/.local/share/voxtype/models/ggml-base.en.bin
 ```
 
 ### Punctuation/casing stays lowercase or logs a model warning
@@ -607,9 +869,9 @@ voxtype setup --download --model <model-name>
 
 # Or fetch just the missing file directly (note: NOT identical across model
 # sizes -- large-v3/large-v3-turbo use 128 mel bins, everything else uses 80,
-# so fetch it from the specific model's own repo, not a different one's)
+# so fetch it from the specific model's own directory, not a different one's)
 curl -Lo ~/.local/share/voxtype/models/<model-dir>/preprocessor_config.json \
-    https://huggingface.co/<org>/<model-repo>/resolve/main/preprocessor_config.json
+    https://models.voxtype.io/openvino/<model-dir>/preprocessor_config.json
 ```
 
 ### OpenVINO: setup prints "Compiling ... for Intel NPU" and takes minutes, or ends with a warning
@@ -625,6 +887,28 @@ voxtype setup --download --model <model-name>
 ```
 
 Setup skips the compile when the model's cache blob already exists, so rerunning after a successful compile is cheap.
+
+### ONNX engines run on CPU despite an NVIDIA GPU (cuDNN missing)
+
+**Symptoms:** `voxtype-onnx-cuda` is installed and selected, but transcription is slow, and the journal shows:
+
+```
+Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file
+```
+
+**Cause:** ONNX Runtime's CUDA execution provider links against cuDNN 9, which is a separate package from the CUDA toolkit. Without it the provider cannot load and every ONNX engine (Parakeet, Moonshine, SenseVoice and the rest) runs on CPU.
+
+Voxtype reports this at daemon start with a "GPU unavailable, using CPU" notification, in `voxtype info accel` (state `cpu-fallback` with `fix:` lines), and in `voxtype setup gpu --status`.
+
+**Solution:** Install cuDNN 9, then restart the daemon (`systemctl --user restart voxtype`):
+
+```bash
+# Arch
+sudo pacman -S cudnn
+
+# Debian/Ubuntu/Fedora: from NVIDIA's CUDA repository, matching your variant
+sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cuda-13
+```
 
 ### Voxtype crashes during transcription (Linux)
 
@@ -754,7 +1038,7 @@ min_speech_duration_ms = 50  # Accept shorter speech segments (default: 100)
 
 ### VAD model not found (Whisper VAD backend)
 
-**Symptom:** Error about missing VAD model when using `backend = "whisper"` or `backend = "auto"` with the Whisper engine.
+**Symptom:** A "Voxtype: voice activity detection is off" notification when the daemon starts, with `backend = "whisper"`. Silent recordings get transcribed, sometimes as made-up text. With `backend = "auto"` and the Whisper engine, the daemon instead logs `Whisper VAD unavailable, [vad] backend = "auto" falls back to Energy VAD` and keeps filtering silence with Energy VAD.
 
 **Solution:** Download the Silero VAD model:
 
@@ -1049,7 +1333,7 @@ positions.
 Verify:
 
 ```bash
-voxtype daemon -vv  # debug logs
+voxtype -v daemon  # debug logs
 # After a Russian transcription you should see:
 # DEBUG Auto layout for eitype: language='ru' -> layout='ru'
 # DEBUG Auto variant for eitype: language='ru' -> variant='phonetic'
@@ -1101,6 +1385,48 @@ systemctl --user status ydotool
 # Check for errors
 journalctl --user -u ydotool
 ```
+
+### "Copied to clipboard, paste manually" notification
+
+**Symptom:** Instead of typing, voxtype shows a notification titled "Voxtype: copied to clipboard, paste manually" (the first time) or "Copied to clipboard, paste manually" (later dictations).
+
+**Cause:** None of the typing tools in the output chain (wtype, eitype, dotool, ydotool) could be used, so voxtype put the text on the clipboard instead. The first notification after the daemon starts lists each tool and why it was skipped, with the fix, for example:
+
+```
+Voxtype could not type the text, so it is on the clipboard.
+wtype: not installed. Fix: sudo pacman -S wtype
+eitype: not installed. Fix: cargo install eitype
+dotool: not installed. Fix: install it from https://sr.ht/~geb/dotool/
+ydotool: ydotoold is not running. Fix: systemctl --user enable --now ydotool
+```
+
+**Solution:** Apply the fix for one of the listed tools, then try again. Paste the current text with Ctrl+V (Ctrl+Shift+V in most terminals). The warning is shown once per problem per daemon run; the full reason is also in `journalctl --user -u voxtype` (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
+
+If you set `mode = "clipboard"` or a `driver_order` with only clipboard drivers, voxtype does not warn: the clipboard is what you asked for.
+
+### "Transcription not delivered" notification
+
+**Symptom:** A critical notification titled "Voxtype: transcription not delivered".
+
+**Cause:** Every output method failed, including the clipboard (or the clipboard fallback is off). The notification lists what failed and how to fix it, and includes the text.
+
+**Solution:** Nothing is lost. Each undelivered transcription is saved as its own file in `~/.local/state/voxtype/undelivered/` (or `$XDG_STATE_HOME/voxtype/undelivered/`), named by date and time, readable only by you, and kept across logouts and reboots. The newest 200 are kept. The notification names the exact file. To see the latest one:
+
+```bash
+ls -t ~/.local/state/voxtype/undelivered/ | head
+cat "$(ls -t ~/.local/state/voxtype/undelivered/*.txt | head -1)"
+```
+
+Then install the tool the notification names.
+
+To stop Voxtype keeping undelivered transcriptions:
+
+```bash
+voxtype config set output.keep_undelivered_text false
+systemctl --user restart voxtype
+```
+
+With it off no file is saved, and the notification no longer names a file or shows the text (notification daemons keep a log of what they display), so a dictation that can't be delivered is lost. The notification still lists what failed and how to fix it, and says the text was not kept. Files saved before you turned it off stay until you delete them: `rm -r ~/.local/state/voxtype/undelivered/`.
 
 ### Text not typed / nothing happens
 
@@ -1168,8 +1494,9 @@ type_delay_ms = 10  # Try 10-50ms
 **Symptom:** Dictating text with non-ASCII characters (umlauts, accents, ß)
 into GTK applications (GNOME Terminal, GNOME Text Editor) delivers them
 clustered at the start of the output: `Müll äöüß` arrives as `üäöüß Mll `.
-The log (`journalctl --user -u voxtype`) shows the correct transcription,
-and Chrome or other non-GTK apps receive the same text correctly. Short
+The log shows the correct transcription once
+[debug logging](#enable-verbose-logging) is on (the text is not logged by
+default), and Chrome or other non-GTK apps receive the same text correctly. Short
 dictations often arrive intact, longer ones reliably fail.
 
 **Cause:** IBus, GNOME's default input method, reorders non-ASCII key
@@ -1209,6 +1536,44 @@ echo "test" | wl-copy
 wl-paste
 ```
 
+### Ctrl+V pastes an image in Codex, or a ^V in a terminal
+
+**Symptom:** In paste mode, dictation into a terminal never arrives. The
+Codex CLI reports that it found no image on the clipboard, a shell prints
+nothing or a literal `^V`, or tmux waits for the rest of a key sequence.
+
+**Cause:** Paste mode sent Ctrl+V. Terminals don't treat Ctrl+V as paste:
+they pass it to the running program, and Codex uses it to paste an image,
+readline to insert the next key literally.
+
+**Solution:** Let voxtype pick the keystroke per window:
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"   # or remove paste_keys entirely
+```
+
+On Hyprland, Sway and niri, `auto` sends `paste_keys_terminal` (default
+Ctrl+Shift+V) when a terminal has focus and Ctrl+V elsewhere. If a
+terminal still gets Ctrl+V:
+
+1. Check that the terminal is detected. On Hyprland run
+   `hyprctl activewindow -j` with the terminal focused: it needs a
+   `terminal` (or `terminal*`) tag, or a class voxtype knows. For an
+   unknown terminal, add a Hyprland window rule that gives its class the
+   `terminal` tag (Omarchy's rule is in
+   `~/.local/share/omarchy/default/hypr/apps/terminals.lua`).
+2. Check which keystroke your terminal pastes the clipboard with. If it
+   isn't Ctrl+Shift+V, set it, for example
+   `paste_keys_terminal = "shift+insert"` for Omarchy's terminals.
+3. Run `voxtype -vv` and look for `Focused window terminal check` and
+   `Text pasted via clipboard + ...` in the log.
+
+On desktops without detection (GNOME, KDE, X11), pick one keystroke that
+works in both places, such as `paste_keys = "shift+insert"` if your
+terminals map it to the clipboard, or switch to type mode.
+
 ### Clipboard not restored after paste
 
 **Cause:** The restore delay may be too short for your application, or `wl-paste` is not installed.
@@ -1230,13 +1595,49 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 3. On X11, make sure `xclip` is installed for clipboard restoration support.
 
+### "Post-processing failed", "timed out", "command not found", "returned nothing" or "edit list rejected"
+
+**Cause:** The `[output.post_process]` command (or a profile's `post_process_command`) didn't produce cleaned text, so Voxtype typed the original transcription instead. The notification says which case it was.
+
+**Solution:**
+- **Command not found:** install the program, or use its full path in `command`. A daemon started by systemd may not have the same `PATH` as your shell.
+- **Exited with code N:** run the command by hand with a sample on stdin, e.g. `echo "hello world" | ollama run llama3.2:1b 'Clean up:'`, and fix what its error says (often the model isn't pulled or the server isn't running).
+- **Timed out:** raise the timeout, e.g. `voxtype config set output.post_process.timeout_ms 60000` (for a profile, `post_process_timeout_ms` in `[profiles.<name>]`), or use a smaller model. The first call to a local LLM can be slow while the model loads.
+- **Returned nothing:** make the command print the cleaned text on stdout. If empty output is intended (to drop `[BLANK_AUDIO]`, say), set `fallback_on_empty = false`.
+- **Edit list rejected:** with `edit_list = true`, the command must print only a JSON array of `find`/`replace`/`reason` edits whose targets occur once in the transcription. The notification gives the reason the list was rejected; fix the prompt or script, or set `edit_list = false` in `[output.post_process]`.
+
+The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service -f` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
+
+Meeting mode never shows these notifications, so a failing command can't pop up over a call. During a meeting the failure is only logged, and the transcript keeps the original text.
+
+### "pre_output hook failed" or "post_output hook failed"
+
+**Cause:** `pre_output_command` or `post_output_command` exited with an error. The text was still delivered, but whatever the hook does (switching a compositor submap, for example) didn't happen.
+
+**Solution:** run the command from the notification in a terminal and fix it, or correct it in the `[output]` section of `config.toml`.
+
 ### No desktop notification
 
-**Cause:** notify-send not installed or notifications disabled.
+**Cause:** No notification server is running, the session bus is unreachable from the daemon, or notifications are disabled in `[output.notification]`.
+
+Voxtype sends notifications with `notify-send` (libnotify) and, if that is missing or fails, talks to the notification server directly over D-Bus (`org.freedesktop.Notifications`). When neither works, the daemon logs this warning once:
+
+```
+Desktop notifications cannot be delivered, so Voxtype alerts will only appear in this log (...)
+```
+
+The part in parentheses says what each route reported. `ServiceUnknown` means no notification server is running; a "No such file or directory" error means the daemon cannot reach the session bus.
 
 **Solution:**
 ```bash
-# Install libnotify
+# Check whether a notification server is running
+busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+    org.freedesktop.Notifications GetServerInformation
+
+# If not, install and start one (GNOME and KDE ship their own), e.g.
+# Arch: sudo pacman -S mako   (or swaync, dunst)
+
+# Optional: install notify-send for testing
 # Arch: sudo pacman -S libnotify
 # Debian: sudo apt install libnotify-bin
 # Fedora: sudo dnf install libnotify
@@ -1244,6 +1645,8 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 # Test
 notify-send "Test" "This is a test"
 ```
+
+If the test works in your terminal but the daemon still logs the warning, the systemd user service may not see your session bus. Run `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` from your compositor's startup and restart voxtype.
 
 ### Edit-list post-processing keeps the original text
 
@@ -1289,6 +1692,36 @@ threads = 8  # Match your CPU cores
 
 3. **Use English-only model:**
 `.en` models are faster than multilingual models.
+
+### "Whisper is running on CPU" notification (GPU build)
+
+**Cause:** The daemon is running a GPU build of Whisper (the Vulkan binary, or a CUDA/ROCm/Metal source build), but whisper.cpp found no usable GPU when it loaded the model, so it is transcribing on CPU. whisper.cpp itself only logs `no GPU found` and carries on; Voxtype notifies once per daemon start so the slowdown isn't a mystery. Transcription keeps working, just at CPU speed.
+
+The usual reason on the Vulkan build is a missing Vulkan driver (ICD): the Vulkan loader is installed, but no driver for your GPU is.
+
+**Solutions:**
+
+1. Install the Vulkan driver for your GPU and check that it lists a device:
+```bash
+# Arch: AMD / Intel / NVIDIA
+sudo pacman -S vulkan-radeon      # or vulkan-intel, or nvidia-utils
+# Debian/Ubuntu/Fedora (AMD/Intel): mesa-vulkan-drivers
+vulkaninfo --summary
+systemctl --user restart voxtype
+```
+
+2. If the notification says `gpu_device = N but only M GPU(s) were found`, `[whisper] gpu_device` points past the end of the device list. Devices are numbered from 0; pick one from `vulkaninfo --summary` or remove the setting.
+
+3. Check what the running daemon actually got:
+```bash
+voxtype info accel
+```
+
+### "OpenVINO fell back to GPU/CPU" notification
+
+**Cause:** `[openvino] device` names a device (usually `NPU`) that failed to initialize, so Voxtype fell back to the next device in the chain (GPU, then CPU). The notification names the packages for the configured device.
+
+**Solution:** Install the packages named in the notification (for NPU: `openvino-intel-npu-plugin intel-npu-driver`, then reboot), check the device with `voxtype setup npu --status`, and restart the daemon. `voxtype info accel` shows which device the running daemon is using.
 
 ### Slow transcription on multi-GPU systems (Vulkan)
 
@@ -1402,7 +1835,7 @@ API key is invalid, revoked, or out of credit. Check the dashboard at https://co
 Soniox occasionally revises tail tokens between non-final and final states (`tévedések,` → `tévedések.`, `fejeztem` → `fejezte`). Voxtype emits a `StreamingEvent::Replace { backspace, text }` in this case so the cursor is patched up — but the patch only works if a backspace-capable driver is in the chain. The current backspace path tries `wtype`, then `dotool` (via `dotoolc` if the daemon is running), then `ydotool`. `eitype` does not have a backspace implementation.
 
 If you see persistent duplication or wrong tails:
-1. Check `journalctl --user -u voxtype` for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing.
+1. Turn on [debug logging](#enable-verbose-logging) and check the log for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing. These lines quote the revised text, so they are not logged by default.
 2. If you also see `Streaming replace: no backspace-capable backend available; skipping backspace and accepting cursor artifact`, none of wtype/dotool/ydotool was usable — the original tail stayed at the cursor and the corrected text appended. Install at least one of them (`pacman -S wtype` or `pacman -S dotool` on Arch).
 3. Disable partial typing entirely: `[soniox] type_partials = false`. Finals are still typed, but no live cursor feedback. Trade-off: feels slower, zero divergence risk.
 
@@ -1431,6 +1864,7 @@ See [Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-perfor
 To verify the fast path is active after dictation:
 ```bash
 journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "5 min ago" | grep "typed via"
 ```
 - `Text typed via dotoolc (N chars)` — fast path
 - `Text typed via dotool (N chars)` — direct path; daemon not running or voxtype had a per-call XKB hint
@@ -1525,6 +1959,7 @@ voxtype setup osd --status
 - **The OSD changed look after an upgrade.** Configs without `[osd] frontend` now default to `auto`, which prefers the Quickshell OSD when it can run. To get the old look back: `voxtype config set osd.frontend gtk4`, then `systemctl --user restart voxtype`.
 - **Picking a style in Settings changes nothing.** Quickshell styles only apply to the Quickshell OSD. If `Active:` says `gtk4` or `native`, either your config names that frontend (switch with `voxtype setup osd --use-auto`) or Quickshell can't run here. The `Reason:` line says which: `voxtype-osd-quickshell is not installed`, Quickshell is not on PATH (install the `quickshell` package), or no Wayland session.
 - **`Reason:` says `gtk4 OSD installed but libgtk4-layer-shell is missing`.** Your distro doesn't package gtk4-layer-shell (Ubuntu 24.04, for example), so voxtype uses the native OSD instead. Install gtk4-layer-shell if your distro has it, or install Quickshell.
+- **A notification says "Voxtype: OSD frontend '...' unavailable".** The frontend your config names can't run, so another one is standing in. The notification and the `Reason:` line say why: its binary is not installed, or, for `quickshell`, Quickshell is not on PATH (install the `quickshell` package).
 - **`Active: none`.** No OSD frontend is installed, or none can reach a display. Install a frontend, or set `[osd] enabled = false` to silence the warning.
 - **The Settings panel keeps saying "Changes take effect after restart".** It clears after any daemon restart, including `systemctl --user restart voxtype` and `voxtype setup model`, within about five seconds while the panel is open, or the next time you open it.
 
@@ -1631,6 +2066,264 @@ No result is shown for cancelled recordings, accidental taps, or
 
 ---
 
+## Meeting Audio and Post-Meeting Command
+
+### The other side shows up under You on speakers
+
+On speakers your microphone hears what the speakers play, so the other side of the call, or a video playing during the meeting, can be transcribed as You. Voxtype removes it with PipeWire's echo canceller unless the meeting's output is headphones (`[meeting.audio] echo_cancel = "auto"`, the default).
+
+Check which echo handling the meeting used:
+
+```bash
+voxtype meeting status --json      # "echo_cancel": "webrtc", "gtcrn" or "none"
+journalctl --user -u voxtype | grep -i "echo handling"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep -i "echo handling"
+```
+
+The log line gives the reason when it is not `webrtc`:
+
+- **"the output is headphones"**: voxtype read your default output as headphones (its active port, its form factor, or Bluetooth). If sound is in fact coming from speakers, set `echo_cancel = "webrtc"` to use the canceller anyway.
+- **"Echo cancellation could not start"**: the canceller needs PipeWire's echo-cancel module and its WebRTC plugin. On Arch and Omarchy they come with `libpipewire` and `pipewire-audio`; elsewhere, check that `libpipewire-module-echo-cancel.so` and `aec/libspa-aec-webrtc.so` exist under your PipeWire library directories. PipeWire releases too old for the canceller's monitor mode also fall back. `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own error.
+- **"the mic is a monitor of the output the canceller would cancel"**: your default microphone (or `mic_device`) is a monitor of the output whose sound the canceller removes, so cancelling would leave nothing. This happens with a virtual mic fed from the speakers. Pick your real microphone as the default, or name it in `mic_device`.
+- **"The echo canceller's mic has been silent for 3s"**: the canceller started but delivered nothing but digital silence, so the meeting switched to recording the microphone directly with GTCRN (the status then says `gtcrn`). Either the canceller is not receiving the microphone, or your microphone is a monitor of your default output (a virtual mic fed from the speakers), whose every sound the canceller treats as echo. Check that `pactl list short sources` shows your real microphone and that it is not muted; `$XDG_RUNTIME_DIR/voxtype/meeting-aec.log` has the canceller's own output. `echo_cancel = "gtcrn"` skips the canceller.
+- **"mic_device is not a PipeWire source"**: `meeting.audio.mic_device` names an ALSA device. Set it to a PipeWire source name from `pactl list short sources`, or to `default`.
+- **"the default source is already an echo canceller"**: you run your own echo canceller as the default microphone, and voxtype records from it rather than adding a second one. If echo still gets through, check that canceller's setup, or name your real microphone in `mic_device` to have voxtype's canceller instead.
+- **`none`**: `echo_cancel` is `disabled`, or it is `gtcrn` and the GTCRN model is missing.
+
+With a filter as your default microphone (Camera Effects, a noise-suppression chain), the log also says "The default source … is a filter over …": the canceller records the real microphone under the filter, so the filter's effects are not in the meeting's mic track. That is expected.
+
+The simplest fix is headphones: with nothing coming out of speakers there is no echo to remove, and voxtype skips the canceller on its own.
+
+### The recording announcement only played on my speakers
+
+With `announce_recording` on, `voxtype meeting status` says where the announcement went. "played on your speakers only; the call did not hear it" comes with the reason:
+
+- **"no call app opened the microphone within 120 s"**: voxtype found no call. It recognizes calls the way meeting detection does, so run `voxtype meeting suggest --dry-run` during the call to see what it sees. A browser call (Meet, Teams on the web) needs Hyprland for its window title; on other compositors only Zoom and the Teams app are found. Add another app under `[meeting.detect]`, as in [Meeting Detection](MEETING_MODE.md#meeting-detection).
+- **"pw-play is not installed"** or **"cannot run pw-dump"**: the announcement needs PipeWire's command-line tools (`pw-play`, `pw-link`, `pw-dump`; the `pipewire` package on Arch, `pipewire-bin` on Debian and Ubuntu).
+- **"could not link into ...'s mic stream"**: PipeWire refused the link. `journalctl --user -u voxtype | grep -i announcement` shows `pw-link`'s error (use `journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep -i announcement` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)).
+
+When it says "played into ...'s microphone", PipeWire carried it into the call app's mic stream. The others still will not hear it if you are muted in the call app, or if the app's noise suppression removes it; unmute before the meeting starts, or start it with `--no-announce` and tell them yourself.
+
+### The announcement used the built-in voice instead of Jessica
+
+With `announcement_voice = "jessica"`, a status line ending "Note: the Jessica voice could not be downloaded (...), so the built-in voice played" means the one-time download failed and the meeting announced in the built-in Kokoro voice instead. The reason is in the brackets:
+
+- **"timed out after 15 s"** or a curl error: voxtype could not reach `models.voxtype.io`. Download it beforehand, when you are online, with `voxtype meeting announcement --voice jessica` (it waits up to two minutes).
+- **"rejected the download"** or **"does not match the published clip"**: what arrived was not the published file, and voxtype never plays a clip that fails its sha256 check. Run `voxtype meeting announcement --voice jessica` again. A proxy that rewrites downloads can cause this.
+
+`voxtype meeting announcement` shows the voice in use and whether Jessica has been downloaded.
+
+### Meeting audio is saved as WAV instead of Opus
+
+With `[meeting] retain_audio = true`, voxtype encodes the audio with
+`ffmpeg`. When `ffmpeg` is not on the daemon's `PATH`, or was built without
+libopus, the daemon logs one of these and keeps `mic.wav`, `loopback.wav` and
+`mixed.wav` instead (about 115 MB per hour per file, against about 10 MB for
+Opus):
+
+```
+ffmpeg not found; keeping meeting audio as WAV ...
+/usr/bin/ffmpeg has no libopus encoder; keeping meeting audio as WAV ...
+```
+
+Install `ffmpeg` (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`,
+`sudo dnf install ffmpeg-free`) and check it has the encoder:
+
+```bash
+ffmpeg -hide_banner -encoders | grep libopus
+```
+
+Then restart the daemon (`systemctl --user restart voxtype`); the check runs
+once per daemon. Meetings already saved as WAV stay WAV. To convert one:
+
+```bash
+cd ~/.local/share/voxtype/meetings/<meeting>
+for t in mic loopback mixed; do
+  [ -f $t.wav ] && ffmpeg -i $t.wav -c:a libopus -b:a 24k $t.opus && rm $t.wav
+done
+```
+
+`meeting.json` lists whichever files are there the next time it is rewritten.
+
+### `meeting import` or `meeting retranscribe` fails
+
+- **"need ffmpeg and ffprobe"**: install ffmpeg; ffprobe comes with it.
+- **"Cannot read ..."**: ffprobe could not find an audio stream. Check the
+  file plays (`ffprobe file`); a folder is only accepted when it is an Omarchy
+  Meeting Recorder meeting folder.
+- **"Invalid --channels ..."**: name one side per channel, in order. The
+  message says how many channels the file has; `ffprobe -show_streams file`
+  shows the layout. Leave `--channels` out to mix everything.
+- **"recorded without keeping audio"**: `meeting retranscribe` needs the
+  meeting's audio. Meetings recorded with `retain_audio = true`, and every
+  imported meeting, have it.
+- **A model or engine is refused**: the same checks as `meeting start
+  --model` apply; download the model first (`voxtype setup model`).
+- **Speaker names look swapped after transcribing again with `ml`
+  diarization**: the speaker numbers come from a new clustering. Rename them
+  with `voxtype meeting label`.
+
+### `meeting play` fails or plays nothing
+
+- **"needs ffmpeg and one of pw-play (PipeWire), paplay (PulseAudio) or
+  aplay (ALSA)"**: install what the message names as missing. `pw-play`
+  comes with PipeWire (`pipewire` or `pipewire-bin`), `paplay` with
+  `pulseaudio-utils` or `libpulse`, `aplay` with `alsa-utils`.
+- **"This meeting was recorded without keeping audio"**: the meeting was
+  recorded with `retain_audio` off. Turn it on for future meetings; there is
+  nothing to play for this one.
+- **It says it is playing but you hear nothing**: playback goes to your
+  default output. Check it with `wpctl status` (PipeWire) or
+  `pactl get-default-sink`, and look at
+  `$XDG_RUNTIME_DIR/voxtype/meeting_playback.log` for errors from ffmpeg or
+  the player.
+
+### The post-meeting command did not run, or did not finish
+
+`post_meeting_command` runs in the background once the meeting's folder is
+final, and its outcome is in the daemon log:
+
+```bash
+journalctl --user -u voxtype | grep post_meeting_command
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep post_meeting_command
+```
+
+- **"failed ... (exit status: 127)"**: the shell could not find the program.
+  The daemon's `PATH` under systemd is shorter than your terminal's; use an
+  absolute path.
+- **"ran past 300s and was killed"**: raise `post_meeting_timeout_secs`, or
+  have the command start its long work with `systemd-run --user` so it is no
+  longer the command's child.
+- **Nothing logged**: check that `post_meeting_command` is under `[meeting]`
+  and the daemon was restarted after you set it (`voxtype config` shows it).
+
+The command runs in the meeting folder with `VOXTYPE_MEETING_ID`,
+`VOXTYPE_MEETING_DIR` and `VOXTYPE_MEETING_MANIFEST` set, and without a
+terminal: anything that prompts for input fails.
+
+### A meeting shows as interrupted, with no summary
+
+This is what the "A meeting didn't finish" notification is about. The
+daemon stopped while the meeting recorded: it crashed, was killed, or the
+computer lost power. Everything saved until then is in the meeting's folder,
+but nothing finished the meeting, so it has no end time or summary and
+`post_meeting_command` did not run. Finish it from what is on disk, or
+delete it:
+
+```bash
+voxtype meeting recover                  # list them
+voxtype meeting recover --finish <id>    # end it, summarize, run the command
+voxtype meeting recover --discard <id>   # delete it and its folder
+```
+
+With `retain_audio` on, finishing transcribes the audio kept after the last
+transcribed chunk too (that needs ffmpeg and the meeting's model). Without
+it, what was said after the last chunk (up to `chunk_duration_secs`, 30
+seconds by default) is lost. If the daemon is crashing, its log has the
+reason: `journalctl --user -u voxtype -b`, or
+`journalctl _SYSTEMD_USER_UNIT=voxtype.service -b` when
+[the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries).
+
+## Meetings: The Remote Side Shows Up Under "You"
+
+With speakers instead of headphones, your microphone hears the call. Voxtype removes that echo from your lines, but what is left can still show up:
+
+- **Long passages of the remote's words under You.** Check that loopback capture is running (`voxtype meeting status`); every echo check compares against the loopback track, including the guard's. Check `[meeting.audio] echo_guard` is on (the default). Keep `echo_cancel = "auto"`, or set up PipeWire's `echo-cancel` module, or use headphones. A line that mixes your voice with the echo stays yours, echo included: the guard only removes lines that are nothing but echo.
+- **Short garbled fragments ("Omarky problem.", "5.").** These are misheard echo. The guard drops them when they are at most `echo_fuzzy_max_words` words and match the remote line spoken at the same time. Raise `echo_fuzzy_max_words` a little for longer fragments.
+- **"Thank you." under You while you said nothing.** Speech engines write a few stock phrases ("Thank you.", "Thanks for watching.") for faint sound, such as the echo canceller's residual. The guard drops them when the remote is talking and your microphone held no voice of yours at the time. One that comes while the call is silent stays: delete it with `voxtype meeting delete-line`.
+- **One sentence repeated over and over in a line.** On faint audio, such as the echo of the other side, a speech engine can get stuck and write the same phrase until the audio ends ("I don't know what you're talking about." six times). Voxtype keeps one copy of any phrase of three or more words that comes three or more times in a row, for every engine, and logs "Collapsed a repeated phrase" with the number of words before and after (the line itself at debug level). Two repeats ("Yes. Yes.") and short words said over and over ("No, no, no.") are left as they are. If the collapsed line was echo, the guard then drops it when it is at most eight words, opens with three words in a row from the other side's line at the same time, and your microphone held no voice of yours. A line that keeps repeating after this was most likely said that way, or is long enough to be left: delete it with `voxtype meeting delete-line`.
+- **"Thank you." or "you" from a remote speaker nobody heard.** The same stock phrases, written for silence or a join sound on the call's side. The guard drops them when the loopback held no speech at the time. A tone or chime is sound, so a phrase written over one can stay: delete it with `voxtype meeting delete-line`.
+- **A remote line shows up twice, once under the remote speaker from your microphone.** The guard moved an echo line to the remote side because the loopback's transcript did not have its words. Delete the copy with `voxtype meeting delete-line`.
+- **A line of yours went missing or moved to the remote.** The guard keeps a line when your microphone is louder than the echo explains. A reply mumbled very quietly over a loud call can still read as echo. Speak up or lower the call volume; move a line back with `voxtype meeting reassign <meeting> <line> You`; or set `echo_guard = false` to keep only exact-word matching.
+
+The log counts what the guard did per chunk ("Echo guard: dropped N microphone line(s) ..., moved N ...", "Removed N bleed-through word(s) via dedup"); at debug level it names each line:
+
+```bash
+systemctl --user stop voxtype
+RUST_LOG=voxtype::meeting=debug voxtype 2>&1 | grep -iE "echo"
+```
+
+---
+
+## No Meeting Window Appears
+
+When a meeting starts, the daemon opens the view `[meeting] view` resolves to (the Quickshell view opens itself), and `voxtype meeting view` opens it by hand. Run `voxtype meeting view` first: when nothing can open it says why.
+
+- **"No meeting view to open (auto: no Quickshell; voxtype-meetings-gtk4 is not installed)".** Install the deb/rpm, which ship the window in `/usr/lib/voxtype/`, or watch in a terminal with `voxtype meeting watch`.
+- **"…voxtype-meetings-gtk4 is installed but libgtk-4 is missing".** Install GTK 4: `libgtk-4-1` (Debian, Ubuntu), `gtk4` (Fedora, Arch).
+- **"no display".** The command ran without `WAYLAND_DISPLAY` or `DISPLAY` (over SSH, or from a service started before the desktop). Run `voxtype meeting watch` there instead.
+- **Quickshell is installed but you want the window.** `voxtype config set meeting.view gtk4`.
+- **On Quickshell, nothing happens.** The Quickshell view opens only in a running Omarchy shell or voxtype's standalone shell (`voxtype setup quickshell`).
+- **`voxtype meeting view` works, but nothing opens when a meeting starts.** Check `voxtype config get meeting.show_view_on_start` (it must be `true`), then the daemon's log, which says what it decided for each meeting: `journalctl --user -u voxtype | grep "Meeting view on start"` (or `journalctl _SYSTEMD_USER_UNIT=voxtype.service | grep "Meeting view on start"` when [the user journal has no voxtype entries](#the-user-journal-has-no-voxtype-entries)). "no display" there means the service has no `WAYLAND_DISPLAY` or `DISPLAY`: import them into the user session (`systemctl --user import-environment WAYLAND_DISPLAY DISPLAY`, which most compositors' autostart does) and restart the daemon.
+- **Both the Quickshell view and the window open.** The Quickshell view opens on its own unless `[meeting] view` is `gtk4`, `terminal` or `none`; set one of those, and run `omarchy-restart-shell` (or restart your Quickshell shell) once after upgrading so it reads the setting.
+- **The window closed when the daemon restarted.** A window the daemon opened runs as part of the voxtype service and stops with it. Open it again with `voxtype meeting view`, which starts it on its own.
+
+## Meeting Assistant: Summaries Don't Appear
+
+Start with what the assistant sees:
+
+```bash
+voxtype meeting assistant status
+journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "10 minutes ago" | grep -i summar
+```
+
+**No summary after a meeting stops.** The summary at stop is off until an agent is allowed, unless `[meeting.summary] auto = true`. Allow one with `voxtype meeting assistant allow claude`, or summarize by hand with `voxtype meeting summarize latest`. A meeting with no transcript is never summarized. `auto = false` turns it off.
+
+**"Meeting transcripts have not been allowed to go to Claude".** Consent is asked once per agent and the daemon cannot ask. Run `voxtype meeting assistant allow <agent>`, or use `--local` / `local_only = true` to keep everything on the machine.
+
+**The CLI finds the agent but the daemon does not.** A systemd user service often has a shorter PATH than your shell (no `~/.local/bin`, no mise or asdf shims). `meeting assistant allow` records where the agent was found and the daemon falls back to that path, so allow it again after moving or reinstalling the agent. `[meeting.assistant] agent` only names the agent; it does not change where it is looked for.
+
+**"Claude failed: Not logged in" or similar.** The agent runs with your account, as you. Sign in once in a terminal (`claude`, then `/login`; `codex login`) and retry with `voxtype meeting summarize latest --regenerate`.
+
+**"did not answer within 180s".** Long meetings take a while to summarize. Raise `[meeting.assistant] timeout_secs`, or lower `max_transcript_chars` so less is sent verbatim.
+
+**"Could not read the summary the model wrote".** The model did not reply with the JSON the summary asks for. Small local models do this most; try a larger Ollama model or an agent, then `--regenerate`.
+
+**Codex is listed as not usable: "needs bubblewrap".** Codex keeps a command tool that cannot be turned off, so voxtype only runs it inside a bubblewrap jail that hides your home. Install `bubblewrap` (`pacman -S bubblewrap`, `apt install bubblewrap`). If bwrap is installed but fails with a namespace error, unprivileged user namespaces are disabled on the system; use Claude or the local model instead.
+
+**Codex worked, then fails with an authentication error.** In the jail codex can read `~/.codex/auth.json` but not rewrite it, so it cannot save a refreshed login token there. Run `codex` once in a terminal to refresh the login, then retry.
+
+**Hermes, OpenCode or another agent is my Omarchy default.** Only `claude`, `codex` (jailed) and `pi` can be run without tools that reach your files or the network, so voxtype skips other agents and uses `claude` or `pi` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
+
+**Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
+
+The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
+
+---
+
+## Action Items: Todoist and Reminders
+
+**`meeting actions` shows nothing.** Action items come from the summary. A meeting without one has none; run `voxtype meeting summarize latest` (or `--regenerate` for an older summary).
+
+**`todoist connect` says every port is in use.** Todoist's answer comes back to `http://localhost` on port 47815, 47816, 47817, 47818 or 47819. Find what holds them with `ss -ltnp | grep 4781`, free one, and connect again.
+
+**The browser shows a Todoist error about the redirect address, or `connect` says Todoist would not accept a local redirect address.** Todoist did not accept voxtype's `http://localhost` return address. Please report it on GitHub with the message. Meanwhile, a personal API token works: see `todoist_token_file` in [CONFIGURATION.md](CONFIGURATION.md#todoist_token_file).
+
+**Sending says Todoist refused the connection.** The access was revoked in Todoist or the tokens no longer renew. Run `voxtype meeting todoist connect` again.
+
+**`--send reminder` is not available.** Reminders use `omarchy-reminder`, which comes with Omarchy. Elsewhere, send to Todoist instead.
+
+## Meeting Titles: The Calendar Title Was Not Used
+
+Start with what voxtype sees:
+
+```bash
+voxtype meeting calendar status
+journalctl --user -u voxtype --since "15 minutes ago" | grep -i calendar
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "15 minutes ago" | grep -i calendar
+```
+
+A meeting takes its title from the calendar only when it started without a title you chose, and an event was in progress or started within `[meeting.calendar] window_mins` of the start.
+
+- **"Last fetch failed: The calendar server (...) answered 404"** (or 401, 403, 410): the link was reset or unpublished. Copy the secret iCal address again and run `voxtype meeting calendar set-ics -`.
+- **"Could not reach the calendar server"**: no network when the daemon fetched. It tries again within 15 minutes and uses the last good fetch meanwhile.
+- **"did not return a calendar"**: the link points at a web page, often a sign-in page, rather than the iCal feed. Use the secret or published iCal address, not the calendar's ordinary web address.
+- **"No event in the calendar link within 10 min"**: the event was further from the start than the window, or was an all-day event, which never names a meeting. Raise `window_mins`, or set the title with `voxtype meeting title latest "<title>"`.
+- **A calendar command: "ran past 3 s"**: raise `[meeting.calendar] timeout_secs`. **"printed something other than the calendar JSON"**: run the command yourself (`bash -lc '<command>'`) and check it prints one JSON object and nothing else; a login profile that prints a greeting breaks it.
+
+Voxtype never logs the iCal link itself, only its server, so these lines are safe to share in a bug report.
+
 ## Systemd Service Issues
 
 ### Service fails to start
@@ -1641,6 +2334,7 @@ systemctl --user status voxtype
 
 # View logs
 journalctl --user -u voxtype -n 50
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50
 
 # Common issues:
 # - Not in input group (log out/in after adding)
@@ -1650,14 +2344,26 @@ journalctl --user -u voxtype -n 50
 
 ### Service starts but doesn't work
 
-**Cause:** Session environment not available.
+**Symptom:** A notification at startup titled "Voxtype: no display in its environment", or text is never typed when voxtype runs as a service but works from a terminal.
 
-**Solution:** Ensure you're running under a graphical session:
+**Cause:** The systemd user manager does not have `WAYLAND_DISPLAY` (or `DISPLAY` on X11), so the voxtype service doesn't either, and wtype, wl-copy and friends cannot reach your desktop. This happens when the compositor does not import its environment into systemd.
+
+**Solution:** `voxtype doctor` reports whether `WAYLAND_DISPLAY` or `DISPLAY` is set in the systemd user environment (your terminal's environment says nothing about the service's). If neither is, import them from a terminal in your desktop session and restart the service:
 ```bash
-# Check environment
-echo $XDG_RUNTIME_DIR
-echo $WAYLAND_DISPLAY
+systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+systemctl --user restart voxtype
 ```
+
+To make it permanent, run the import when your compositor starts, before voxtype:
+```
+# Hyprland (hyprland.conf)
+exec-once = systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+
+# Sway (config)
+exec systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+```
+
+`voxtype setup systemd` also checks the user manager's environment and prints this fix when the variables are missing.
 
 ### Service doesn't start on login
 
@@ -1679,16 +2385,57 @@ systemctl --user list-dependencies default.target
 ### Enable verbose logging
 
 ```bash
-# Verbose
+# Debug level: each step of a dictation, and the transcribed text
 voxtype -v
 
-# Debug (most verbose)
+# Trace level (most verbose)
 voxtype -vv
 
 # Or via environment
 RUST_LOG=debug voxtype
 RUST_LOG=voxtype=trace voxtype
 ```
+
+Stop the service first (`systemctl --user stop voxtype`) when you run the daemon in a terminal. To get debug logs from the service instead:
+
+```bash
+systemctl --user edit voxtype
+#   [Service]
+#   Environment=RUST_LOG=voxtype=debug,warn
+systemctl --user restart voxtype
+journalctl --user -u voxtype -f
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
+```
+
+`RUST_LOG` takes precedence over `-v` and `-q` on the command line. An empty `RUST_LOG` counts as unset. Remove the line and restart the service when you are done.
+
+### The user journal has no voxtype entries
+
+On some systems the per-user journal has no entries for the daemon. `journalctl --user -u voxtype` then prints `-- No entries --`, or stops at an old date, while the service is running and logging. Match on the unit name instead, which reads every journal your account can open:
+
+```bash
+journalctl _SYSTEMD_USER_UNIT=voxtype.service -f
+```
+
+It takes the same options (`-f`, `-n 50`, `-b`, `--since "5 min ago"`) and pipes into `grep` the same way, so it can stand in for `journalctl --user -u voxtype` in any command in this documentation. If it prints nothing either, your account may not be allowed to read the system journal: add it to the `systemd-journal` group, or run the command with `sudo`.
+
+`voxtype info accel` reads the user journal too, so on such a system it can report "unknown" after a dictation.
+
+### Dictated text in the log
+
+At the default level the log does not contain what you say: a dictation is logged as its length and its engine (`Transcribed 42 chars (whisper engine)`). To see what the engine heard, which is what a report about wrong or missing words needs, turn on debug logging as above and look for these lines:
+
+```bash
+journalctl --user -u voxtype --since "5 min ago" | grep -E "Transcribed:|text:|After text processing|Post-processed result"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "5 min ago" | grep -E "Transcribed:|text:|After text processing|Post-processed result"
+```
+
+- `Transcribed: "..."`: the text the engine returned
+- `Cohere transcription text: "..."` (`Transcription text:` for Whisper, and so on for the other engines): the same, from the engine itself
+- `After text processing: "..."`: after replacements, spoken punctuation and the other `[text]` steps
+- `Post-processed result: "..."`: after the `[output.post_process]` command
+
+With debug logging on, the journal keeps every dictation until it rotates out, so turn it off again afterwards. A debug log contains your dictations: read it before you attach it to an issue, and cut out anything you do not want to publish.
 
 ### Debug specific components
 
@@ -1727,16 +2474,60 @@ journalctl --user -u pulseaudio -n 20
 
 ### Trained LARD cleanup is not running
 
-- It is off by default. Enable `text.lard_disfluency` and select an explicit
-  English language. `auto`, unknown, and non-English languages skip it.
-- Run `voxtype setup lard --status`. Install the pinned local artifact with
+- It is off by default. Enable `text.lard_disfluency`. It then runs only when
+  the dictation is known to be English: the engine's language is set to
+  English, the model is English-only, or you declared English with
+  `text.language`.
+- Run `voxtype doctor`. With the setting on and nothing to run, the **Text
+  cleanup** check fails and names the cause. The same problem is in the
+  daemon's "Voxtype: N problems need attention" startup notification and in
+  the log as `LARD cleanup unavailable; preserving text`.
+- "it only runs on English, and nothing says ... dictation with ... is
+  English": the model handles several languages and detects them
+  automatically, so Voxtype does not know what language the text is in. This
+  is the usual case with Parakeet v3, Whisper on `auto`, SenseVoice on `auto`,
+  Dolphin, Omnilingual and Soniox, and with any model given as a path. If you
+  dictate in English, declare it and restart the daemon:
+  `voxtype config set text.language en`. If you dictate in several languages,
+  leave it and turn the stage off instead.
+- "it only runs on English, and whisper.language is fr" (or another engine's
+  `language` key): the engine was told to write another language, and that
+  wins over `text.language`. If you do dictate in English, change that key:
+  `voxtype config set whisper.language en`.
+- "it only runs on English, and whisper.language is limited to fr, de" (or
+  `soniox.language_hints`): detection is limited to a set without English, so
+  a declared `en` would contradict it. Add `en` to that list.
+- "it only runs on English, and ... only writes ja": the model writes one
+  language and it is not English. No setting changes that. Pick another model
+  or turn the stage off.
+- "it only runs on English, and text.language is ...": you declared another
+  language, or a value that is not a language code (`english` rather than
+  `en`). Set it to `en`.
+- It runs for normal dictation but not with `--model` or the secondary-model
+  hotkey: an override recording is checked on its own, and the override model
+  is not known to write English. Declare `text.language en`, or use an
+  English-only override model.
+- "LARD disfluency cleanup is on but its model is not installed": the setting
+  is on and the model file is not there. Turning the setting on does not
+  download it. Run `voxtype setup lard`, then restart the daemon. Or turn the
+  stage off: `voxtype config set text.lard_disfluency false`.
+- `voxtype setup lard` fails with "answered HTTP ..." or "could not reach":
+  the download did not complete. Nothing was installed and an existing model
+  is untouched. Check your connection and run it again, or install from a copy
+  of the file with
   `voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`.
-- Model publication still requires approval. Do not expect a default download;
-  an explicit HTTPS URL must return the exact pinned artifact. Checksum failures
-  preserve any existing installed model.
+- `voxtype setup lard` fails with "checksum mismatch": what was downloaded (or
+  the file given to `--source`) is not the pinned model. The message shows the
+  size and SHA-256 it got and the ones it expected. Nothing was installed. A
+  captive portal or a proxy that rewrites downloads is the usual cause.
+- Run `voxtype setup lard --status` to see the installed file and whether the
+  stage is running for your configuration.
+- An explicit `--url` must be HTTPS and return the exact pinned artifact.
+- The model is licensed CC BY-SA 4.0, separately from Voxtype's MIT code. See
+  the [model card](https://models.voxtype.io/text/lard-disfluency-v1.MODEL_CARD.md).
 - Check `text.lard_model_path` and the XDG data directory used by the daemon.
-  Restart after changing configuration. Missing or invalid models produce a
-  warning and skip only this stage; startup never tries a download.
+  Restart after changing configuration. Missing or invalid models skip only
+  this stage; startup never tries a download.
 - Streaming partials stay raw. Cleanup runs only at finalization and can revise
   already typed partials only when backspace output succeeds. For cross-segment
   cleanup, use batch or file output. LLM post-processing is still batch-only.
@@ -1761,8 +2552,8 @@ journalctl --user -u pulseaudio -n 20
 
 If you're still having issues:
 
-1. **Run setup check:** `voxtype setup`
-2. **Gather debug logs:** `voxtype -vv 2>&1 | tee debug.log`
+1. **Run the health check:** `voxtype doctor` (attach `voxtype doctor --json` to bug reports)
+2. **Gather debug logs:** `voxtype -vv 2>&1 | tee debug.log`. Debug logs include the text of what you dictate while they are on, so read the file before you attach it
 3. **Check system info:**
    ```bash
    uname -a

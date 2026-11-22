@@ -45,7 +45,7 @@
 //! cleanup.
 
 use crate::error::OutputError;
-use crate::output::{output_with_fallback, OutputOptions, TextOutput};
+use crate::output::{deliver_with_fallback, Delivered, OutputOptions, TextOutput};
 use crate::text::vocabulary::Vocabulary;
 use crate::text::TextProcessor;
 #[cfg(not(test))]
@@ -70,6 +70,11 @@ pub struct StreamingSession {
     typed_chars: usize,
     /// Most recent partial text (for status only; never typed).
     partial: String,
+    history_context: Option<crate::history::recorder::DeliveryContext>,
+    history_raw_finalized: String,
+    history_raw_partial: String,
+    output_error: Option<String>,
+    last_delivery: Option<Delivered>,
 }
 
 impl StreamingSession {
@@ -79,12 +84,79 @@ impl StreamingSession {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+            history_context: None,
+            history_raw_finalized: String::new(),
+            history_raw_partial: String::new(),
+            output_error: None,
+            last_delivery: None,
         }
+    }
+
+    pub fn with_history_context(
+        mut self,
+        context: Option<crate::history::recorder::DeliveryContext>,
+    ) -> Self {
+        self.history_context = context;
+        self
+    }
+
+    /// Engine wording before cleanup, including an unfinished or undelivered
+    /// tail. Not accumulated when this session is not collecting history.
+    pub fn history_raw_text(&self) -> String {
+        format!("{}{}", self.history_raw_finalized, self.history_raw_partial)
+    }
+
+    pub fn output_error(&self) -> Option<&str> {
+        self.output_error.as_deref()
+    }
+
+    pub fn last_delivery(&self) -> Option<&Delivered> {
+        self.last_delivery.as_ref()
+    }
+
+    fn note_delivery(&mut self, result: Result<Delivered, OutputError>) -> Result<(), OutputError> {
+        match result {
+            Ok(mut delivery) => {
+                delivery.fell_back |= self
+                    .last_delivery
+                    .as_ref()
+                    .is_some_and(|last| last.fell_back);
+                self.last_delivery = Some(delivery);
+                Ok(())
+            }
+            Err(error) => {
+                if self.output_error.is_none() {
+                    self.output_error = Some(error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn finalize_history_raw(&mut self, text: &str) {
+        if self.history_context.is_some() {
+            self.history_raw_finalized
+                .push_str(&self.history_raw_partial);
+            self.history_raw_partial.clear();
+            self.history_raw_finalized.push_str(text);
+        }
+    }
+
+    fn revise_history_raw(&mut self, backspace: usize) {
+        let remaining = self
+            .history_raw_partial
+            .chars()
+            .count()
+            .saturating_sub(backspace);
+        self.history_raw_partial = self.history_raw_partial.chars().take(remaining).collect();
     }
 
     /// Update the in-memory partial text. Returns the new partial for
     /// callers that want to mirror it into status files / Waybar.
     pub fn observe_partial(&mut self, text: String) -> &str {
+        if self.history_context.is_some() {
+            self.history_raw_partial = text.clone();
+        }
         self.partial = text;
         &self.partial
     }
@@ -113,8 +185,13 @@ impl StreamingSession {
         if new_partial.is_empty() {
             return Ok(());
         }
+        if self.history_context.is_some() {
+            self.history_raw_partial.push_str(&new_partial);
+        }
 
+        let history_context = self.history_context.clone();
         let opts = OutputOptions {
+            history_context: history_context.as_ref(),
             pre_output_command,
             post_output_command,
             // Streaming output runs while the hotkey is held — modifiers
@@ -123,7 +200,8 @@ impl StreamingSession {
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
-        output_with_fallback(chain, &new_partial, opts).await?;
+        let result = deliver_with_fallback(chain, &new_partial, opts).await;
+        self.note_delivery(result)?;
 
         self.typed_chars += new_partial.chars().count();
         self.partial.push_str(&new_partial);
@@ -143,6 +221,9 @@ impl StreamingSession {
     /// this would silently lose whatever text was only ever seen as an
     /// unfinalized partial.
     pub fn observe_partial_delta(&mut self, new_partial: &str) {
+        if self.history_context.is_some() {
+            self.history_raw_partial.push_str(new_partial);
+        }
         self.partial.push_str(new_partial);
     }
 
@@ -160,6 +241,13 @@ impl StreamingSession {
     /// daemon to populate `State::Streaming.typed_chars`.
     pub fn typed_chars(&self) -> usize {
         self.typed_chars
+    }
+
+    /// Drain the existing capture-only backspace backend in private daemon
+    /// contract tests. This accessor is absent from product builds.
+    #[cfg(test)]
+    pub(crate) fn take_test_backspaces() -> Vec<usize> {
+        tests::BACKSPACES.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
     }
 
     /// Type a finalized segment to the output, optionally running it
@@ -187,6 +275,7 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        self.finalize_history_raw(text);
         // A backend can finalize text that was already typed as a provisional
         // partial without adding a new tail (Soniox does this commonly). Only
         // now, at Final, may the cleanup pipeline rewrite it. If correction is
@@ -201,7 +290,9 @@ impl StreamingSession {
                     let provisional_chars = self.partial.chars().count();
                     let emitted = emit_backspaces(provisional_chars).await;
                     if emitted == provisional_chars {
+                        let history_context = self.history_context.clone();
                         let opts = OutputOptions {
+                            history_context: history_context.as_ref(),
                             pre_output_command,
                             post_output_command,
                             wait_for_modifier_release: false,
@@ -211,7 +302,8 @@ impl StreamingSession {
                         // Account for it before attempting the replacement.
                         self.typed_chars = self.typed_chars.saturating_sub(emitted);
                         self.clear_partial();
-                        output_with_fallback(chain, &processed, opts).await?;
+                        let result = deliver_with_fallback(chain, &processed, opts).await;
+                        self.note_delivery(result)?;
                         self.typed_chars =
                             self.typed_chars.saturating_add(processed.chars().count());
                         self.finalized_text.push_str(&processed);
@@ -258,13 +350,16 @@ impl StreamingSession {
         // transcript visible at the cursor) and produce inconsistent
         // output. Users who rely on post_process should disable
         // streaming for now.
+        let history_context = self.history_context.clone();
         let opts = OutputOptions {
+            history_context: history_context.as_ref(),
             pre_output_command,
             post_output_command,
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
-        output_with_fallback(chain, text, opts).await?;
+        let result = deliver_with_fallback(chain, text, opts).await;
+        self.note_delivery(result)?;
 
         self.typed_chars += text.chars().count();
         // Treat the partial-stream-so-far plus this final tail as the
@@ -286,6 +381,7 @@ impl StreamingSession {
     /// `finalized_text`, silently discarding a correct transcription. Call
     /// this once, at stream end, before reading `finalized_text()`.
     pub fn finalize_pending_partial(&mut self) {
+        self.finalize_history_raw("");
         if !self.partial.is_empty() {
             self.finalized_text.push_str(&self.partial);
             self.partial.clear();
@@ -297,6 +393,7 @@ impl StreamingSession {
     /// no cursor/focused window to type into when the session's target
     /// is a file.
     pub fn commit_segment_silent(&mut self, text: &str) {
+        self.finalize_history_raw(text);
         if text.is_empty() {
             self.clear_partial();
             return;
@@ -329,6 +426,7 @@ impl StreamingSession {
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
         // Revisions may remove only provisional text, never a prior Final.
+        self.revise_history_raw(backspace);
         let n = backspace
             .min(self.partial.chars().count())
             .min(self.typed_chars);
@@ -379,6 +477,8 @@ impl StreamingSession {
     /// bubbles." instead of "Open blue bubbles.") because the wrong
     /// tail was never actually removed.
     pub fn replace_and_commit_silent(&mut self, backspace: usize, text: &str) {
+        self.revise_history_raw(backspace);
+        self.finalize_history_raw(text);
         if backspace > 0 {
             let new_partial_len = self.partial.chars().count().saturating_sub(backspace);
             self.partial = self.partial.chars().take(new_partial_len).collect();

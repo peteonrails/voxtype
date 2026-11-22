@@ -28,6 +28,7 @@ verification.
 |------|----------------|
 | [CLI Overrides](smoke_tests/cli-overrides.md) | `--model`, `--engine`, `--device`, and other per-invocation flags |
 | [File Output](smoke_tests/file-output.md) | `--file`, append vs overwrite, config-based paths, directory creation |
+| [Dictation History](smoke_tests/history.md) | Private per-day history, every outcome, shared search, recovery/corrections, terminal/app/tray parity and upgrade defaults |
 | [Transcribe Command](smoke_tests/transcribe-command-file-input.md) | `voxtype transcribe <wav>` for offline file transcription |
 
 ## Recording behaviour
@@ -93,7 +94,7 @@ verification.
 
 | Test | What it covers |
 |------|----------------|
-| [Meeting Mode](smoke_tests/meeting-mode.md) | Lifecycle, list, show, export, delete, speaker labels, AI summary, error handling, dual audio, diarization backends |
+| [Meeting Mode](smoke_tests/meeting-mode.md) | A 15-minute pass for 1.3.0: the detection prompt on a Meet call, recording into the live view, minimize and move, renaming, moving, editing and deleting lines, notes, Ask, stopping and the summary, past meetings, export, kept audio and playback, the tray offer on a fresh config, and the standalone Quickshell host |
 
 ## v0.7.6 release verification
 

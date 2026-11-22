@@ -38,6 +38,9 @@ impl Exporter for MarkdownExporter {
                     output.push_str(&format!("- **Duration:** {}m {}s\n", mins, secs));
                 }
             }
+            if let Some(ref url) = meeting.metadata.url {
+                output.push_str(&format!("- **Link:** {}\n", url));
+            }
             output.push_str(&format!(
                 "- **Word Count:** {}\n",
                 meeting.transcript.word_count()
@@ -53,6 +56,12 @@ impl Exporter for MarkdownExporter {
             }
 
             output.push('\n');
+        }
+
+        if let Some(ref notes) = meeting.notes {
+            output.push_str("## Notes\n\n");
+            output.push_str(notes.trim_end());
+            output.push_str("\n\n");
         }
 
         // Summary (if available, Phase 5)
@@ -118,6 +127,15 @@ impl Exporter for MarkdownExporter {
 
             output.push_str(&segment.text);
             output.push_str("\n\n");
+
+            if let Some(ref annotation) = segment.annotation {
+                let line = super::annotation_line(annotation);
+                if annotation.highlight {
+                    output.push_str(&format!("> **{}**\n\n", line));
+                } else {
+                    output.push_str(&format!("> {}\n\n", line));
+                }
+            }
         }
 
         Ok(output)

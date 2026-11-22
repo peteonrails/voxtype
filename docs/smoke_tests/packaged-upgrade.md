@@ -9,25 +9,35 @@ Run inside Docker so nothing touches the host. Both containers follow the
 same script; only the package manager differs.
 
 ```bash
+# Run from the repository root.
 PREV=1.0.1        # previous stable
 NEXT=1.1.0-rc5    # candidate under test
+SCRIPT=$(realpath docs/smoke_tests/packaged-upgrade.sh)
 WORK=$(mktemp -d)
-cd "$WORK"
-gh release download "v${PREV}" --repo peteonrails/voxtype -p "voxtype_${PREV}-1_amd64.deb" -p "voxtype-${PREV}-1.x86_64.rpm"
-gh release download "v${NEXT}" --repo peteonrails/voxtype -p "voxtype_${NEXT}-1_amd64.deb" -p "voxtype-${NEXT}-1.x86_64.rpm"
+gh release download "v${PREV}" --repo peteonrails/voxtype --dir "$WORK" -p "voxtype_${PREV}-1_amd64.deb" -p "voxtype-${PREV}-1.x86_64.rpm"
+gh release download "v${NEXT}" --repo peteonrails/voxtype --dir "$WORK" -p "voxtype_${NEXT}-1_amd64.deb" -p "voxtype-${NEXT}-1.x86_64.rpm"
 
 # deb path
-sudo docker run --rm -v "$WORK":/pkgs:ro ubuntu:24.04 bash -s "$PREV" "$NEXT" deb < docs/smoke_tests/packaged-upgrade.sh
+sudo docker run --rm -v "$WORK":/pkgs:ro -v "$SCRIPT":/t.sh:ro ubuntu:24.04 bash /t.sh "$PREV" "$NEXT" deb
 # rpm path
-sudo docker run --rm -v "$WORK":/pkgs:ro fedora:40 bash -s "$PREV" "$NEXT" rpm < docs/smoke_tests/packaged-upgrade.sh
+sudo docker run --rm -v "$WORK":/pkgs:ro -v "$SCRIPT":/t.sh:ro fedora:40 bash /t.sh "$PREV" "$NEXT" rpm
 ```
+
+Each run must end with a `RESULT: N passed, 0 failed` line and exit 0. A run
+that prints no `RESULT` line tested nothing, whatever it exited with.
+
+Mount the script as above; do not pipe it in with `bash -s ... < packaged-upgrade.sh`.
+Without `-i` the container gets no stdin, so bash runs nothing and exits 0.
+With `-i`, `apt-get` reads the rest of the script as its own input and the
+deb run stops after phase 1. Both looked like a pass.
 
 What the script asserts, in order:
 
 1. The previous version installs and reports its version.
 2. A real config (with a replacement rule and `[osd]` settings) loads:
    `voxtype info engines` exits 0.
-3. The in-place upgrade succeeds and `--version` reports the new version.
+3. The in-place upgrade succeeds and `--version` reports the new version in
+   full: `voxtype 1.1.0-rc5` for `NEXT=1.1.0-rc5`.
 4. **The user config is byte-identical after the upgrade** (md5 compare -
    the packages must never touch it).
 5. The old config loads on the new binary (the backwards-compat gate).
@@ -49,6 +59,8 @@ Harness lessons from the 1.1.0 run, so they are not relearned:
   by design; a harness using them reports false failures. Check the
   replacement rule by grepping the config file.
 - Fedora's base image has no `diff`; compare with `md5sum`.
+- The script exits non-zero unless it reached its last phase, ran at least
+  one check and had no failure, so an exit status of 0 means the checks ran.
 - Install with the package manager (`apt-get install ./pkg.deb`,
   `dnf install ./pkg.rpm`) so dependencies resolve; `rpm --nodeps` leaves
   libasound missing and every binary failing for the wrong reason.

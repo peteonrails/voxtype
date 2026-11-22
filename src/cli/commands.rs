@@ -3,7 +3,7 @@
 use clap::builder::PossibleValuesParser;
 use clap::Subcommand;
 
-use super::{ConfigAction, InfoAction, MeetingAction, RecordAction, SetupAction};
+use super::{ConfigAction, HistoryAction, InfoAction, MeetingAction, RecordAction, SetupAction};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -109,6 +109,44 @@ pub enum Commands {
         progress_format: String,
     },
 
+    /// Check that everything voxtype needs is installed and working
+    ///
+    /// Runs one health check over the whole setup and prints each result with
+    /// its fix: ✓ is fine, ! works but is degraded, ✗ is broken. Checks follow
+    /// your config, so features you have not enabled are not checked.
+    ///
+    /// Covered: CPU compatibility, config and models directories, the config
+    /// file, the installed binary variant against the configured engine, GPU
+    /// runtime libraries (Vulkan, CUDA, MIGraphX), the configured engine's
+    /// model (and the Whisper secondary model), the VAD model when VAD is on,
+    /// the audio input device, WAYLAND_DISPLAY/DISPLAY in the systemd user
+    /// environment, the text output method, /dev/input access for the
+    /// built-in hotkey, desktop notifications, the OSD frontend (and
+    /// Quickshell's `qs`) when the OSD is on, pactl/parec when meeting mode is
+    /// on, the systemd user service, and the voxtype-setup skill for coding
+    /// agents it finds.
+    ///
+    /// Nothing is downloaded and nothing is changed. The daemon runs the
+    /// quick subset of these checks at startup and sends one notification
+    /// listing any errors.
+    ///
+    /// Exit status: 0 when no check failed (warnings allowed), 1 when at
+    /// least one did. `voxtype setup check` prints the same report and always
+    /// exits 0, as it always has.
+    #[command(after_help = "\
+EXAMPLES:
+  voxtype doctor                     Check everything, with fixes
+  voxtype doctor --json              Machine-readable results
+  voxtype doctor --json | jq '.checks[] | select(.severity != \"ok\")'
+  voxtype -c ~/alt.toml doctor       Check against another config file")]
+    Doctor {
+        /// Print results as JSON: {ok, errors, warnings, checks: [{id,
+        /// severity, message, fix}]}. Severity is "ok", "warn" or "error";
+        /// ids such as "transcription.model" are stable for scripts.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show or modify configuration
     ///
     /// With no subcommand, prints the resolved configuration. Use `voxtype
@@ -170,6 +208,42 @@ pub enum Commands {
     Meeting {
         #[command(subcommand)]
         action: MeetingAction,
+    },
+
+    /// Paste your last dictation again, into the focused window
+    ///
+    /// For when the text went to the wrong window, or you need it twice.
+    /// Made for a keybinding:
+    ///
+    ///   bind = CTRL ALT, V, exec, voxtype paste-last
+    ///
+    /// The text comes from history, so history must be on (`voxtype history
+    /// enable`). When it cannot paste, it says why in a desktop notification,
+    /// since a keybinding has no terminal to print to. The same as `voxtype
+    /// history paste last`, plus that notification.
+    PasteLast {
+        /// Wait this long before typing, so the binding's keys are released
+        #[arg(long, value_name = "MS", default_value_t = 150)]
+        delay_ms: u64,
+    },
+
+    /// Recover, search and manage dictation history
+    #[command(after_help = super::HISTORY_AFTER_HELP)]
+    History {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+
+        /// Machine-readable output (accepted by every subcommand)
+        #[arg(long, global = true)]
+        json: bool,
+
+        /// Number of recent dictations to show
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+
+        /// Only unsuccessful dictations
+        #[arg(long)]
+        failed: bool,
     },
 
     /// Check for updates

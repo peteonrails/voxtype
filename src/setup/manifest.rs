@@ -160,6 +160,91 @@ pub fn file_url<T: ModelArtifact + ?Sized>(artifact: &T, relative_path: &str) ->
     )
 }
 
+/// One file of a mirrored model that voxtype installs as a single flat file
+/// in the models directory, rather than as a `{models_dir}/{name}/` tree.
+///
+/// Whisper models, the Silero VAD model and the two meeting-mode helper
+/// models (ECAPA-TDNN, GTCRN) all predate the R2 mirror and live directly in
+/// the models directory under names the loaders already look for. Their
+/// mirror directories hold the model file plus `LICENSE` and
+/// `ATTRIBUTION.txt`; only `file` is installed, and its local name can differ
+/// from the mirrored one (VAD installs as `ggml-silero-vad.bin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirroredFile {
+    /// Engine sub-namespace on the mirror, e.g. `whisper` or `vad`.
+    pub engine: &'static str,
+    /// Model directory under `engine`, and the manifest's `model` field.
+    pub model: String,
+    /// The file to install, as named on the mirror and in the manifest.
+    pub file: String,
+    /// Where the bytes were mirrored from. Provenance only; never fetched.
+    pub upstream_repo: &'static str,
+}
+
+impl MirroredFile {
+    /// Mirror URL of the model file itself.
+    pub fn url(&self) -> String {
+        file_url(self, &self.file)
+    }
+}
+
+impl ModelArtifact for MirroredFile {
+    fn name(&self) -> &str {
+        &self.model
+    }
+    fn engine_prefix(&self) -> &'static str {
+        self.engine
+    }
+    fn upstream_repo(&self) -> &str {
+        self.upstream_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        // The size is the manifest's to state; only the name is pinned here.
+        vec![ExpectedFile {
+            path: self.file.clone(),
+            size: 0,
+        }]
+    }
+}
+
+/// The manifest's entry for `path`. Call after [`validate_manifest`], which
+/// already guarantees every expected file is listed; this is what hands the
+/// downloader the size and hash to check against.
+pub fn manifest_entry<'a>(manifest: &'a Manifest, path: &str) -> anyhow::Result<&'a ManifestFile> {
+    manifest
+        .files
+        .iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| anyhow::anyhow!("manifest for '{}' does not list {}", manifest.model, path))
+}
+
+/// Check a file on disk against its manifest entry: the size first, because
+/// it costs a `stat` and catches a truncated transfer, then the sha256.
+pub fn verify_file(path: &Path, entry: &ManifestFile) -> anyhow::Result<()> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| anyhow::anyhow!("could not stat {}: {}", path.display(), e))?
+        .len();
+    if len != entry.size {
+        anyhow::bail!(
+            "size mismatch for {}: expected {} bytes, got {}",
+            entry.path,
+            entry.size,
+            len
+        );
+    }
+    let observed = super::model::sha256_file(path)?;
+    let expected = entry.sha256.to_lowercase();
+    if observed != expected {
+        anyhow::bail!(
+            "sha256 mismatch for {}: expected {}, got {}",
+            entry.path,
+            expected,
+            observed
+        );
+    }
+    Ok(())
+}
+
 /// Local on-disk path for one file within a model directory under
 /// `models_dir`. Centralised so the downloader and the mirror script agree
 /// on layout.
@@ -344,6 +429,136 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("missing expected files"), "got: {}", s);
         assert!(s.contains("missing.bin"), "got: {}", s);
+    }
+
+    fn mirrored_tiny_en() -> MirroredFile {
+        MirroredFile {
+            engine: "whisper",
+            model: "tiny.en".to_string(),
+            file: "ggml-tiny.en.bin".to_string(),
+            upstream_repo: "ggerganov/whisper.cpp",
+        }
+    }
+
+    fn tiny_en_manifest() -> Manifest {
+        Manifest {
+            version: 1,
+            model: "tiny.en".to_string(),
+            engine: "whisper".to_string(),
+            files: vec![
+                ManifestFile {
+                    path: "ggml-tiny.en.bin".to_string(),
+                    size: 77_704_715,
+                    sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f"
+                        .to_string(),
+                },
+                ManifestFile {
+                    path: "LICENSE".to_string(),
+                    size: 2305,
+                    sha256: "a8".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn mirrored_file_urls_point_at_the_mirror() {
+        let a = mirrored_tiny_en();
+        assert_eq!(
+            manifest_url(&a),
+            "https://models.voxtype.io/whisper/tiny.en/manifest.json"
+        );
+        assert_eq!(
+            a.url(),
+            "https://models.voxtype.io/whisper/tiny.en/ggml-tiny.en.bin"
+        );
+    }
+
+    #[test]
+    fn mirrored_file_validates_against_its_manifest() {
+        let a = mirrored_tiny_en();
+        let m = tiny_en_manifest();
+        validate_manifest(&m, &a).unwrap();
+        assert_eq!(manifest_entry(&m, &a.file).unwrap().size, 77_704_715);
+    }
+
+    /// The published manifests carry `origin`, `license` and `object_prefix`
+    /// alongside the schema fields; the runtime must accept and ignore them.
+    #[test]
+    fn deserializes_published_manifest_with_provenance_extras() {
+        let json = r#"{
+            "version": 1,
+            "model": "silero-v6.2.0",
+            "engine": "vad",
+            "files": [
+                {"path": "ggml-silero-v6.2.0.bin", "size": 885098,
+                 "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"}
+            ],
+            "origin": {"repo": "ggml-org/whisper-vad", "revision": "9ffd", "upstream_sha256": null},
+            "license": {"license": "MIT"},
+            "object_prefix": "vad/silero-v6.2.0"
+        }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        let a = MirroredFile {
+            engine: "vad",
+            model: "silero-v6.2.0".to_string(),
+            file: "ggml-silero-v6.2.0.bin".to_string(),
+            upstream_repo: "ggml-org/whisper-vad",
+        };
+        validate_manifest(&m, &a).unwrap();
+    }
+
+    #[test]
+    fn mirrored_file_rejects_manifest_for_another_model() {
+        let mut m = tiny_en_manifest();
+        m.model = "base.en".to_string();
+        let err = validate_manifest(&m, &mirrored_tiny_en()).unwrap_err();
+        assert!(err.to_string().contains("model name mismatch"), "{err}");
+
+        let mut m = tiny_en_manifest();
+        m.files.retain(|f| f.path != "ggml-tiny.en.bin");
+        let err = validate_manifest(&m, &mirrored_tiny_en()).unwrap_err();
+        assert!(err.to_string().contains("ggml-tiny.en.bin"), "{err}");
+        assert!(manifest_entry(&m, "ggml-tiny.en.bin").is_err());
+    }
+
+    fn entry_for(bytes: &[u8]) -> ManifestFile {
+        use sha2::{Digest, Sha256};
+        ManifestFile {
+            path: "model.bin".to_string(),
+            size: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    #[test]
+    fn verify_file_accepts_matching_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"lmggweights").unwrap();
+        let mut entry = entry_for(b"lmggweights");
+        verify_file(&path, &entry).unwrap();
+        // Publisher hashes are compared case-insensitively.
+        entry.sha256 = entry.sha256.to_uppercase();
+        verify_file(&path, &entry).unwrap();
+    }
+
+    #[test]
+    fn verify_file_rejects_truncated_and_altered_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.bin");
+        let entry = entry_for(b"lmggweights");
+
+        std::fs::write(&path, b"lmggweigh").unwrap();
+        let err = verify_file(&path, &entry).unwrap_err().to_string();
+        assert!(err.contains("size mismatch"), "{err}");
+
+        std::fs::write(&path, b"lmggweighTs").unwrap();
+        let err = verify_file(&path, &entry).unwrap_err().to_string();
+        assert!(err.contains("sha256 mismatch"), "{err}");
+
+        let err = verify_file(&dir.path().join("absent.bin"), &entry).unwrap_err();
+        assert!(err.to_string().contains("could not stat"), "{err}");
     }
 
     #[test]

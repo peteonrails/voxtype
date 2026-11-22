@@ -5,7 +5,7 @@
 //!
 //! - The IPC reader runs on a dedicated thread with a single-threaded Tokio
 //!   runtime; it pushes decoded `AudioFrame`s into an `Arc<Mutex<FrameRing>>`,
-//!   updates an `Arc<Mutex<PeakHold>>`, and notifies the main thread via a
+//!   feeds an `Arc<Mutex<LevelMeter>>`, and notifies the main thread via a
 //!   `calloop::ping::Ping` so the renderer can wake the surface up.
 //! - The main thread runs the Wayland event loop (calloop + SCTK), creates
 //!   the wlr-layer-shell surface on demand when frames start arriving, and
@@ -29,11 +29,11 @@ use std::time::Instant;
 use anyhow::Context as _;
 use clap::Parser;
 
-use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
-use voxtype::osd::config::OsdConfig;
+use voxtype::audio::levels::AudioFrame;
+use voxtype::osd::config::{OsdConfig, OsdPaletteSource};
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
-use voxtype::osd::theme::ThemeWatcher;
-use voxtype::osd::visual::PeakHold;
+use voxtype::osd::theme;
+use voxtype::osd::visual::{LevelMeter, Palette};
 
 use crate::app::SharedState;
 
@@ -78,9 +78,9 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_OPACITY")]
     opacity: Option<f32>,
 
-    /// Visual gain applied to audio samples before drawing the waveform.
-    /// Higher = waveform fills more of the vertical for quiet inputs.
-    /// Reduce for hot mics (e.g. 4.0); raise for quiet sources (e.g. 14.0).
+    /// Waveform sensitivity. 10 is neutral; each doubling shows the input
+    /// 6 dB louder. Reduce for hot mics (e.g. 5.0); raise for quiet
+    /// sources (e.g. 20.0). The waveform always stays inside the card.
     #[arg(long, env = "VOXTYPE_OSD_GAIN")]
     waveform_gain: Option<f32>,
 }
@@ -114,10 +114,7 @@ fn load_osd_config_from_file(explicit: Option<&std::path::Path>) -> OsdConfig {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(voxtype::logging::env_filter("info"))
         .init();
 
     let args = Args::parse();
@@ -153,14 +150,38 @@ fn main() -> anyhow::Result<()> {
         osd_config.height_px
     );
 
-    let theme = ThemeWatcher::new();
-    let palette = theme.palette();
+    // Same palette roles as the GTK4 and Quickshell frontends: the active
+    // Omarchy theme unless `[osd] palette` pins another source.
+    let follow_omarchy = osd_config.palette.unwrap_or_default() == OsdPaletteSource::Omarchy;
+    let palette = Arc::new(Mutex::new(if follow_omarchy {
+        theme::load_palette()
+    } else {
+        Palette::fallback()
+    }));
+
+    // Follow Omarchy theme switches live, like the Quickshell OSD. The next
+    // rendered frame picks up the new palette; no redraw is forced, so a
+    // theme switch never makes a hidden OSD appear.
+    let _theme_watch = if follow_omarchy {
+        let palette = Arc::clone(&palette);
+        theme::watch_current_theme(move || {
+            let reloaded = theme::load_palette();
+            tracing::info!("Omarchy theme changed; reloaded OSD palette");
+            if let Ok(mut p) = palette.lock() {
+                *p = reloaded;
+            }
+        })
+    } else {
+        None
+    };
 
     let shared = SharedState {
         ring: Arc::new(Mutex::new(FrameRing::for_window(
             osd_config.waveform_window_secs,
         ))),
-        peak_hold: Arc::new(Mutex::new(PeakHold::new(osd_config.peak_decay_db_per_sec))),
+        meter: Arc::new(Mutex::new(LevelMeter::new(
+            osd_config.peak_decay_db_per_sec,
+        ))),
         last_frame_at: Arc::new(Mutex::new(None)),
         palette,
         config: osd_config,
@@ -217,14 +238,14 @@ fn ipc_thread_main(
 
     let mut total: u64 = 0;
     let mut last_log = Instant::now();
-    let dt_per_frame = 1.0 / FRAME_HZ as f32;
 
     let on_frame = move |frame: AudioFrame| {
         if let Ok(mut r) = shared.ring.lock() {
             r.push(frame);
         }
-        if let Ok(mut p) = shared.peak_hold.lock() {
-            p.update(frame.peak_dbfs, dt_per_frame);
+        // The renderer advances the meter once per drawn frame.
+        if let Ok(mut m) = shared.meter.lock() {
+            m.push(frame.peak_dbfs);
         }
         if let Ok(mut t) = shared.last_frame_at.lock() {
             *t = Some(Instant::now());

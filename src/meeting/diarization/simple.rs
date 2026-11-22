@@ -40,6 +40,7 @@ impl Diarizer for SimpleDiarizer {
         &self,
         _samples: &[f32],
         source: AudioSource,
+        _chunk_start_ms: u64,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {
         let speaker = Self::source_to_speaker(source);
@@ -93,7 +94,7 @@ mod tests {
         seg2.source = AudioSource::Microphone;
         let segments = vec![seg1, seg2];
 
-        let result = diarizer.diarize(&[], AudioSource::Microphone, &segments);
+        let result = diarizer.diarize(&[], AudioSource::Microphone, 0, &segments);
 
         // Should preserve transcript boundaries and label every segment.
         assert_eq!(result.len(), 2);
@@ -112,7 +113,7 @@ mod tests {
         seg2.source = AudioSource::Loopback;
         let segments = vec![seg1, seg2];
 
-        let result = diarizer.diarize(&[], AudioSource::Loopback, &segments);
+        let result = diarizer.diarize(&[], AudioSource::Loopback, 0, &segments);
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].speaker, SpeakerId::Remote);
@@ -128,7 +129,7 @@ mod tests {
         seg.source = AudioSource::Loopback;
         let segments = vec![seg];
 
-        let result = diarizer.diarize(&[], AudioSource::Loopback, &segments);
+        let result = diarizer.diarize(&[], AudioSource::Loopback, 0, &segments);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].speaker, SpeakerId::Remote);

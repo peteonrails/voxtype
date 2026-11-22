@@ -13,6 +13,7 @@ voxtype record start && sleep 2 && voxtype record stop
 
 # 3. Check logs for dotool usage:
 journalctl --user -u voxtype --since "30 seconds ago" | grep -E "dotool|Text output"
+# If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service --since "30 seconds ago" | grep -E "dotool|Text output"
 # Expected: "wtype not available, trying next" then "Text typed via dotool"
 
 # 4. Restore wtype

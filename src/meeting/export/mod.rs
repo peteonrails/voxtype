@@ -81,6 +81,16 @@ pub enum ExportError {
     UnsupportedFormat(String),
 }
 
+/// One line describing an annotation: "Note: text", "Highlight: text", or
+/// "Highlight" alone.
+pub fn annotation_line(annotation: &crate::meeting::data::SegmentAnnotation) -> String {
+    match (annotation.highlight, annotation.text.is_empty()) {
+        (true, true) => "Highlight".to_string(),
+        (true, false) => format!("Highlight: {}", annotation.text),
+        (false, _) => format!("Note: {}", annotation.text),
+    }
+}
+
 /// Export options
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
@@ -136,6 +146,128 @@ pub fn export_meeting_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting::data::{AudioSource, TranscriptSegment};
+
+    /// A conversation as the daemon records it: per chunk, the microphone
+    /// track's segments arrive before the loopback track's.
+    fn conversation() -> MeetingData {
+        let mut meeting = MeetingData::new(Some("Turns".to_string()));
+        let lines = [
+            (0, 2_000, AudioSource::Microphone, "Can you hear me?"),
+            (1, 14_000, AudioSource::Microphone, "Great, let's start."),
+            (2, 6_000, AudioSource::Loopback, "Yes, loud and clear."),
+            (3, 21_000, AudioSource::Loopback, "Sounds good."),
+        ];
+        for (id, start, source, text) in lines {
+            let mut seg = TranscriptSegment::new(id, start, start + 3_000, text.to_string(), 0);
+            seg.source = source;
+            meeting.transcript.add_segment(seg);
+        }
+        meeting
+    }
+
+    #[test]
+    fn exports_carry_notes_on_top_and_annotations_under_their_line() {
+        let mut meeting = conversation();
+        meeting.notes = Some("Budget review\n- travel is high\n".to_string());
+        meeting.transcript.segments[1].annotation = Some(crate::meeting::SegmentAnnotation {
+            text: "follow up".to_string(),
+            highlight: true,
+        });
+        meeting.transcript.segments[2].annotation = Some(crate::meeting::SegmentAnnotation {
+            text: "check".to_string(),
+            highlight: false,
+        });
+        let options = ExportOptions {
+            include_speakers: true,
+            ..Default::default()
+        };
+
+        let md = export_meeting(&meeting, ExportFormat::Markdown, &options).unwrap();
+        assert!(
+            md.contains("## Notes\n\nBudget review\n- travel is high\n\n"),
+            "{md}"
+        );
+        assert!(md.find("## Notes").unwrap() < md.find("## Transcript").unwrap());
+        assert!(
+            md.contains("Yes, loud and clear.\n\n> **Highlight: follow up**\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Great, let's start.\n\n> Note: check\n"),
+            "{md}"
+        );
+
+        let txt = export_meeting(&meeting, ExportFormat::Text, &options).unwrap();
+        assert!(txt.starts_with("Notes:\nBudget review"), "{txt}");
+        assert!(
+            txt.contains("Yes, loud and clear.\n  > Highlight: follow up\n"),
+            "{txt}"
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(&export_meeting(&meeting, ExportFormat::Json, &options).unwrap())
+                .unwrap();
+        assert_eq!(json["notes"], "Budget review\n- travel is high\n");
+        assert_eq!(
+            json["transcript"]["segments"][1]["annotation"]["highlight"],
+            true
+        );
+        assert!(json["transcript"]["segments"][0]
+            .get("annotation")
+            .is_none());
+    }
+
+    /// Bug: exports listed all of You, then all of Remote, per chunk.
+    #[test]
+    fn every_format_keeps_turn_order_and_per_line_timestamps() {
+        let meeting = conversation();
+        let options = ExportOptions {
+            include_timestamps: true,
+            include_speakers: true,
+            ..Default::default()
+        };
+        let in_order = [
+            "Can you hear me?",
+            "loud and clear",
+            "let's start",
+            "Sounds good",
+        ];
+
+        for format in [
+            ExportFormat::Text,
+            ExportFormat::Markdown,
+            ExportFormat::Json,
+            ExportFormat::Srt,
+            ExportFormat::Vtt,
+        ] {
+            let out = export_meeting(&meeting, format, &options).unwrap();
+            let positions: Vec<usize> = in_order
+                .iter()
+                .map(|line| {
+                    out.find(line)
+                        .unwrap_or_else(|| panic!("{format}: {line} missing"))
+                })
+                .collect();
+            assert!(
+                positions.windows(2).all(|w| w[0] < w[1]),
+                "{format} lost turn order:\n{out}"
+            );
+        }
+
+        let text = export_meeting(&meeting, ExportFormat::Text, &options).unwrap();
+        for stamp in ["[00:02]", "[00:06]", "[00:14]", "[00:21]"] {
+            assert!(text.contains(stamp), "text export missing {stamp}:\n{text}");
+        }
+        let md = export_meeting(&meeting, ExportFormat::Markdown, &options).unwrap();
+        for stamp in ["*[00:02]*", "*[00:06]*", "*[00:14]*", "*[00:21]*"] {
+            assert!(md.contains(stamp), "markdown export missing {stamp}:\n{md}");
+        }
+        let srt = export_meeting(&meeting, ExportFormat::Srt, &options).unwrap();
+        assert!(srt.contains("00:00:06,000 --> 00:00:09,000\n[Remote] Yes, loud and clear."));
+        let vtt = export_meeting(&meeting, ExportFormat::Vtt, &options).unwrap();
+        assert!(vtt.contains("00:00:14.000 --> 00:00:17.000\n<v You>Great, let's start."));
+    }
 
     #[test]
     fn test_format_from_str() {
@@ -148,6 +280,29 @@ mod tests {
         assert_eq!(ExportFormat::parse("md"), Some(ExportFormat::Markdown));
         assert_eq!(ExportFormat::parse("json"), Some(ExportFormat::Json));
         assert_eq!(ExportFormat::parse("invalid"), None);
+    }
+
+    /// The CLI's `--format` list (kept apart for man-page generation) and
+    /// this parser must agree on every name and alias.
+    #[test]
+    fn cli_export_formats_all_parse() {
+        for &(name, alias) in crate::cli::EXPORT_FORMATS {
+            let format = ExportFormat::parse(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(format.to_string(), name);
+            if let Some(alias) = alias {
+                assert_eq!(ExportFormat::parse(alias), Some(format), "{alias}");
+            }
+        }
+        let names: Vec<_> = crate::cli::EXPORT_FORMATS.iter().map(|f| f.0).collect();
+        for format in [
+            ExportFormat::Text,
+            ExportFormat::Markdown,
+            ExportFormat::Json,
+            ExportFormat::Srt,
+            ExportFormat::Vtt,
+        ] {
+            assert!(names.contains(&format.to_string().as_str()), "{format}");
+        }
     }
 
     #[test]

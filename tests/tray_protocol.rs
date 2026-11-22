@@ -145,6 +145,10 @@ async fn tray_waits_for_late_watcher() {
         .unwrap();
     let idle = menu(&dbusmenu).await;
     assert!(!bool::try_from(&item(&idle, "Cancel").1["enabled"]).unwrap());
+    assert!(
+        !has(&idle, "Meetings..."),
+        "no Meetings... while meeting mode is off"
+    );
     let activation = sni.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).await;
     assert!(activation.unwrap_err().to_string().contains("ItemIsMenu"));
     assert!(
@@ -153,7 +157,7 @@ async fn tray_waits_for_late_watcher() {
             .is_err(),
         "plain activation must not launch settings"
     );
-    click(&dbusmenu, item(&idle, "Settings").0).await;
+    click(&dbusmenu, item(&idle, "Settings...").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::OpenSettings));
     click(&dbusmenu, item(&idle, "Start Recording").0).await;
     assert_eq!(events.recv().await, Some(TrayAction::ToggleRecording));
@@ -320,4 +324,153 @@ async fn missing_bus_is_nonfatal() {
         .await
         .unwrap()
         .unwrap();
+}
+
+fn label_enabled(menu: &[Layout], label: &str) -> bool {
+    item(menu, label)
+        .1
+        .get("enabled")
+        .map(|value| bool::try_from(value).unwrap())
+        .unwrap_or(true)
+}
+
+fn has(menu: &[Layout], label: &str) -> bool {
+    menu.iter().any(|(_, props, _)| {
+        props.get("label").and_then(|v| <&str>::try_from(v).ok()) == Some(label)
+    })
+}
+
+/// Poll the menu until `label` shows up: updates reach dbusmenu asynchronously.
+async fn menu_with(p: &zbus::Proxy<'_>, label: &str) -> Vec<Layout> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let m = menu(p).await;
+            if has(&m, label) {
+                return m;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("menu never showed {label}"))
+}
+
+#[tokio::test]
+async fn meeting_entries_follow_the_daemon_and_send_meeting_actions() {
+    if isolated("meeting_entries_follow_the_daemon_and_send_meeting_actions") {
+        return;
+    }
+    let w = Watcher::default();
+    let bus = watcher(w.clone()).await;
+    let mut config = voxtype::config::Config::default();
+    config.meeting.enabled = true;
+    let (actions, mut events) = mpsc::channel(8);
+    let runtime = tray::TrayRuntime::start_for_config_with_actions(&config, actions).unwrap();
+    let name = registered(&w).await;
+    // Uncached: SNI announces tooltip changes with NewToolTip, not
+    // PropertiesChanged, so a cached proxy would read stale values.
+    let sni: zbus::Proxy<'_> = zbus::proxy::Builder::new(&bus)
+        .destination(name.as_str())
+        .unwrap()
+        .path("/StatusNotifierItem")
+        .unwrap()
+        .interface("org.kde.StatusNotifierItem")
+        .unwrap()
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+        .unwrap();
+    let path: OwnedObjectPath = sni.get_property("Menu").await.unwrap();
+    let dbusmenu = zbus::Proxy::new(&bus, name.as_str(), path.as_str(), "com.canonical.dbusmenu")
+        .await
+        .unwrap();
+    let tooltip = || async {
+        let t: Tooltip = sni.get_property("ToolTip").await.unwrap();
+        (t.2, t.3)
+    };
+    let says = |text: &str| (format!("Voxtype: {text}"), text.to_string());
+
+    let idle = menu_with(&dbusmenu, "Start Meeting").await;
+    assert!(label_enabled(&idle, "Start Meeting"));
+    assert_eq!(tooltip().await, says("Ready"));
+    // With meetings on, "Meetings..." opens the meeting view.
+    click(&dbusmenu, item(&idle, "Meetings...").0).await;
+    assert_eq!(events.recv().await, Some(TrayAction::OpenMeetings));
+    click(&dbusmenu, item(&idle, "Start Meeting").0).await;
+    assert_eq!(events.recv().await, Some(TrayAction::StartMeeting));
+    let starting = menu_with(&dbusmenu, "Starting Meeting...").await;
+    assert!(!label_enabled(&starting, "Starting Meeting..."));
+    assert!(has(&starting, "Voxtype: Starting meeting..."));
+    assert_eq!(tooltip().await, says("Starting meeting..."));
+
+    // A meeting started anywhere (CLI, detection prompt) reaches the tray
+    // through the daemon's meeting state.
+    runtime.update_meeting(tray::MeetingTrayState::Recording);
+    let recording = menu_with(&dbusmenu, "Stop Meeting").await;
+    assert!(!has(&recording, "Start Meeting"));
+    assert!(has(&recording, "Voxtype: Meeting in progress"));
+    assert_eq!(tooltip().await, says("Meeting in progress"));
+    click(&dbusmenu, item(&recording, "Pause Meeting").0).await;
+    assert_eq!(events.recv().await, Some(TrayAction::PauseMeeting));
+    click(&dbusmenu, item(&recording, "Stop Meeting").0).await;
+    assert_eq!(events.recv().await, Some(TrayAction::StopMeeting));
+
+    runtime.update_meeting(tray::MeetingTrayState::Paused);
+    let paused = menu_with(&dbusmenu, "Resume Meeting").await;
+    assert_eq!(tooltip().await, says("Meeting paused"));
+    click(&dbusmenu, item(&paused, "Resume Meeting").0).await;
+    assert_eq!(events.recv().await, Some(TrayAction::ResumeMeeting));
+
+    runtime.update_meeting(tray::MeetingTrayState::Finalizing);
+    let finalizing = menu_with(&dbusmenu, "Finishing Meeting...").await;
+    assert!(!label_enabled(&finalizing, "Finishing Meeting..."));
+    assert_eq!(tooltip().await, says("Finishing meeting..."));
+    click(&dbusmenu, item(&finalizing, "Finishing Meeting...").0).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err(),
+        "a disabled entry must not act"
+    );
+
+    runtime.update_meeting(tray::MeetingTrayState::Idle);
+    let again = menu_with(&dbusmenu, "Start Meeting").await;
+    assert!(label_enabled(&again, "Start Meeting"));
+    assert_eq!(tooltip().await, says("Ready"));
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn meeting_mode_off_greys_out_start_meeting() {
+    if isolated("meeting_mode_off_greys_out_start_meeting") {
+        return;
+    }
+    let w = Watcher::default();
+    let bus = watcher(w.clone()).await;
+    let config = voxtype::config::Config::default();
+    let (actions, mut events) = mpsc::channel(8);
+    let runtime = tray::TrayRuntime::start_for_config_with_actions(&config, actions).unwrap();
+    let name = registered(&w).await;
+    let sni = zbus::Proxy::new(
+        &bus,
+        name.as_str(),
+        "/StatusNotifierItem",
+        "org.kde.StatusNotifierItem",
+    )
+    .await
+    .unwrap();
+    let path: OwnedObjectPath = sni.get_property("Menu").await.unwrap();
+    let dbusmenu = zbus::Proxy::new(&bus, name.as_str(), path.as_str(), "com.canonical.dbusmenu")
+        .await
+        .unwrap();
+    let label = "Start Meeting (meeting mode is off)";
+    let m = menu_with(&dbusmenu, label).await;
+    assert!(!label_enabled(&m, label));
+    click(&dbusmenu, item(&m, label).0).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err()
+    );
+    runtime.shutdown().await;
 }

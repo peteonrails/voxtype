@@ -12,12 +12,18 @@
 //!
 //! Evidence, in order of authority:
 //!
-//! 1. **The daemon's own answer.** A future daemon writes its acceleration
-//!    state to `$XDG_RUNTIME_DIR/voxtype/accel.json` when it loads a model
-//!    (see [`AccelStateFile`]); nothing else can know as reliably. The read
-//!    is implemented here already and preferred when the file exists and
-//!    names the running PID, so shipping that daemon-side write later
-//!    upgrades this command's accuracy with no change on this side.
+//! 1. **The daemon's own answer.** The daemon writes its acceleration state
+//!    to `$XDG_RUNTIME_DIR/voxtype/accel.json` when it loads a model (see
+//!    [`AccelStateFile`] and [`publish`]); nothing else can know as reliably.
+//!    It is preferred when the file exists and names the running PID. Today
+//!    the local Whisper (whisper.cpp) and OpenVINO paths write it, and so do
+//!    the GGUF engines, from the backend `voxtype-gguf-worker` reports once
+//!    transcribe.cpp has bound one (see [`publish_gguf_worker`]). Engines that
+//!    don't fall back to the evidence below, except a GGUF engine: the
+//!    evidence below describes the main binary, which never runs its model,
+//!    so with nothing published the worker's own `gguf_backend.json` report
+//!    stands in (a daemon from before GGUF publishing), or the answer is
+//!    `unknown`.
 //! 2. **VRAM held by the daemon's PID**, via `rocm-smi` or `nvidia-smi`.
 //!    Proof of GPU use when present. Absence proves nothing: a daemon with
 //!    `on_demand_loading` holds no VRAM while idle.
@@ -45,7 +51,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use super::binary::{self, Acceleration, Variant};
-use crate::config::Config;
+use crate::config::{ActiveGguf, Config};
 use crate::daemon_status;
 
 /// How the running daemon is transcribing.
@@ -102,6 +108,8 @@ pub struct AccelReport {
     /// isn't `gpu`, so a fallback still says which stack fell back; it is
     /// never itself a claim of acceleration.
     pub backend: Option<&'static str>,
+    /// The device the model runs on, when the daemon published one.
+    pub device: Option<String>,
     /// Every observation the verdict rests on, each tagged with its source.
     pub evidence: Vec<String>,
     pub variant: Option<Variant>,
@@ -114,6 +122,7 @@ impl AccelReport {
         serde_json::json!({
             "state": self.state.tag(),
             "backend": self.backend,
+            "device": self.device,
             "evidence": self.evidence,
             "variant": self.variant.and_then(|v| serde_json::to_value(v).ok()),
             "pid": self.pid,
@@ -123,22 +132,275 @@ impl AccelReport {
 
 /// Contents of `$XDG_RUNTIME_DIR/voxtype/accel.json`.
 ///
-/// Not written yet. The daemon should write it once per model load, after the
-/// backend has actually initialized, and remove it on shutdown. `pid` exists
+/// Written by [`publish`] once per model load, after the backend has actually
+/// initialized, and removed by the daemon at startup and shutdown. `pid` exists
 /// so a file left by a crashed predecessor is ignored rather than believed.
 /// `state` uses the same strings as [`AccelState::tag`], and `detail` is a
-/// free-form line for the evidence list (e.g. the device name).
+/// free-form line for the evidence list (e.g. the device name). `device` is
+/// optional so files written before it existed still parse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccelStateFile {
     pub pid: i32,
     pub state: String,
     pub backend: Option<String>,
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 /// Where the daemon publishes its acceleration state.
 pub fn state_file_path() -> PathBuf {
     Config::runtime_dir().join("accel.json")
+}
+
+/// Which daemon a model load in this process belongs to: the daemon itself,
+/// or its `gpu_isolation` transcription worker. `None` for anything else
+/// (`voxtype transcribe <file>`, tests), which must not overwrite the running
+/// daemon's answer.
+fn owning_daemon_pid() -> Option<i32> {
+    let daemon = daemon_status::read_pid_if_alive()?;
+    let me = std::process::id() as i32;
+    let parent = std::os::unix::process::parent_id() as i32;
+    (daemon == me || daemon == parent).then_some(daemon)
+}
+
+/// Record what a model load actually got, for `voxtype info accel`.
+///
+/// Returns `true` when this is news for the running daemon: the published
+/// state changed. Callers use that to notify once per daemon start (or once
+/// per distinct outcome) rather than on every model load, including loads in
+/// a fresh `gpu_isolation` worker process, which has no memory of its own.
+/// Returns `false`, and writes nothing, outside a daemon.
+pub fn publish(state: AccelState, backend: Option<&str>, detail: Option<String>) -> bool {
+    let Some(pid) = owning_daemon_pid() else {
+        return false;
+    };
+    publish_at(&state_file_path(), pid, state, backend, None, detail)
+}
+
+pub(crate) fn publish_at(
+    path: &Path,
+    pid: i32,
+    state: AccelState,
+    backend: Option<&str>,
+    device: Option<String>,
+    detail: Option<String>,
+) -> bool {
+    let file = AccelStateFile {
+        pid,
+        state: state.tag().to_string(),
+        backend: backend.map(str::to_string),
+        detail,
+        device,
+    };
+    if let Some(prev) = read_state_file_at(path, pid) {
+        if prev.state == file.state
+            && prev.backend == file.backend
+            && prev.detail == file.detail
+            && prev.device == file.device
+        {
+            return false;
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string(&file) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                tracing::debug!("Could not write {}: {}", path.display(), e);
+            }
+        }
+        Err(e) => tracing::debug!("Could not serialize acceleration state: {}", e),
+    }
+    true
+}
+
+/// What `voxtype-gguf-worker` writes to `$XDG_RUNTIME_DIR/voxtype/gguf_backend.json`
+/// (see `status_json::GGUF_STATUS_FILE`) once transcribe.cpp has bound a
+/// backend. Workers before 1.3.1 wrote only `model`, `backend` and `device`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GgufWorkerReport {
+    /// Path of the model the worker loaded.
+    pub model: String,
+    /// transcribe.cpp's bound backend: "cpu", "vulkan", "cuda", "ROCm", "metal".
+    pub backend: String,
+    /// ggml device name, e.g. "Vulkan0".
+    #[serde(default)]
+    pub device: Option<String>,
+    /// Human-readable device, e.g. "AMD Radeon RX 7800 XT (RADV NAVI32)".
+    #[serde(default)]
+    pub description: Option<String>,
+    /// transcribe.cpp's vendor kind: "cpu", "accel", "vulkan", "cuda", ...
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The worker's own PID, so a report from another worker (a concurrent
+    /// `voxtype transcribe`, say) is not mistaken for this one's.
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
+/// What a GGUF worker's report means for `voxtype info accel`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgufOutcome {
+    pub(crate) state: AccelState,
+    pub(crate) backend: &'static str,
+    pub(crate) device: Option<String>,
+    pub(crate) detail: String,
+}
+
+/// The backend tag for a transcribe.cpp backend name, `"cpu"` for its CPU
+/// backends, or `None` for a name this doesn't recognise.
+fn gguf_backend_tag(name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_lowercase();
+    if name.contains("vulkan") {
+        Some("vulkan")
+    } else if name.contains("cuda") {
+        Some("cuda")
+    } else if name.contains("rocm") || name.contains("hip") {
+        Some("rocm")
+    } else if name.contains("metal") {
+        Some("metal")
+    } else if name.starts_with("cpu") || name == "accel" {
+        Some("cpu")
+    } else {
+        None
+    }
+}
+
+fn file_name_of(path: &str) -> Option<&std::ffi::OsStr> {
+    Path::new(path).file_name()
+}
+
+/// Turn the worker's report into an acceleration outcome, or `None` when the
+/// report is not from this worker (another PID, another model) or names a
+/// backend this doesn't recognise. `worker_pid` is the worker the caller
+/// expects, when it knows; `active` is the engine the worker was started for,
+/// and its `backend` is the configured `gguf_backend`.
+pub(crate) fn gguf_outcome(
+    report: &GgufWorkerReport,
+    worker_pid: Option<u32>,
+    active: &ActiveGguf,
+) -> Option<GgufOutcome> {
+    if let (Some(expected), Some(reported)) = (worker_pid, report.pid) {
+        if expected != reported {
+            return None;
+        }
+    }
+    if file_name_of(&report.model) != file_name_of(active.model) {
+        return None;
+    }
+    let backend = gguf_backend_tag(&report.backend)
+        .or_else(|| report.kind.as_deref().and_then(gguf_backend_tag))?;
+    let device = match (report.description.as_deref(), report.device.as_deref()) {
+        (Some(desc), Some(name)) if !desc.is_empty() && desc != name => {
+            Some(format!("{desc} [{name}]"))
+        }
+        (Some(desc), _) if !desc.is_empty() => Some(desc.to_string()),
+        (_, Some(name)) if !name.is_empty() => Some(name.to_string()),
+        _ => None,
+    };
+    let section = active.section;
+    let configured = active.backend;
+    let who = match report.pid.or(worker_pid) {
+        Some(pid) => format!("voxtype-gguf-worker pid {pid} runs the {section} GGUF model"),
+        None => format!("voxtype-gguf-worker runs the {section} GGUF model"),
+    };
+
+    if backend != "cpu" {
+        let detail = match &device {
+            Some(device) => format!("{who} on {device}"),
+            None => format!("{who} on {backend}"),
+        };
+        return Some(GgufOutcome {
+            state: AccelState::Gpu,
+            backend,
+            device,
+            detail,
+        });
+    }
+
+    let asked_for_cpu = matches!(
+        configured.to_ascii_lowercase().as_str(),
+        "cpu" | "cpu_accel"
+    );
+    let detail = if asked_for_cpu {
+        format!(
+            "{who} on the CPU because {section}.gguf_backend = \"{configured}\"; \
+             set it to \"vulkan\" to use the GPU"
+        )
+    } else {
+        format!("{who} on the CPU; {section}.gguf_backend = \"{configured}\" did not bind a GPU")
+    };
+    Some(GgufOutcome {
+        state: AccelState::CpuFallback,
+        backend,
+        device,
+        detail,
+    })
+}
+
+/// Where the GGUF worker writes its report.
+fn gguf_report_path() -> PathBuf {
+    Config::runtime_dir().join(crate::status_json::GGUF_STATUS_FILE)
+}
+
+pub(crate) fn read_gguf_report_at(path: &Path) -> Option<GgufWorkerReport> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// The parent of a live process, from `/proc/<pid>/stat`.
+fn parent_pid(pid: u32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesised and may contain spaces; the fields
+    // after its closing parenthesis are state, then the parent PID.
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Publish what a GGUF worker bound, for `voxtype info accel`. The worker runs
+/// in its own process and writes nothing to the daemon's journal, so without
+/// this the report could only describe the main binary's variant.
+///
+/// Called by the daemon once the worker it spawned says READY; the worker
+/// writes its report before that. `section`, `model` and `configured` are the
+/// engine's config section, model and `gguf_backend`. Returns `false`, and
+/// writes nothing, outside a daemon or when the report is missing or belongs
+/// to another worker.
+pub fn publish_gguf_worker(section: &str, model: &str, configured: &str, worker_pid: u32) -> bool {
+    let Some(pid) = owning_daemon_pid() else {
+        return false;
+    };
+    let Some(report) = read_gguf_report_at(&gguf_report_path()) else {
+        return false;
+    };
+    let section: &'static str = match section {
+        "cohere" => "cohere",
+        "parakeet" => "parakeet",
+        _ => "gguf",
+    };
+    let active = ActiveGguf {
+        section,
+        model,
+        backend: configured,
+    };
+    let Some(outcome) = gguf_outcome(&report, Some(worker_pid), &active) else {
+        return false;
+    };
+    publish_at(
+        &state_file_path(),
+        pid,
+        outcome.state,
+        Some(outcome.backend),
+        outcome.device,
+        Some(outcome.detail),
+    )
+}
+
+/// Remove the published state. The daemon calls this at startup and shutdown.
+pub fn clear() {
+    let _ = std::fs::remove_file(state_file_path());
 }
 
 /// Whether a journal line proves acceleration, disproves it, or merely states
@@ -300,7 +562,12 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 
     // ONNX Runtime failures. The provider .so files are dlopened at runtime,
     // so a missing companion library shows up here and nowhere else.
-    if l.contains("failed to load library libonnxruntime_providers")
+    // ORT names the provider by full path when it sits beside the binary
+    // ("Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_...").
+    if l.contains("cudnn") && (l.contains("cannot open") || l.contains("missing")) {
+        return Some((Signal::Negative, Some("cuda")));
+    }
+    if (l.contains("failed to load library") && l.contains("libonnxruntime_providers"))
         || (l.contains("failed to create") && l.contains("executionprovider"))
         || l.contains("falling back to cpu")
         || l.contains("ep registration failed")
@@ -329,7 +596,7 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 /// Journal patterns worth pulling out of a daemon's log. Passed to
 /// `journalctl -g` so the filtering happens there rather than by streaming
 /// every line of a weeks-old daemon's journal into this process.
-const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices";
+const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices|cudnn";
 
 /// Read the GPU-relevant lines this PID logged.
 fn scan_journal(pid: i32) -> Signals {
@@ -527,18 +794,24 @@ pub(crate) fn decide(
     (AccelState::Unknown, backend)
 }
 
-/// Build the report for whatever daemon is running now.
-pub fn report() -> AccelReport {
-    report_for(daemon_status::read_pid_if_alive())
+/// Build the report for whatever daemon is running now. `config` says which
+/// engine is active; a GGUF engine runs in `voxtype-gguf-worker`, so the main
+/// binary's variant and journal say nothing about it.
+pub fn report(config: &Config) -> AccelReport {
+    report_for(
+        daemon_status::read_pid_if_alive(),
+        config.active_gguf().as_ref(),
+    )
 }
 
 /// The report pipeline, with the daemon lookup already done so tests can drive
 /// it without one.
-pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
+pub(crate) fn report_for(pid: Option<i32>, gguf: Option<&ActiveGguf>) -> AccelReport {
     let Some(pid) = pid else {
         return AccelReport {
             state: AccelState::NotRunning,
             backend: None,
+            device: None,
             evidence: vec![format!(
                 "daemon: no live PID in {}",
                 daemon_status::pid_file_path().display()
@@ -575,19 +848,69 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
             Some("vulkan") => Some("vulkan"),
             Some("cuda") => Some("cuda"),
             Some("migraphx") => Some("migraphx"),
+            Some("metal") => Some("metal"),
+            Some("hip") => Some("hip"),
+            Some("rocm") => Some("rocm"),
+            Some("openvino") => Some("openvino"),
+            Some("cpu") => Some("cpu"),
             _ => variant_backend(variant),
         };
         return AccelReport {
             state,
             backend,
+            device: published.device,
             evidence,
             variant,
             pid: Some(pid),
         };
     }
 
-    let signals = scan_journal(pid);
+    if let Some(gguf) = gguf {
+        // The daemon removes the worker's report at startup, so one that is
+        // here was written since. A report naming its worker must name one of
+        // this daemon's children.
+        let path = gguf_report_path();
+        let worker = read_gguf_report_at(&path)
+            .filter(|r| r.pid.is_none_or(|worker| parent_pid(worker) == Some(pid)));
+        return unpublished_gguf_report(pid, gguf, variant, evidence, worker, &path);
+    }
+
+    let mut signals = scan_journal(pid);
     let vram = vram_held_by(pid);
+
+    // A provider that cannot resolve its libraries can never load, whatever
+    // the journal says or no longer says after rotation.
+    let mut fix: Vec<String> = Vec::new();
+    if let Some(exe) = binary::running_binary_path(pid) {
+        if let Some(missing) =
+            super::gpu::unresolved_provider_deps_at(&exe).filter(|m| !m.is_empty())
+        {
+            let name = exe
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            signals.negative.push(Observation {
+                text: format!(
+                    "the GPU execution provider beside {} cannot load: missing {}",
+                    exe.display(),
+                    missing.join(", ")
+                ),
+                count: 1,
+            });
+            fix = super::gpu::provider_fix_lines(&name, &missing);
+        }
+    }
+    if fix.is_empty()
+        && signals
+            .negative
+            .iter()
+            .any(|o| o.text.to_ascii_lowercase().contains("cudnn"))
+    {
+        fix = super::parakeet::CUDNN_INSTALL_HINT
+            .lines()
+            .map(str::to_string)
+            .collect();
+    }
 
     if let Some((bytes, tool)) = vram {
         evidence.push(format!(
@@ -598,6 +921,7 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
         ));
     }
     evidence.extend(signals.evidence_lines());
+    evidence.extend(fix.iter().map(|line| format!("fix: {}", line.trim())));
 
     let (state, backend) = decide(variant, &signals, vram.map(|(bytes, _)| bytes));
     if state == AccelState::Unknown && signals.intent.is_empty() && signals.positive.is_empty() {
@@ -610,6 +934,60 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
     AccelReport {
         state,
         backend,
+        device: None,
+        evidence,
+        variant,
+        pid: Some(pid),
+    }
+}
+
+/// A GGUF engine with nothing in `accel.json`. A daemon from before GGUF
+/// publishing still has its worker's own report, `worker`, which says what
+/// transcribe.cpp bound. Without one the worker has not loaded the model yet
+/// (on-demand loading, or no dictation since the daemon started). Either way
+/// the main binary's variant, journal and VRAM describe a process that is not
+/// running the model, so none of them decide anything here; with nothing
+/// reported, the backend is the configured `gguf_backend`, the one that will
+/// be attempted.
+fn unpublished_gguf_report(
+    pid: i32,
+    gguf: &ActiveGguf,
+    variant: Option<Variant>,
+    mut evidence: Vec<String>,
+    worker: Option<GgufWorkerReport>,
+    worker_path: &Path,
+) -> AccelReport {
+    evidence.push(format!(
+        "engine: {section} runs a GGUF model in voxtype-gguf-worker with \
+         {section}.gguf_backend = \"{backend}\"; the main binary's journal and VRAM do not \
+         describe it",
+        section = gguf.section,
+        backend = gguf.backend,
+    ));
+    if let Some(outcome) = worker.and_then(|report| gguf_outcome(&report, None, gguf)) {
+        evidence.push(format!(
+            "worker: {} reports {} ({})",
+            worker_path.display(),
+            outcome.backend,
+            outcome.detail
+        ));
+        return AccelReport {
+            state: outcome.state,
+            backend: Some(outcome.backend),
+            device: outcome.device,
+            evidence,
+            variant,
+            pid: Some(pid),
+        };
+    }
+    evidence.push(format!(
+        "runtime: no GGUF backend reported for pid {pid} (the worker has not loaded the \
+         model yet)"
+    ));
+    AccelReport {
+        state: AccelState::Unknown,
+        backend: gguf_backend_tag(gguf.backend),
+        device: None,
         evidence,
         variant,
         pid: Some(pid),
@@ -764,6 +1142,20 @@ mod tests {
             classify_line("Failed to create MIGraphXExecutionProvider"),
             Some((Signal::Negative, None))
         );
+        // As ORT really logs it when the provider sits beside the binary
+        // and cuDNN is not installed.
+        assert_eq!(
+            classify_line(
+                "[E:onnxruntime:Default, provider_bridge_ort.cc:1745] Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file: No such file or directory"
+            ),
+            Some((Signal::Negative, Some("cuda")))
+        );
+        assert_eq!(
+            classify_line(
+                "ERROR CUDA is installed but cuDNN (libcudnn.so.9) is missing, so the CUDA execution provider cannot load: falling back to CPU."
+            ),
+            Some((Signal::Negative, Some("cuda")))
+        );
         // Partial assignment still runs most of the graph on the GPU.
         assert_eq!(
             classify_line(
@@ -863,6 +1255,55 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
         assert!(read_state_file_at(&dir.path().join("absent.json"), 4242).is_none());
     }
 
+    /// Publishing reports news only when the outcome changes, so a
+    /// `gpu_isolation` worker that re-detects the same fallback on every
+    /// transcription doesn't notify every time.
+    #[test]
+    fn publish_reports_news_once_per_distinct_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voxtype").join("accel.json");
+        let detail = || Some("no Vulkan GPU found".to_string());
+
+        assert!(publish_at(
+            &path,
+            10,
+            AccelState::CpuFallback,
+            Some("vulkan"),
+            None,
+            detail()
+        ));
+        assert!(!publish_at(
+            &path,
+            10,
+            AccelState::CpuFallback,
+            Some("vulkan"),
+            None,
+            detail()
+        ));
+        let read = read_state_file_at(&path, 10).unwrap();
+        assert_eq!(read.state, "cpu-fallback");
+        assert_eq!(read.detail, detail());
+
+        // A different outcome in the same daemon is news again.
+        assert!(publish_at(
+            &path,
+            10,
+            AccelState::Gpu,
+            Some("vulkan"),
+            None,
+            None
+        ));
+        // So is the same outcome in a new daemon.
+        assert!(publish_at(
+            &path,
+            11,
+            AccelState::Gpu,
+            Some("vulkan"),
+            None,
+            None
+        ));
+    }
+
     #[test]
     fn state_file_round_trips_its_schema() {
         let file = AccelStateFile {
@@ -870,6 +1311,7 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
             state: AccelState::CpuFallback.tag().to_string(),
             backend: Some("migraphx".to_string()),
             detail: Some("MIGraphX EP failed to register".to_string()),
+            device: None,
         };
         let json = serde_json::to_string(&file).unwrap();
         let back: AccelStateFile = serde_json::from_str(&json).unwrap();
@@ -936,7 +1378,7 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
 
     #[test]
     fn no_daemon_reports_not_running_without_probing_anything() {
-        let report = report_for(None);
+        let report = report_for(None, None);
         assert_eq!(report.state, AccelState::NotRunning);
         assert_eq!(report.backend, None);
         assert_eq!(report.pid, None);
@@ -953,7 +1395,7 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
     /// it must say what it looked for.
     #[test]
     fn a_process_with_no_gpu_history_is_unknown_not_cpu() {
-        let report = report_for(Some(std::process::id() as i32));
+        let report = report_for(Some(std::process::id() as i32), None);
         assert_eq!(report.state, AccelState::Unknown);
         assert!(
             report.evidence.iter().any(|e| e.starts_with("binary:")),
@@ -989,6 +1431,7 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
         let report = AccelReport {
             state: AccelState::Gpu,
             backend: Some("migraphx"),
+            device: None,
             evidence: vec!["vram: 374 MiB held by pid 1 (rocm-smi)".to_string()],
             variant: Some(Variant::OnnxMigraphx),
             pid: Some(1),
@@ -998,5 +1441,249 @@ PID    \tPROCESS NAME   \tGPU(s)\tVRAM USED\tSDMA USED\tCU OCCUPANCY\t
         assert_eq!(json["backend"], serde_json::json!("migraphx"));
         assert_eq!(json["variant"], serde_json::json!("onnx-migraphx"));
         assert!(json["evidence"].as_array().unwrap().len() == 1);
+    }
+
+    fn cohere(backend: &'static str) -> ActiveGguf<'static> {
+        ActiveGguf {
+            section: "cohere",
+            model: "/home/u/.local/share/voxtype/models/cohere-transcribe-03-2026-Q4_K_M.gguf",
+            backend,
+        }
+    }
+
+    fn worker_report(json: &str) -> GgufWorkerReport {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// #1085: a GGUF engine on Vulkan, reported by the worker the daemon
+    /// spawned, is `gpu` on Vulkan with the device named, whatever the main
+    /// binary's variant is.
+    #[test]
+    fn a_gguf_worker_on_vulkan_is_gpu_with_its_device() {
+        let report = worker_report(
+            r#"{"model":"/m/cohere-transcribe-03-2026-Q4_K_M.gguf","backend":"vulkan","device":"Vulkan0","description":"AMD Radeon RX 7800 XT (RADV NAVI32)","kind":"vulkan","pid":4321}"#,
+        );
+        let outcome = gguf_outcome(&report, Some(4321), &cohere("vulkan")).unwrap();
+        assert_eq!(outcome.state, AccelState::Gpu);
+        assert_eq!(outcome.backend, "vulkan");
+        assert_eq!(
+            outcome.device.as_deref(),
+            Some("AMD Radeon RX 7800 XT (RADV NAVI32) [Vulkan0]")
+        );
+        assert!(
+            outcome.detail.contains("voxtype-gguf-worker pid 4321"),
+            "{}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn transcribe_cpp_backend_names_map_to_tags() {
+        for (name, tag) in [
+            ("vulkan", Some("vulkan")),
+            ("Vulkan", Some("vulkan")),
+            ("cuda", Some("cuda")),
+            ("ROCm", Some("rocm")),
+            ("metal", Some("metal")),
+            ("cpu", Some("cpu")),
+            ("cpu_accel", Some("cpu")),
+            ("accel", Some("cpu")),
+            ("auto", None),
+            ("", None),
+        ] {
+            assert_eq!(gguf_backend_tag(name), tag, "{name}");
+        }
+    }
+
+    /// A CPU run the user asked for says so and how to change it; one that
+    /// `auto` ended up with says the GPU was not bound. Both are on the CPU of
+    /// a GPU-capable worker, so neither is `cpu-only`.
+    #[test]
+    fn a_gguf_worker_on_the_cpu_says_why() {
+        let report = worker_report(
+            r#"{"model":"/m/cohere-transcribe-03-2026-Q4_K_M.gguf","backend":"cpu","device":"CPU","pid":7}"#,
+        );
+
+        let chosen = gguf_outcome(&report, Some(7), &cohere("cpu")).unwrap();
+        assert_eq!(chosen.state, AccelState::CpuFallback);
+        assert_eq!(chosen.backend, "cpu");
+        assert!(
+            chosen.detail.contains("cohere.gguf_backend = \"cpu\""),
+            "{}",
+            chosen.detail
+        );
+        assert!(chosen.detail.contains("\"vulkan\""), "{}", chosen.detail);
+
+        let auto = gguf_outcome(&report, Some(7), &cohere("auto")).unwrap();
+        assert_eq!(auto.state, AccelState::CpuFallback);
+        assert!(
+            auto.detail.contains("did not bind a GPU"),
+            "{}",
+            auto.detail
+        );
+    }
+
+    /// The report file is shared by every worker on the machine. One written by
+    /// another worker, or about another model, must not describe this one.
+    #[test]
+    fn a_gguf_report_from_another_worker_or_model_is_ignored() {
+        let other_pid = worker_report(
+            r#"{"model":"/m/cohere-transcribe-03-2026-Q4_K_M.gguf","backend":"vulkan","device":"Vulkan0","pid":99}"#,
+        );
+        assert_eq!(gguf_outcome(&other_pid, Some(7), &cohere("vulkan")), None);
+
+        let other_model = worker_report(
+            r#"{"model":"/m/parakeet-ultra-Q8_0.gguf","backend":"vulkan","device":"Vulkan0","pid":7}"#,
+        );
+        assert_eq!(gguf_outcome(&other_model, Some(7), &cohere("vulkan")), None);
+
+        let unknown_backend = worker_report(
+            r#"{"model":"/m/cohere-transcribe-03-2026-Q4_K_M.gguf","backend":"sycl0","pid":7}"#,
+        );
+        assert_eq!(
+            gguf_outcome(&unknown_backend, Some(7), &cohere("auto")),
+            None
+        );
+    }
+
+    /// Workers from 1.3.0 write no PID, kind or description. Their report still
+    /// counts when it names the model this worker was started for.
+    #[test]
+    fn a_gguf_report_without_a_pid_is_matched_by_model() {
+        let report = worker_report(
+            r#"{"model":"/m/cohere-transcribe-03-2026-Q4_K_M.gguf","backend":"vulkan","device":"Vulkan0"}"#,
+        );
+        let outcome = gguf_outcome(&report, Some(7), &cohere("vulkan")).unwrap();
+        assert_eq!(outcome.state, AccelState::Gpu);
+        assert_eq!(outcome.device.as_deref(), Some("Vulkan0"));
+    }
+
+    /// The device travels through the state file, and a file written before
+    /// the field existed still parses.
+    #[test]
+    fn the_state_file_carries_the_device_and_reads_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accel.json");
+        assert!(publish_at(
+            &path,
+            3,
+            AccelState::Gpu,
+            Some("vulkan"),
+            Some("AMD Radeon RX 7800 XT (Vulkan0)".to_string()),
+            Some("detail".to_string())
+        ));
+        let read = read_state_file_at(&path, 3).unwrap();
+        assert_eq!(
+            read.device.as_deref(),
+            Some("AMD Radeon RX 7800 XT (Vulkan0)")
+        );
+
+        // Only the device changed: still news.
+        assert!(publish_at(
+            &path,
+            3,
+            AccelState::Gpu,
+            Some("vulkan"),
+            Some("Vulkan1".to_string()),
+            Some("detail".to_string())
+        ));
+
+        std::fs::write(
+            &path,
+            r#"{"pid":3,"state":"gpu","backend":"vulkan","detail":null}"#,
+        )
+        .unwrap();
+        assert_eq!(read_state_file_at(&path, 3).unwrap().device, None);
+    }
+
+    /// Before the worker has loaded anything, a GGUF engine is `unknown`, and
+    /// the report names the configured GGUF backend rather than the main
+    /// binary's (#1085 showed `migraphx` for a Vulkan GGUF model).
+    #[test]
+    fn an_unpublished_gguf_engine_is_unknown_on_its_configured_backend() {
+        let pid = std::process::id() as i32;
+        let path = Path::new("/run/user/1000/voxtype/gguf_backend.json");
+        let active = cohere("vulkan");
+        let report = unpublished_gguf_report(pid, &active, None, Vec::new(), None, path);
+        assert_eq!(report.state, AccelState::Unknown);
+        assert_eq!(report.backend, Some("vulkan"));
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|e| e.starts_with("engine: cohere runs a GGUF model")),
+            "{:?}",
+            report.evidence
+        );
+
+        let auto = cohere("auto");
+        let report = unpublished_gguf_report(pid, &auto, None, Vec::new(), None, path);
+        assert_eq!(report.backend, None);
+    }
+
+    /// A daemon from before GGUF publishing writes no `accel.json`, but its
+    /// worker's own report still says what transcribe.cpp bound.
+    #[test]
+    fn a_pre_publishing_daemon_is_read_from_its_worker_report() {
+        let path = Path::new("/run/user/1000/voxtype/gguf_backend.json");
+        let worker = worker_report(
+            r#"{"model":"/m/cohere-transcribe-03-2026-Q4_K_M.gguf","backend":"vulkan","device":"Vulkan0"}"#,
+        );
+        let report = unpublished_gguf_report(
+            1,
+            &cohere("vulkan"),
+            Some(Variant::OnnxMigraphx),
+            Vec::new(),
+            Some(worker),
+            path,
+        );
+        assert_eq!(report.state, AccelState::Gpu);
+        assert_eq!(report.backend, Some("vulkan"));
+        assert_eq!(report.device.as_deref(), Some("Vulkan0"));
+        assert!(
+            report.evidence.iter().any(|e| e.starts_with("worker: ")),
+            "{:?}",
+            report.evidence
+        );
+    }
+
+    /// End to end, a GGUF engine skips the main binary's journal: whatever it
+    /// says is about another runtime.
+    #[test]
+    fn report_for_a_gguf_engine_does_not_read_the_daemon_journal() {
+        let active = ActiveGguf {
+            section: "gguf",
+            model: "voxtype-test-model-that-no-worker-loaded.gguf",
+            backend: "vulkan",
+        };
+        let report = report_for(Some(std::process::id() as i32), Some(&active));
+        assert_eq!(report.state, AccelState::Unknown);
+        assert_eq!(report.backend, Some("vulkan"));
+        assert!(
+            !report
+                .evidence
+                .iter()
+                .any(|e| e.contains("no GPU markers found")),
+            "{:?}",
+            report.evidence
+        );
+    }
+
+    #[test]
+    fn active_gguf_follows_the_engine_and_model() {
+        let parse = |text: &str| -> Config { toml::from_str(text).unwrap() };
+        let gguf_cohere = parse(
+            "engine = \"cohere\"\n[cohere]\nmodel = \"cohere-transcribe-03-2026-Q4_K_M.gguf\"\ngguf_backend = \"vulkan\"\n",
+        );
+        let active = gguf_cohere.active_gguf().unwrap();
+        assert_eq!(active.section, "cohere");
+        assert_eq!(active.backend, "vulkan");
+
+        let onnx_cohere =
+            parse("engine = \"cohere\"\n[cohere]\nmodel = \"cohere-transcribe-03-2026\"\n");
+        assert_eq!(onnx_cohere.active_gguf(), None);
+
+        let whisper = parse("engine = \"whisper\"\n");
+        assert_eq!(whisper.active_gguf(), None);
     }
 }

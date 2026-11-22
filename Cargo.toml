@@ -3,7 +3,7 @@ members = ["xtask", "crates/gguf-worker"]
 
 [package]
 name = "voxtype"
-version = "1.2.2"
+version = "1.3.1"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -56,6 +56,10 @@ hound = "3"  # WAV file reading/writing
 
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
+# Meeting titles from a calendar's iCal link: parsing, recurrence, time zones
+icalendar = { version = "0.16", default-features = false, features = ["parser"] }
+rrule = "0.14"
+chrono-tz = "0.10"
 
 # WebSocket client for Soniox streaming backend
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -82,7 +86,7 @@ sha2 = "0.10"
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
 # Whisper speech-to-text
-whisper-rs = "0.16.0"
+whisper-rs = { version = "0.16.0", features = ["raw-api"] }
 
 # Parakeet speech-to-text (optional, ONNX-based)
 # parakeet-rs's default features turn on ort's defaults, which fetch ONNX
@@ -127,6 +131,8 @@ toml_edit = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Dictation history: day files older than a week are gzipped
+flate2 = "1"
 
 # OSD native frontend (SCTK + wgpu + egui-wgpu). All optional, gated by the
 # `osd-native` feature so users not opting in don't pay the build cost.
@@ -173,11 +179,14 @@ ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
 # Input handling (evdev for kernel-level key events)
 evdev = "0.13.2"
 inotify = "0.10"  # Watch /dev/input for device hotplug
-nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 # MPRIS media-player control over the session bus. Talking D-Bus directly
 # instead of shelling out to playerctl lets us see MPRIS-compliant players
 # that playerctl silently filters out, and surfaces real errors on resume.
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+
+[target.'cfg(unix)'.dependencies]
+# Meeting subprocess groups are also used on macOS.
+nix = { version = "0.29", features = ["signal", "process", "user"] }
 
 [features]
 default = ["itn"]
@@ -200,6 +209,9 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
+# The meetings window (voxtype-meetings-gtk4): plain GTK4 in a normal
+# window, so no layer-shell and no cairo.
+meetings-gtk4 = ["dep:gtk4"]
 gpu-vulkan = [
     "whisper-rs/vulkan",
     "cohere-gguf",
@@ -314,6 +326,8 @@ clap_mangen = "0.2"
 
 [dev-dependencies]
 dirs = "5.0"
+# Paused clock for timer tests (meeting level events).
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = true
@@ -337,6 +351,11 @@ required-features = ["osd-native"]
 name = "voxtype-osd-gtk4"
 path = "src/bin/voxtype_osd_gtk4.rs"
 required-features = ["osd-gtk4"]
+
+[[bin]]
+name = "voxtype-meetings-gtk4"
+path = "src/bin/voxtype_meetings_gtk4.rs"
+required-features = ["meetings-gtk4"]
 
 # Tiny launcher that picks between voxtype-osd-gtk4, voxtype-osd-native,
 # and voxtype-osd-quickshell at runtime based on config/env/CLI. Always

@@ -23,6 +23,7 @@ QUICK START:
   voxtype setup model         Interactive model selection
   voxtype setup gpu           Manage GPU acceleration
   voxtype status --follow     Watch daemon status (Waybar integration)
+  voxtype doctor              Check the setup and show how to fix problems
 
 See 'voxtype --help' for all options or 'man voxtype' for full docs.")]
 #[command(after_long_help = "\
@@ -35,6 +36,7 @@ QUICK START:
   voxtype record cancel       Cancel current recording
   voxtype status              Show daemon status
   voxtype setup               Check dependencies and download models
+  voxtype doctor              Check the setup and show how to fix problems
   voxtype config              Show current configuration
 
 EXAMPLES:
@@ -51,7 +53,8 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Increase verbosity (-v = debug, -vv = trace)
+    /// Increase verbosity (-v = debug, -vv = trace). Dictated text is only
+    /// logged from debug up
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -264,6 +267,10 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub cancel_key: Option<String>,
 
+    /// Key that pastes the last dictation again (e.g., CTRL+ALT+V, F9); needs history on
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
+    pub paste_last_key: Option<String>,
+
     /// Modifier key for secondary model selection (e.g., LEFTSHIFT)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub model_modifier: Option<String>,
@@ -294,6 +301,28 @@ pub struct Cli {
         conflicts_with = "audio_feedback"
     )]
     pub no_audio_feedback: bool,
+
+    /// Keep the audio of a recording whose transcription failed (default)
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        long_help = "Keep the audio of a recording whose transcription failed, so it can be \
+        retried with 'voxtype transcribe <file>'. This is the default. The 20 most recent \
+        are kept in ~/.local/state/voxtype/failed-audio/, readable only by you."
+    )]
+    pub keep_failed_recordings: bool,
+
+    /// Don't keep the audio of a recording whose transcription failed
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "keep_failed_recordings",
+        long_help = "Don't write the audio of a failed transcription to disk (overrides \
+        config and environment). A dictation whose transcription fails is then lost."
+    )]
+    pub no_keep_failed_recordings: bool,
 
     /// Pause MPRIS media players during recording
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
@@ -385,7 +414,33 @@ pub struct Cli {
     )]
     pub no_fallback_to_clipboard: bool,
 
-    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
+    /// Keep the text of a transcription that could not be delivered (default)
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
+        long_help = "Keep the text of a transcription no output method could deliver, so it \
+        can be recovered. This is the default. The 200 most recent are kept in \
+        ~/.local/state/voxtype/undelivered/, readable only by you, and the failure \
+        notification names the file."
+    )]
+    pub keep_undelivered_text: bool,
+
+    /// Don't keep the text of a transcription that could not be delivered
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
+        conflicts_with = "keep_undelivered_text",
+        long_help = "Don't save the text of an undelivered transcription to a file, and \
+        don't quote it in the failure notification (overrides config and environment). \
+        A dictation that can't be typed or copied is then lost."
+    )]
+    pub no_keep_undelivered_text: bool,
+
+    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v), or
+    /// "auto" (the default) for ctrl+v in GUI apps and --paste-keys-terminal in
+    /// terminals
     #[arg(
         long,
         value_name = "KEYS",
@@ -393,6 +448,16 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub paste_keys: Option<String>,
+
+    /// Keystroke for paste mode when the focused window is a terminal
+    /// (default: ctrl+shift+v; detected on Hyprland, Sway and niri)
+    #[arg(
+        long,
+        value_name = "KEYS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub paste_keys_terminal: Option<String>,
 
     /// File path for file output mode
     #[arg(long, value_name = "PATH", help_heading = "Output")]
@@ -550,6 +615,20 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", help_heading = "Text Processing")]
     pub lard_model_path: Option<std::path::PathBuf>,
 
+    /// Language you dictate in, for text cleanup (e.g. en, en-US, pt-BR, auto)
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "Text Processing",
+        long_help = "The language you dictate in, for text cleanup that depends on it (LARD\n\
+        disfluency cleanup is English-only). Set it when a multilingual model detects\n\
+        the language automatically: an engine language that is set, or a model that\n\
+        only writes one language, already answers the question and wins over this.\n\
+        It is not sent to the transcription engine; --language is the engine's hint.\n\
+        Use a code such as en, en-US or pt-BR, or auto to declare nothing."
+    )]
+    pub text_language: Option<String>,
+
     /// Restore punctuation and casing for plain CTC transcription engines
     #[arg(
         long,
@@ -697,6 +776,80 @@ pub struct Cli {
     #[arg(long, value_name = "MS", help_heading = "VAD", hide_short_help = true)]
     pub vad_min_speech_ms: Option<u32>,
 
+    // -- History --
+    /// Record dictations to history. Use --history=false to turn it off for
+    /// this run.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        long_help = "Record each dictation, including failed and cancelled ones, to\n\
+        ~/.local/share/voxtype/history/ ([history] enabled). --history=false\n\
+        turns it off for this run. Browse it with `voxtype history`."
+    )]
+    pub history: Option<bool>,
+
+    /// Pause history: nothing dictated is written until resumed
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_paused: Option<bool>,
+
+    /// Days of history to keep (0 keeps it forever; default 30)
+    #[arg(
+        long,
+        value_name = "DAYS",
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_retention_days: Option<u32>,
+
+    /// Comma-separated apps never recorded to history
+    #[arg(
+        long,
+        value_name = "APPS",
+        help_heading = "History",
+        hide_short_help = true,
+        long_help = "Comma-separated apps whose dictations are never recorded, matched\n\
+        against the focused window's class (case, spaces and dots ignored).\n\
+        Replaces the built-in list: KeePassXC, Bitwarden, 1Password, Proton Pass.\n\
+        Example: --history-exclude-apps \"KeePassXC,Signal\""
+    )]
+    pub history_exclude_apps: Option<String>,
+
+    /// Record which app each dictation went to (default true)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_record_app: Option<bool>,
+
+    /// Also record the focused window's title (default false)
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_record_window_title: Option<bool>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -710,6 +863,38 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn keep_failed_recordings_flags_parse_and_conflict() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.keep_failed_recordings && !cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--no-keep-failed-recordings"]);
+        assert!(cli.no_keep_failed_recordings);
+        let cli = Cli::parse_from(["voxtype", "--keep-failed-recordings"]);
+        assert!(cli.keep_failed_recordings);
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-failed-recordings",
+            "--no-keep-failed-recordings"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn keep_undelivered_text_flags_parse_and_conflict() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.keep_undelivered_text && !cli.no_keep_undelivered_text);
+        let cli = Cli::parse_from(["voxtype", "--no-keep-undelivered-text"]);
+        assert!(cli.no_keep_undelivered_text);
+        let cli = Cli::parse_from(["voxtype", "--keep-undelivered-text"]);
+        assert!(cli.keep_undelivered_text);
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-undelivered-text",
+            "--no-keep-undelivered-text"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn test_engine_flag_whisper() {
@@ -764,6 +949,34 @@ mod tests {
     fn test_driver_flag_single() {
         let cli = Cli::parse_from(["voxtype", "--driver=ydotool"]);
         assert_eq!(cli.driver, Some("ydotool".to_string()));
+    }
+
+    #[test]
+    fn history_flags_parse() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--history",
+            "--history-paused=false",
+            "--history-retention-days",
+            "0",
+            "--history-exclude-apps",
+            "KeePassXC,Signal",
+            "--history-record-window-title",
+        ]);
+        assert_eq!(cli.history, Some(true));
+        assert_eq!(cli.history_paused, Some(false));
+        assert_eq!(cli.history_retention_days, Some(0));
+        assert_eq!(
+            cli.history_exclude_apps.as_deref(),
+            Some("KeePassXC,Signal")
+        );
+        assert_eq!(cli.history_record_app, None);
+        assert_eq!(cli.history_record_window_title, Some(true));
+
+        let cli = Cli::parse_from(["voxtype", "--history=false"]);
+        assert_eq!(cli.history, Some(false));
+        let cli = Cli::parse_from(["voxtype"]);
+        assert_eq!(cli.history, None);
     }
 
     #[test]

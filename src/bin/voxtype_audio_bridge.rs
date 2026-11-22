@@ -92,10 +92,7 @@ fn main() -> anyhow::Result<()> {
     // Tracing goes to stderr only; stdout is reserved for NDJSON output.
     tracing_subscriber::fmt()
         .with_writer(io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(voxtype::logging::env_filter("info"))
         .init();
 
     let args = Args::parse();
@@ -200,8 +197,9 @@ fn emit_status(status: &str) -> io::Result<()> {
 
 /// Encode one [`AudioFrame`] as a single NDJSON line (terminated by `\n`).
 ///
-/// Values are rounded to 3 decimal places to keep lines compact (~50 B)
-/// while preserving enough resolution for a 100 Hz waveform display.
+/// Values are rounded to 5 decimal places: 3 left the quietest levels the
+/// Quickshell OSD draws (its -52 dBFS floor is about 0.0025) in steps of
+/// several dB.
 fn encode_frame(frame: &AudioFrame, elapsed: Duration) -> String {
     let peak = peak_amplitude(frame);
     let rms = rms_approx(frame);
@@ -213,7 +211,7 @@ fn encode_frame(frame: &AudioFrame, elapsed: Duration) -> String {
     let ts_ms = elapsed.as_millis() as u64;
 
     format!(
-        "{{\"peak\":{:.3},\"rms\":{:.3},\"vad\":{},\"ts_ms\":{}}}\n",
+        "{{\"peak\":{:.5},\"rms\":{:.5},\"vad\":{},\"ts_ms\":{}}}\n",
         peak, rms, vad, ts_ms
     )
 }
