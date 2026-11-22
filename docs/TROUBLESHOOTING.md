@@ -1746,6 +1746,16 @@ The same failure is only notified once every 5 minutes; run `journalctl --user -
 
 Meeting mode never shows these notifications, so a failing command can't pop up over a call. During a meeting the failure is only logged, and the transcript keeps the original text.
 
+### "Text cleanup by the model failed" or "text cleanup timed out"
+
+**Cause:** `[output.post_process] backend` is `"omarchy"` or `"openai"`, and the model did not answer in time or at all. Voxtype typed the original transcription.
+
+**Solution:**
+- **No Omarchy text model is running:** voxtype never starts one. Start it with `omarchy models start <recipe>` or from the local models panel, or set `backend = "command"` to turn model cleanup off. `voxtype doctor` shows whether Omarchy, a running model, its key and its endpoint were found.
+- **Timed out:** a chat model adds roughly 2 to 6 seconds per dictation, more for a long one or a cold start. Raise `timeout_ms` (`voxtype config set output.post_process.timeout_ms 15000`) or pin a smaller model with `model`.
+- **Refused the API key:** for `"openai"`, check the file in `api_key_file`. For Omarchy, restart the model from the local models panel.
+- **Every dictation is slow:** that is the cost of the model backends. LARD (`voxtype setup lard`, `[text] lard_disfluency = true`) removes fillers in milliseconds without a model.
+
 ### "pre_output hook failed" or "post_output hook failed"
 
 **Cause:** `pre_output_command` or `post_output_command` exited with an error. The text was still delivered, but whatever the hook does (switching a compositor submap, for example) didn't happen.
@@ -2467,6 +2477,12 @@ journalctl --user -u voxtype --since "10 minutes ago" | grep -i summar
 **Hermes, OpenCode or another agent is my Omarchy default.** Only `claude`, `codex` (jailed) and `pi` can be run without tools that reach your files or the network, so voxtype skips other agents and uses `claude` or `pi` from PATH, or the local model. Set `[meeting.assistant] agent` to choose explicitly.
 
 **Answers and summaries need an agent or a local model.** No supported agent was found and Ollama did not answer at `ollama_url`. Install Claude Code, Codex or Pi, or start Ollama and `ollama pull llama3.2`.
+
+**"No Omarchy text model is running" in the log, and the summary came from my agent or Ollama.** `[meeting.summary] backend = "omarchy"` uses Omarchy's text model only while one is running, and voxtype never starts one. Start it with `omarchy models start <recipe>` or from the local models panel (Super + Ctrl + Alt + X); `omarchy models list` shows which models fit your machine, and many machines are offered no text model at all. `voxtype doctor` shows what voxtype sees under "Omarchy local AI". With `omarchy_model` set, that exact recipe must be running.
+
+**"Omarchy (...) refused the API key (HTTP 401)".** Voxtype reads `~/.config/omarchy/agent-local/key` for each request. If Omarchy set the model up again, the running model may still hold the old key: restart it from the local models panel.
+
+**Ask through Pi fails when Pi's default model is an Omarchy one.** Voxtype runs Pi with `--no-extensions`, and loads Omarchy's `~/.pi/agent/extensions/omarchy-local.ts` back in only when `defaultProvider` in `~/.pi/agent/settings.json` is `omarchy-local` (or `defaultModel` is `omarchy-local/<recipe>`). A default on a paired machine (`omarchy-local-<host>`) is not supported this way. `[meeting.summary] backend = "omarchy"` reaches the same model without Pi.
 
 The meeting itself never depends on the summary: if summarizing fails, the transcript is saved as usual and the meeting socket reports an `error` event naming the meeting.
 

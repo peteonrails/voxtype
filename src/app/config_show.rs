@@ -87,6 +87,16 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
         let _ = writeln!(s, "  remote_api_key = (set)");
     }
     let _ = writeln!(s, "  timeout_secs = {}", meeting.summary.timeout_secs);
+    for (key, value) in [
+        ("omarchy_model", &meeting.summary.omarchy_model),
+        ("openai_url", &meeting.summary.openai_url),
+        ("openai_model", &meeting.summary.openai_model),
+        ("openai_api_key_file", &meeting.summary.openai_api_key_file),
+    ] {
+        if let Some(value) = value {
+            let _ = writeln!(s, "  {key} = {value:?}");
+        }
+    }
     match meeting.summary.auto {
         Some(auto) => {
             let _ = writeln!(s, "  auto = {}", auto);

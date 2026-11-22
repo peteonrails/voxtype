@@ -3318,6 +3318,77 @@ changes without accepting unrelated generated text. Existing commands keep
 their plain-text behavior unless this option is enabled. Profile-specific
 post-process commands use the same setting.
 
+### backend
+
+**Type:** String (`"command"`, `"omarchy"`, `"openai"`)
+**Default:** `"command"`
+**Required:** No
+
+Who cleans up each dictation.
+
+- `"command"` - Runs `command`, as described above. Existing configs keep this.
+- `"omarchy"` - Sends the text to the text model Omarchy runs on this machine (`omarchy models`). Voxtype finds it through Omarchy's documented interface (`omarchy-models status --json`, the loopback address it reports and the key in `~/.config/omarchy/agent-local/key`) and never starts, installs or downloads a model. With no model running, the original text is typed and a notification says how to start one.
+- `"openai"` - Sends the text to any OpenAI-compatible server (llama-server, LM Studio, vLLM, Ollama's `/v1`), set with `url`, `model` and `api_key_file`.
+
+> **Latency warning:** the model backends add roughly 2 to 6 seconds to every dictation (measured short-prompt decode on Omarchy's supported text models is 23 to 72 tokens per second). The text is typed only once the model answers. `timeout_ms` still applies, and on a timeout or any failure the original text is typed. LARD (`[text] lard_disfluency`) removes fillers in milliseconds and is the better choice when that is all you need.
+
+The model gets a built-in prompt that fixes punctuation, capitalization, spelling and recognition errors and drops fillers without rewording, with the previous dictation (see below) as context. `prompt` replaces it. With `edit_list = true` the built-in prompt asks for an edit list instead. Thinking is turned off for Omarchy's models, and any `<think>` block in a reply is removed.
+
+Meeting transcripts are never sent to the model backends: in meeting mode only a `command` runs. Profiles keep their own `post_process_command`.
+
+```toml
+[output.post_process]
+backend = "omarchy"
+timeout_ms = 15000
+```
+
+```toml
+[output.post_process]
+backend = "openai"
+url = "http://127.0.0.1:8080/v1"
+model = "qwen3-4b"
+api_key_file = "~/.config/llama/key"
+```
+
+**CLI override:** `--post-process-backend`
+**Environment variable:** `VOXTYPE_POST_PROCESS_BACKEND`
+
+### model
+
+**Type:** String
+**Default:** unset
+
+The model id for `"openai"` (required there), or the Omarchy recipe for `"omarchy"`. Unset with `"omarchy"`, the last started text model that is running is used, the same one `omarchy agent --local` picks.
+
+**CLI override:** `--post-process-model` / **Environment variable:** `VOXTYPE_POST_PROCESS_MODEL`
+
+### url
+
+**Type:** String
+**Default:** unset
+
+The server's base URL for `"openai"`, including `/v1`.
+
+**CLI override:** `--post-process-url` / **Environment variable:** `VOXTYPE_POST_PROCESS_URL`
+
+### api_key_file
+
+**Type:** String
+**Default:** unset
+
+A file holding the bearer key for `"openai"`. It is read on every request and never logged; the key itself never goes in `config.toml`. Omarchy's key file is fixed and needs no setting.
+
+**CLI override:** `--post-process-api-key-file` / **Environment variable:** `VOXTYPE_POST_PROCESS_API_KEY_FILE`
+
+### prompt
+
+**Type:** String
+**Default:** unset (the built-in cleanup prompt)
+
+Instructions for the model backends, replacing the built-in prompt. The dictation is sent as the user message.
+
+**CLI override:** `--post-process-prompt` / **Environment variable:** `VOXTYPE_POST_PROCESS_PROMPT`
+
 ### Context from Previous Dictation
 
 When post-processing is enabled, voxtype passes the previous dictation's text via the `VOXTYPE_CONTEXT` environment variable (if the previous dictation was within 60 seconds). This helps LLM-based cleanup scripts maintain continuity across rapid-fire dictations.
@@ -4535,11 +4606,14 @@ AI summarization settings for meeting transcripts.
 
 ### backend
 
-**Type:** String (`"agent"`, `"local"`, `"remote"`, `"disabled"`)
-**Default:** `"disabled"`
+**Type:** String (`"agent"`, `"local"`, `"remote"`, `"omarchy"`, `"openai"`, `"disabled"`)
+**Default:** `"disabled"`. A config that `voxtype setup` writes on an Omarchy install has `"omarchy"`; existing configs keep what they have.
 **Required:** No
 
-The summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and this setting no longer applies.
+`"omarchy"` and `"openai"` choose a chat model for summaries and, when it runs on this machine, for questions too. They come first in the order below. The other values are the summarizer from before the meeting assistant, for people who have not allowed an agent. Once an agent is allowed (`voxtype meeting assistant allow <agent>`), it writes summaries and those values no longer apply.
+
+- `"omarchy"` - The text model Omarchy runs on this machine (`omarchy models`). It answers questions and writes summaries with no agent consent, since nothing leaves the machine. Voxtype finds it through Omarchy's documented interface and never starts, installs or downloads a model. With no model running, the log says how to start one, and questions and summaries go the way they would without it (your allowed agent, or Ollama). A summary whose model fails mid-request does the same.
+- `"openai"` - Any OpenAI-compatible server, set with `openai_url`, `openai_model` and `openai_api_key_file`. It writes summaries. It answers questions, without agent consent, only when `openai_url` is a loopback address (127.0.0.1, `localhost`, `::1`); a server elsewhere is for summaries only and is never used with `local_only`.
 
 - `"agent"` - The meeting assistant: your coding agent run with no tools, or the local Ollama model when no agent is found or `[meeting.assistant] local_only = true`. See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent).
 - `"local"` - The older Ollama summarizer (no chapters). Questions (`meeting ask`) use the same Ollama model.
@@ -4550,6 +4624,8 @@ The full order, for questions and summaries:
 
 | Situation | Questions (`ask`, the Ask tab) | Summaries (at stop, Summarize, Regenerate) |
 |-----------|-------------------------------|--------------------------------------------|
+| `backend = "omarchy"` and a model is running, no `--agent` | Omarchy's model | Omarchy's model |
+| `backend = "openai"`, no `--agent` | That server, when it is on this machine | That server (only a local one with `local_only` or `--local`) |
 | `[meeting.assistant] local_only = true`, or `--local` | The local model | The local model |
 | `--agent <id>` | That agent, once allowed | That agent, once allowed |
 | The agent is allowed | The agent | The agent, whatever `[meeting.summary] backend` says |
@@ -4582,7 +4658,33 @@ The model the local model runs, for the `"local"` summarizer and the meeting ass
 **Default:** `120`
 **Required:** No
 
-Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant uses `[meeting.assistant] timeout_secs`.
+Timeout for the `"local"` and `"remote"` summarizers. The meeting assistant, `"omarchy"` and `"openai"` use `[meeting.assistant] timeout_secs`.
+
+### omarchy_model
+
+**Type:** String
+**Default:** unset
+
+The Omarchy recipe `"omarchy"` uses, such as `"qwen3.8-27b-gufo"`. Unset uses the last started text model that is running, then any other running text model. Image, video and music models are never used.
+
+**CLI override:** `--summary-omarchy-model` / **Environment variable:** `VOXTYPE_SUMMARY_OMARCHY_MODEL`
+
+### openai_url, openai_model, openai_api_key_file
+
+**Type:** String
+**Default:** unset
+
+The server for `"openai"`: its base URL including `/v1`, the model id, and a file holding its bearer key (read on every request, never logged, never in `config.toml`).
+
+```toml
+[meeting.summary]
+backend = "openai"
+openai_url = "http://127.0.0.1:1234/v1"
+openai_model = "qwen3-30b-a3b"
+```
+
+**CLI overrides:** `--summary-backend`, `--summary-openai-url`, `--summary-openai-model`, `--summary-openai-api-key-file`
+**Environment variables:** `VOXTYPE_SUMMARY_BACKEND`, `VOXTYPE_SUMMARY_OPENAI_URL`, `VOXTYPE_SUMMARY_OPENAI_MODEL`, `VOXTYPE_SUMMARY_OPENAI_API_KEY_FILE`
 
 ### auto
 
@@ -4696,7 +4798,7 @@ The agent to use. Unset uses the Omarchy default agent (`omarchy-default-agent`)
 **Default:** `false`
 **Required:** No
 
-Never send transcripts to an agent; answer and summarize with the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
+Never send transcripts to an agent; answer and summarize with a local model: Omarchy's when `[meeting.summary] backend = "omarchy"` and one is running (or an `"openai"` server on this machine), otherwise the local Ollama model (`ollama_url`, `ollama_model` in `[meeting.summary]`).
 
 **CLI override:** `--local` on `meeting ask` and `meeting summarize`
 

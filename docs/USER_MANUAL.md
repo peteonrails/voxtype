@@ -2816,6 +2816,27 @@ command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove 
 timeout_ms = 30000  # 30 second timeout (generous for LLM)
 ```
 
+### Cleanup with Omarchy's Local Model or an OpenAI-Compatible Server
+
+Instead of a command, a chat model can do the cleanup directly. On Omarchy, voxtype can use the text model Omarchy runs on your machine (`omarchy models`):
+
+```toml
+[output.post_process]
+backend = "omarchy"   # or "openai" with url, model and api_key_file
+timeout_ms = 15000
+```
+
+**This adds roughly 2 to 6 seconds to every dictation**, because the text is typed only once the model has answered. It is off unless you choose it, and it is separate from the meeting summary model. Voxtype never starts a model: with none running, or on a timeout or any error, the original text is typed and a notification says what happened. The daemon log repeats the latency warning when it starts with a model backend on. Meeting transcripts are never sent through it. `backend = "openai"` works the same with llama-server, LM Studio, vLLM or Ollama's `/v1`:
+
+```toml
+[output.post_process]
+backend = "openai"
+url = "http://127.0.0.1:8080/v1"
+model = "qwen3-4b"
+```
+
+The model gets a built-in prompt that fixes errors and keeps your wording; `prompt` replaces it. See [CONFIGURATION.md](CONFIGURATION.md#outputpost_process) for every option, and `voxtype --help` for the `--post-process-*` flags. If all you want is fewer fillers, LARD does that in milliseconds without a model (see [Dictation Cleanup](#dictation-cleanup)).
+
 To keep an LLM from replacing the whole transcript, enable the edit-list
 contract and ask your script to return only JSON edits:
 
@@ -3264,6 +3285,16 @@ voxtype meeting ask latest "What did Steve just say?" --last 2m
 ```
 
 Once an agent is allowed, each meeting is also summarized when it stops (`summary.md` in the meeting folder). See [MEETING_MODE.md](MEETING_MODE.md#the-meeting-assistant-and-consent) for agent selection, consent and where transcripts go.
+
+On Omarchy, summaries and questions can use the text model Omarchy runs on your machine instead, with no agent and no consent prompt, since nothing leaves the machine. A config written by `voxtype setup` on Omarchy chooses it already; in an older config, set it:
+
+```toml
+[meeting.summary]
+backend = "omarchy"
+auto = true   # optional: also summarize each meeting when it stops
+```
+
+Voxtype only uses a model that is already running (start one with `omarchy models start <recipe>` or the local models panel). When none is, summaries and questions go to your allowed agent or Ollama as before, and `voxtype doctor` shows what it found. Any OpenAI-compatible server works too with `backend = "openai"`; see [MEETING_MODE.md](MEETING_MODE.md#omarchys-local-model).
 
 ### Echo Cancellation
 

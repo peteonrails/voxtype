@@ -22,6 +22,7 @@ pub struct OutputState {
     pub pre_type_delay_ms: i64,
     pub append_text: Option<String>,
     pub post_process_command: Option<String>,
+    pub post_process_backend: String,
     pub field: Field,
     pub feedback: Option<Feedback>,
     pub dirty_since_load: bool,
@@ -54,6 +55,7 @@ pub enum Field {
     PreTypeDelay,
     AppendText,
     PostProcess,
+    PostProcessBackend,
 }
 
 impl Field {
@@ -65,6 +67,7 @@ impl Field {
         Field::PreTypeDelay,
         Field::AppendText,
         Field::PostProcess,
+        Field::PostProcessBackend,
     ];
 }
 
@@ -75,6 +78,7 @@ const POST_PROCESS_PRESETS: &[Option<&str>] = &[
     Some("ollama run llama3.2 'Polish: '"),
     Some("sed 's/uh, //g'"),
 ];
+const POST_PROCESS_BACKENDS: &[&str] = &["command", "omarchy", "openai"];
 const DELAY_STEP: i64 = 25;
 
 impl OutputState {
@@ -94,6 +98,9 @@ impl OutputState {
             pre_type_delay_ms: ed.get_int("output", "pre_type_delay_ms").unwrap_or(0),
             append_text: ed.get_string("output", "append_text"),
             post_process_command: ed.get_string("output.post_process", "command"),
+            post_process_backend: ed
+                .get_string("output.post_process", "backend")
+                .unwrap_or_else(|| "command".to_string()),
             field: Field::Mode,
             feedback: None,
             dirty_since_load: false,
@@ -170,6 +177,11 @@ impl OutputState {
         match &self.post_process_command {
             Some(c) if !c.is_empty() => ed.set_string("output.post_process", "command", c),
             _ => ed.unset("output.post_process", "command"),
+        }
+        if self.post_process_backend == "command" {
+            ed.unset("output.post_process", "backend");
+        } else {
+            ed.set_string("output.post_process", "backend", &self.post_process_backend);
         }
         match ed.save() {
             Ok(()) => {
@@ -255,6 +267,15 @@ impl OutputState {
                 let n = (idx + delta).rem_euclid(POST_PROCESS_PRESETS.len() as i32);
                 self.post_process_command = POST_PROCESS_PRESETS[n as usize].map(|s| s.to_string());
             }
+            Field::PostProcessBackend => {
+                let idx = POST_PROCESS_BACKENDS
+                    .iter()
+                    .position(|c| *c == self.post_process_backend)
+                    .map(|i| i as i32)
+                    .unwrap_or(0);
+                let n = (idx + delta).rem_euclid(POST_PROCESS_BACKENDS.len() as i32);
+                self.post_process_backend = POST_PROCESS_BACKENDS[n as usize].to_string();
+            }
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -323,6 +344,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                         }
                     })
                     .unwrap_or_else(|| "(none)".to_string()),
+            },
+        ),
+        FormRowSpec::new(
+            state.field == Field::PostProcessBackend,
+            "Cleanup backend",
+            match state.post_process_backend.as_str() {
+                "command" => "command".to_string(),
+                other => format!("{other} (+2-6 s per dictation)"),
             },
         ),
     ];
@@ -493,6 +522,29 @@ fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
                 "TUI cycles a few presets. Edit the command body in \
                  [post_process] command in config.toml directly.",
                 Style::default().fg(Color::Gray),
+            )),
+        ],
+        Field::PostProcessBackend => vec![
+            heading("Cleanup backend"),
+            Line::from(""),
+            Line::from("command: run the post-process command above (the default)."),
+            Line::from(""),
+            Line::from(
+                "omarchy: the text model Omarchy runs on this machine \
+                 (`omarchy models`). Voxtype never starts one; with none \
+                 running, the original text is typed.",
+            ),
+            Line::from(""),
+            Line::from(
+                "openai: any OpenAI-compatible server. Set url and model in \
+                 [output.post_process].",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Warning: the model backends add roughly 2 to 6 seconds to \
+                 every dictation. On a timeout or any failure the original \
+                 text is typed.",
+                Style::default().fg(Color::Yellow),
             )),
         ],
     }

@@ -1520,11 +1520,19 @@ impl Daemon {
 
         // Initialize post-processor if configured
         let post_processor = config.output.active_post_process().map(|cfg| {
-            tracing::info!(
-                "Post-processing enabled: command={:?}, timeout={}ms",
-                cfg.command,
-                cfg.timeout_ms
-            );
+            match cfg.llm() {
+                Some(llm) => tracing::warn!(
+                    "Post-processing enabled through the {} model backend, timeout={}ms. {}",
+                    llm.provider.as_str(),
+                    cfg.timeout_ms,
+                    crate::output::post_process::LATENCY_WARNING
+                ),
+                None => tracing::info!(
+                    "Post-processing enabled: command={:?}, timeout={}ms",
+                    cfg.command,
+                    cfg.timeout_ms
+                ),
+            }
             PostProcessor::new(cfg)
         });
 
@@ -5936,6 +5944,7 @@ impl Daemon {
                                     .post_process
                                     .as_ref()
                                     .is_some_and(|config| config.edit_list),
+                                ..Default::default()
                             };
                             let profile_name = profile_override.as_deref().unwrap_or_default();
                             let profile_processor =
@@ -8311,6 +8320,7 @@ while True:
             trim: true,
             fallback_on_empty: true,
             edit_list: false,
+            ..Default::default()
         });
 
         for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
@@ -8396,6 +8406,7 @@ while True:
                 trim: true,
                 fallback_on_empty: true,
                 edit_list: false,
+                ..Default::default()
             });
             config.profiles.insert(
                 "notes".to_string(),

@@ -848,6 +848,123 @@ pub struct Cli {
     #[arg(long, value_name = "MS", help_heading = "VAD", hide_short_help = true)]
     pub vad_min_speech_ms: Option<u32>,
 
+    // -- Local LLM --
+    /// Dictation cleanup backend: command, omarchy or openai (models add ~2-6 s per dictation)
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        env = "VOXTYPE_POST_PROCESS_BACKEND",
+        value_parser = ["command", "omarchy", "openai"],
+        help_heading = "Output",
+        hide_short_help = true,
+        long_help = "Who cleans up each dictation before it is typed ([output.post_process] backend).\n\
+        command (default): the post-process command, as before.\n\
+        omarchy: the text model Omarchy runs on this machine (`omarchy models`). Voxtype\n\
+        never starts one; with none running, the original text is typed.\n\
+        openai: any OpenAI-compatible server (--post-process-url, --post-process-model).\n\
+        WARNING: the model backends add roughly 2 to 6 seconds to every dictation.\n\
+        On a timeout or any failure the original text is typed."
+    )]
+    pub post_process_backend: Option<String>,
+
+    /// Model for the post-process model backend (Omarchy recipe or model id)
+    #[arg(
+        long,
+        value_name = "MODEL",
+        env = "VOXTYPE_POST_PROCESS_MODEL",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_model: Option<String>,
+
+    /// Server URL for the openai post-process backend, including /v1
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "VOXTYPE_POST_PROCESS_URL",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_url: Option<String>,
+
+    /// File holding the API key for the openai post-process backend
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "VOXTYPE_POST_PROCESS_API_KEY_FILE",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_api_key_file: Option<String>,
+
+    /// Instructions for the post-process model backend (replaces the built-in prompt)
+    #[arg(
+        long,
+        value_name = "TEXT",
+        env = "VOXTYPE_POST_PROCESS_PROMPT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub post_process_prompt: Option<String>,
+
+    /// Meeting summary backend: disabled, local, remote, omarchy, openai
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        env = "VOXTYPE_SUMMARY_BACKEND",
+        value_parser = ["disabled", "agent", "local", "remote", "omarchy", "openai"],
+        help_heading = "Meeting",
+        hide_short_help = true,
+        long_help = "Backend for meeting summaries ([meeting.summary] backend).\n\
+        omarchy: the text model Omarchy runs on this machine. It also answers\n\
+        `meeting ask` with no agent consent, since nothing leaves the machine.\n\
+        Voxtype never starts a model; with none running, summaries and asks fall\n\
+        back to your agent or Ollama as before.\n\
+        openai: any OpenAI-compatible server (--summary-openai-url, --summary-openai-model).\n\
+        It answers asks only when the server is on this machine."
+    )]
+    pub summary_backend: Option<String>,
+
+    /// Omarchy recipe for the omarchy summary backend (default: last started)
+    #[arg(
+        long,
+        value_name = "RECIPE",
+        env = "VOXTYPE_SUMMARY_OMARCHY_MODEL",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_omarchy_model: Option<String>,
+
+    /// Server URL for the openai summary backend, including /v1
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "VOXTYPE_SUMMARY_OPENAI_URL",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_openai_url: Option<String>,
+
+    /// Model id for the openai summary backend
+    #[arg(
+        long,
+        value_name = "MODEL",
+        env = "VOXTYPE_SUMMARY_OPENAI_MODEL",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_openai_model: Option<String>,
+
+    /// File holding the API key for the openai summary backend
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "VOXTYPE_SUMMARY_OPENAI_API_KEY_FILE",
+        help_heading = "Meeting",
+        hide_short_help = true
+    )]
+    pub summary_openai_api_key_file: Option<String>,
+
     // -- History --
     /// Record dictations to history. Use --history=false to turn it off for
     /// this run.

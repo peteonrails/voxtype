@@ -934,7 +934,7 @@ pub async fn run_setup(
             if !quiet {
                 println!("\nCreating default config file...");
             }
-            std::fs::write(&config_path, crate::config::default_config_content())?;
+            std::fs::write(&config_path, crate::config::new_config_content())?;
             if !quiet {
                 print_success(&format!("Created: {:?}", config_path));
             }
