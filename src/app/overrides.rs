@@ -48,12 +48,41 @@ fn apply_transcribe_model(config: &mut config::Config, model: &str) {
     }
 }
 
+/// Route `--language` to the active engine's own language setting (#860).
+///
+/// `VOXTYPE_LANGUAGE` was already applied when the config loaded, to the
+/// engine chosen then. When `--engine` or `--model` picked another engine
+/// and no `--language` was given, the variable is applied again so it
+/// reaches the engine that will run, as config layering promises. The
+/// engine-specific `--gguf-language` and `VOXTYPE_GGUF_LANGUAGE` stay more
+/// specific than either for GGUF.
+fn apply_language(
+    config: &mut config::Config,
+    cli: &Cli,
+    engine_from_env: config::TranscriptionEngine,
+) {
+    let gguf_specific = config.engine == config::TranscriptionEngine::Gguf
+        && (cli.gguf_language.is_some() || std::env::var_os("VOXTYPE_GGUF_LANGUAGE").is_some());
+    if let Some(language) = &cli.language {
+        if !(config.engine == config::TranscriptionEngine::Gguf && cli.gguf_language.is_some()) {
+            config.apply_language_override(language, "--language");
+        }
+    } else if config.engine != engine_from_env && !gguf_specific {
+        if let Ok(language) = std::env::var("VOXTYPE_LANGUAGE") {
+            config.apply_language_override(&language, "VOXTYPE_LANGUAGE");
+        }
+    }
+}
+
 /// Apply every `cli.<flag>` onto `config` in place. Returns `top_level_model`
 /// (a clone of `cli.model`) which is consumed downstream by
 /// `send_record_command` so a subcommand-level `--model` can still defer to
 /// the global flag when the subcommand didn't set its own.
 pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Option<String> {
     let top_level_model = cli.model.clone();
+    // The engine the config file and VOXTYPE_ENGINE chose, before --engine
+    // or --model can change it. See `apply_language`.
+    let engine_from_env = config.engine;
     if let Some(enabled) = cli.tray {
         config.tray.enabled = enabled;
     }
@@ -235,13 +264,7 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref prompt) = cli.initial_prompt {
         config.whisper.initial_prompt = Some(prompt.clone());
     }
-    if let Some(ref lang) = cli.language {
-        if config.engine == config::TranscriptionEngine::Gguf {
-            config.gguf.get_or_insert_with(Default::default).language = lang.clone();
-        } else {
-            config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
-        }
-    }
+    apply_language(config, cli, engine_from_env);
     if cli.translate {
         config.whisper.translate = true;
     }

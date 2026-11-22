@@ -698,6 +698,109 @@ impl Config {
         }
     }
 
+    /// Point the active engine's own language setting at `language`, the
+    /// value of `--language`, `VOXTYPE_LANGUAGE` or a per-recording
+    /// `record start --language`. Returns the key it set.
+    ///
+    /// Only Whisper takes a comma-separated set (constrained detection), and
+    /// Soniox reads one as its language hints, with `auto` clearing them.
+    /// Every other engine with a language setting takes one code. Cohere has
+    /// no automatic detection and takes only the codes its checkpoint knows.
+    ///
+    /// `Err` says why nothing changed: an engine with no language setting
+    /// (its model decides), or a value that engine cannot take. Callers warn
+    /// and keep the configured language rather than refuse to start.
+    pub fn set_engine_language(&mut self, language: &str) -> Result<&'static str, String> {
+        let language = language.trim();
+        let key = self.engine_language_key();
+        let engine = self.engine.name();
+        if language.is_empty() {
+            return Err(format!("An empty language leaves {key} unchanged"));
+        }
+        let one_code = || -> Result<String, String> {
+            if language.contains(',') {
+                Err(format!(
+                    "The {engine} engine takes one language, not the set '{language}'; \
+                     {key} is unchanged"
+                ))
+            } else {
+                Ok(language.to_string())
+            }
+        };
+        match self.engine {
+            TranscriptionEngine::Whisper => {
+                self.whisper.language = super::LanguageConfig::from_comma_separated(language);
+            }
+            TranscriptionEngine::Cohere => {
+                let code = one_code()?;
+                if !super::COHERE_LANGUAGES.contains(&code.as_str()) {
+                    return Err(format!(
+                        "Cohere cannot take language '{code}' (it has no automatic detection). \
+                         Supported: {}; {key} is unchanged",
+                        super::COHERE_LANGUAGES.join(", ")
+                    ));
+                }
+                self.cohere.get_or_insert_with(Default::default).language = code;
+            }
+            TranscriptionEngine::Gguf => {
+                self.gguf.get_or_insert_with(Default::default).language = one_code()?;
+            }
+            TranscriptionEngine::SenseVoice => {
+                self.sensevoice
+                    .get_or_insert_with(Default::default)
+                    .language = one_code()?;
+            }
+            TranscriptionEngine::OpenVino => {
+                self.openvino.get_or_insert_with(Default::default).language = one_code()?;
+            }
+            TranscriptionEngine::Soniox => {
+                self.soniox
+                    .get_or_insert_with(Default::default)
+                    .language_hints = if language == "auto" {
+                    Vec::new()
+                } else {
+                    language
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|code| !code.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                };
+            }
+            TranscriptionEngine::Parakeet
+            | TranscriptionEngine::Moonshine
+            | TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual => {
+                return Err(format!(
+                    "The {engine} engine has no language setting (its model decides the \
+                     language), so language '{language}' is ignored. For text cleanup, \
+                     set text.language instead"
+                ));
+            }
+        }
+        Ok(key)
+    }
+
+    /// [`Self::set_engine_language`] for a language given outside the
+    /// config file (`source` names where), warning once per process when
+    /// the active engine cannot take it. Daemons reload their config, and
+    /// one warning in the log is enough.
+    pub fn apply_language_override(&mut self, language: &str, source: &str) {
+        static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        match self.set_engine_language(language) {
+            Ok(key) => tracing::debug!("{source}: {key} = {language:?}"),
+            Err(why) => {
+                let message = format!("{source}: {why}");
+                let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+                if !warned.contains(&message) {
+                    tracing::warn!("{message}");
+                    warned.push(message);
+                }
+            }
+        }
+    }
+
     /// The one language the selected model can write, when the model
     /// registry knows the model and says it has only one: an English-only
     /// checkpoint is `Some("en")`. `None` for a multilingual model, a custom
@@ -1801,5 +1904,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `--language` and `VOXTYPE_LANGUAGE` reach the active engine's own
+    /// key, the one `active_language` reads, for every engine that has one
+    /// (#860).
+    #[test]
+    fn a_language_override_reaches_every_engine_with_a_language_setting() {
+        for engine in ENGINES {
+            let mut config = Config {
+                engine,
+                ..Config::default()
+            };
+            let result = config.set_engine_language("de");
+            match engine {
+                TranscriptionEngine::Whisper
+                | TranscriptionEngine::Cohere
+                | TranscriptionEngine::Gguf
+                | TranscriptionEngine::SenseVoice
+                | TranscriptionEngine::OpenVino => {
+                    assert_eq!(
+                        result,
+                        Ok(config.engine_language_key()),
+                        "{}",
+                        engine.name()
+                    );
+                    assert_eq!(config.active_language(), Some("de"), "{}", engine.name());
+                }
+                TranscriptionEngine::Soniox => {
+                    assert_eq!(result, Ok("soniox.language_hints"));
+                    assert_eq!(config.soniox.as_ref().unwrap().language_hints, ["de"]);
+                }
+                _ => {
+                    let why = result.unwrap_err();
+                    assert!(why.contains("has no language setting"), "{why}");
+                    assert_eq!(config.active_language(), None, "{}", engine.name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_language_override_leaves_other_engines_alone() {
+        let mut config = Config {
+            engine: TranscriptionEngine::Cohere,
+            ..Config::default()
+        };
+        config.set_engine_language("fr").unwrap();
+        assert_eq!(config.cohere.as_ref().unwrap().language, "fr");
+        assert_eq!(
+            config.whisper.language,
+            crate::config::LanguageConfig::default()
+        );
+    }
+
+    #[test]
+    fn values_an_engine_cannot_take_keep_the_configured_language() {
+        let mut cohere = Config {
+            engine: TranscriptionEngine::Cohere,
+            ..Config::default()
+        };
+        cohere.set_engine_language("en").unwrap();
+        for value in ["auto", "xx", "en,fr", "", "  "] {
+            assert!(cohere.set_engine_language(value).is_err(), "{value:?}");
+            assert_eq!(cohere.active_language(), Some("en"), "{value:?}");
+        }
+
+        let mut gguf = Config {
+            engine: TranscriptionEngine::Gguf,
+            ..Config::default()
+        };
+        let before = gguf.gguf.clone().unwrap_or_default().language;
+        assert!(gguf.set_engine_language("en,fr").is_err());
+        assert_eq!(gguf.gguf.unwrap_or_default().language, before);
+    }
+
+    #[test]
+    fn whisper_takes_a_set_and_soniox_reads_one_as_hints() {
+        let mut whisper = Config::default();
+        whisper.set_engine_language("en, fr").unwrap();
+        assert_eq!(
+            whisper.whisper.language,
+            crate::config::LanguageConfig::Multiple(vec!["en".into(), "fr".into()])
+        );
+        whisper.set_engine_language("auto").unwrap();
+        assert!(whisper.whisper.language.is_auto());
+
+        let mut soniox = Config {
+            engine: TranscriptionEngine::Soniox,
+            ..Config::default()
+        };
+        soniox.set_engine_language("en,de").unwrap();
+        assert_eq!(soniox.soniox.as_ref().unwrap().language_hints, ["en", "de"]);
+        soniox.set_engine_language("auto").unwrap();
+        assert!(soniox.soniox.as_ref().unwrap().language_hints.is_empty());
     }
 }

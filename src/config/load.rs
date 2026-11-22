@@ -1,7 +1,5 @@
 use super::parse::parse_config_salvaging;
-use super::{
-    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
-};
+use super::{Config, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine};
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
 
@@ -215,6 +213,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             Err(_) => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
+    // The active engine's language, before the engine-specific variables
+    // below so `VOXTYPE_GGUF_LANGUAGE` still wins for GGUF (#860).
+    if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
+        config.apply_language_override(&lang, "VOXTYPE_LANGUAGE");
+    }
     if let Ok(model) = std::env::var("VOXTYPE_GGUF_MODEL") {
         config.gguf.get_or_insert_with(Default::default).model = model;
     }
@@ -246,9 +249,6 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(value) = std::env::var("VOXTYPE_GGUF_STREAMING") {
         config.gguf.get_or_insert_with(Default::default).streaming = parse_bool_env(&value);
-    }
-    if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
-        config.whisper.language = LanguageConfig::from_comma_separated(&lang);
     }
     if let Ok(val) = std::env::var("VOXTYPE_TRANSLATE") {
         config.whisper.translate = parse_bool_env(&val);
