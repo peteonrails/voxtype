@@ -154,6 +154,8 @@ Selects which speech-to-text engine to use for transcription.
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
 
+**macOS:** the macOS build includes only the Whisper and Soniox engines. The other engines are Linux-only for now, and `voxtype setup onnx` does not apply there. See [INSTALL_MACOS.md](INSTALL_MACOS.md#available-engines).
+
 **Example:**
 ```toml
 engine = "whisper"

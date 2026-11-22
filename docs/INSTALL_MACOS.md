@@ -1,6 +1,6 @@
 # Voxtype macOS Installation Guide
 
-Voxtype is a push-to-talk voice-to-text tool with fast, local speech recognition using Parakeet or Whisper.
+Voxtype is a push-to-talk voice-to-text tool with fast, local speech recognition using Whisper.
 
 > **Note:** macOS support is in beta. The binaries are currently unsigned, which requires a few extra steps during installation. Once we have signed and notarized binaries, this process will be simpler.
 
@@ -52,12 +52,21 @@ This is a one-time setup:
 ### Download a Speech Model
 
 ```bash
-# Recommended: Parakeet (fast, accurate)
-voxtype setup --download --model parakeet-tdt-0.6b-v3-int8
-
-# Or use Whisper
+# Small and fast
 voxtype setup --download --model base.en
+
+# Or larger and more accurate (Metal keeps it quick on Apple Silicon)
+voxtype setup --download --model large-v3-turbo
 ```
+
+### Available Engines
+
+The macOS build includes two engines:
+
+- **Whisper**, which runs locally with Metal acceleration, or against a remote Whisper server (see `[whisper] mode` in [CONFIGURATION.md](CONFIGURATION.md)).
+- **Soniox**, a cloud engine (see [SONIOX.md](SONIOX.md)).
+
+Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, the GGUF engine and OpenVINO are Linux-only for now. `voxtype setup onnx --enable` switches between Linux binary variants, so it does not apply on macOS.
 
 ## Usage
 
@@ -95,14 +104,11 @@ keep using it until you move the file to `~/.config/voxtype/`.
 
 ```toml
 # Transcription engine
-engine = "parakeet"  # or "whisper"
+engine = "whisper"  # or "soniox"
 
 [hotkey]
 key = "RIGHTALT"     # Right Option key
 mode = "push_to_talk"  # or "toggle"
-
-[parakeet]
-model = "parakeet-tdt-0.6b-v3-int8"
 
 [whisper]
 model = "base.en"
@@ -139,7 +145,16 @@ This happens because the app is unsigned. Go to System Settings > Privacy & Secu
 ### Model not found
 
 ```bash
-voxtype setup --download --model parakeet-tdt-0.6b-v3-int8
+voxtype setup --download --model base.en
+```
+
+### "engine unavailable" or "not compiled into this binary"
+
+The config names an engine the macOS build does not include, such as
+`parakeet`. Switch back to Whisper:
+
+```bash
+voxtype config set engine whisper
 ```
 
 ### Daemon not starting
@@ -183,8 +198,12 @@ rm -rf ~/Library/Logs/voxtype
 ```bash
 git clone https://github.com/peteonrails/voxtype.git
 cd voxtype
-cargo build --release --features parakeet
+cargo build --release --features gpu-metal
 ```
+
+This matches the release build: Whisper with Metal, plus Soniox. The ONNX and
+GGUF engine features are not part of the macOS release or its CI, and are
+untested on macOS.
 
 ## Getting Help
 

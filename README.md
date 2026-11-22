@@ -364,6 +364,8 @@ With GPU acceleration, `large-v3` achieves sub-second inference while supporting
 
 Voxtype ships separate binaries for Whisper and ONNX engines. Use `voxtype setup onnx --enable` to switch to the ONNX binary, or `--disable` to switch back.
 
+**macOS:** the macOS build includes only the Whisper and Soniox engines. The other engines are Linux-only for now, and `voxtype setup onnx` does not apply there. See [INSTALL_MACOS.md](docs/INSTALL_MACOS.md#available-engines).
+
 | Engine | Languages | Architecture | Best For |
 |--------|-----------|-------------|----------|
 | **Whisper** (default) | 99 languages | Encoder-decoder (whisper.cpp) | General use, multilingual |

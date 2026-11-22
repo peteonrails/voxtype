@@ -145,10 +145,12 @@ Build scripts:
 
 ### Building Rust Binary
 
-**All macOS binaries must include Parakeet support:**
+The release workflow (`.github/workflows/build-macos.yml`) builds with
+`--features gpu-metal` only, so the macOS binary includes Whisper (with Metal)
+and Soniox. The ONNX and GGUF engines are Linux-only for now (#632).
 
 ```bash
-cargo build --release --features parakeet
+cargo build --release --features gpu-metal
 cp target/release/voxtype /Applications/Voxtype.app/Contents/MacOS/
 ```
 
