@@ -807,9 +807,11 @@ impl Config {
     pub(crate) fn streaming_requested(&self) -> bool {
         match self.engine {
             // The sliding-window engine, which `[whisper]` runs only in
-            // local mode.
+            // local mode. The mode is read without the deprecation warning:
+            // the TUI asks this on every frame.
             TranscriptionEngine::Whisper => {
-                self.whisper.streaming && self.whisper.effective_mode() == super::WhisperMode::Local
+                self.whisper.streaming
+                    && self.whisper.configured_mode() == super::WhisperMode::Local
             }
             TranscriptionEngine::Parakeet => self.parakeet.as_ref().is_some_and(|p| p.streaming),
             TranscriptionEngine::Soniox => self

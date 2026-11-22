@@ -195,6 +195,26 @@ impl ConfigEditor {
             .map_err(|error| EditorError::Validate(error.to_string()))
     }
 
+    /// The config the daemon would build from this file, for questions about
+    /// what the daemon will do. Sections are parsed one by one, as
+    /// `load_config` does, so one broken section does not hide the rest, and
+    /// nothing is logged: the Hotkey section asks on every frame.
+    ///
+    /// The Soniox engine with no `[soniox]` table gets the table's defaults:
+    /// the transcriber factory refuses Soniox without the table
+    /// (`transcribe::create_transcriber`), and `SONIOX_API_KEY` or
+    /// `--soniox-api-key` inserts one with defaults, so every Soniox daemon
+    /// that starts has one. Other environment variables and CLI flags are not
+    /// visible here.
+    pub fn daemon_config(&self) -> Option<config::Config> {
+        let (mut config, _rejected) =
+            config::parse_config_salvaging(&self.document.to_string()).ok()?;
+        if config.engine == config::TranscriptionEngine::Soniox && config.soniox.is_none() {
+            config.soniox = Some(config::SonioxConfig::default());
+        }
+        Some(config)
+    }
+
     pub fn set_string(&mut self, table: &str, key: &str, value: &str) {
         self.set_decorated_value(table, key, Value::from(value));
     }

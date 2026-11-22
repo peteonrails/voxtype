@@ -2580,6 +2580,8 @@ streaming_buffer_output = true
 
 Also available as `--streaming-buffer-output` (and `--streaming-buffer-output=false` to override a config that turns it on) or `VOXTYPE_STREAMING_BUFFER_OUTPUT=true`.
 
+The hotkey advice in `voxtype configure`, and the Advanced section's switch from push-to-talk to toggle on a save with Streaming on, read the config file only, so buffering turned on with `--streaming-buffer-output` or `VOXTYPE_STREAMING_BUFFER_OUTPUT` is not seen there.
+
 ### driver_order
 
 **Type:** Array of strings

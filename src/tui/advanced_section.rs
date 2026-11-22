@@ -68,13 +68,14 @@ impl AdvancedState {
         })
     }
     pub fn save(&mut self) -> Action {
-        let mut ed = match ConfigEditor::load() {
-            Ok(e) => e,
-            Err(e) => {
-                self.feedback = Some((FeedbackLevel::Err, format!("load: {}", e)));
-                return Action::None;
-            }
-        };
+        match ConfigEditor::load() {
+            Ok(mut ed) => self.save_with_editor(&mut ed),
+            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("load: {}", e))),
+        }
+        Action::None
+    }
+    /// Write the fields into `ed`, with the fixes streaming needs, and save it.
+    fn save_with_editor(&mut self, ed: &mut ConfigEditor) {
         ed.set_bool("whisper", "gpu_isolation", self.gpu_isolation);
         ed.set_bool("whisper", "on_demand_loading", self.on_demand_loading);
         ed.set_bool("whisper", "flash_attention", self.flash_attention);
@@ -90,24 +91,7 @@ impl AdvancedState {
         let was_streaming = ed.get_bool("parakeet", "streaming").unwrap_or(false);
         ed.set_bool("parakeet", "streaming", self.streaming);
 
-        // Streaming dictation requires toggle activation: typing at the cursor
-        // while a PTT key is held confuses libinput's held-key tracker on
-        // Hyprland/Sway/River, so the key-release event never reaches voxtype.
-        // Rewrite the user's hotkey mode rather than silently letting the
-        // daemon fight it at startup.
-        let promoted_hotkey_mode = if self.streaming
-            && ed
-                .get_string("hotkey", "mode")
-                .map(|m| m == "push_to_talk")
-                .unwrap_or(false)
-        {
-            ed.set_string("hotkey", "mode", "toggle");
-            true
-        } else {
-            false
-        };
-
-        // Streaming dictation also requires a model that ships
+        // Parakeet streaming requires a model that ships
         // tokenizer.model (parakeet-rs::ParakeetUnified::load fails without
         // it). When the user flips streaming on from off, check the active
         // Parakeet model and auto-switch to the canonical streaming-capable
@@ -135,6 +119,23 @@ impl AdvancedState {
             } else {
                 None
             };
+
+        // Streaming that types while recording needs toggle activation
+        // (libinput loses a held key's release). When the Streaming field is
+        // on, ask the daemon's check on the config about to be saved, so
+        // buffered output, on-demand loading and engines that do not stream
+        // keep push-to-talk, as the daemon and the Hotkey section do. A save
+        // that leaves the Streaming field off leaves the hotkey mode alone.
+        // After the model auto-switch, so that a newly enabled `[parakeet]`
+        // section has its model.
+        let promoted_hotkey_mode = self.streaming
+            && ed.get_string("hotkey", "mode").as_deref() == Some("push_to_talk")
+            && ed
+                .daemon_config()
+                .is_some_and(|config| config.streaming_active());
+        if promoted_hotkey_mode {
+            ed.set_string("hotkey", "mode", "toggle");
+        }
 
         match ed.save() {
             Ok(()) => {
@@ -174,7 +175,6 @@ impl AdvancedState {
             }
             Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
         }
-        Action::None
     }
     pub fn reset(&mut self) {
         if let Ok(fresh) = Self::load() {
@@ -474,11 +474,12 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
                  engine first via the Engine section.",
             ),
             Line::from(
-                "  • You use heavy text post-processing (LLM cleanup) and \
-                 want text at the cursor while you speak. Streaming types \
-                 partials before post_process can see the final transcript; \
-                 [output] streaming_buffer_output instead types nothing until \
-                 you stop, then post-processes the whole transcript.",
+                "  • You use heavy text post-processing (LLM cleanup). \
+                 Streaming types partials before post_process can see the \
+                 final transcript. To keep streaming and still post-process, \
+                 set [output] streaming_buffer_output = true: nothing is \
+                 typed until you stop, then the whole transcript is \
+                 post-processed.",
             ),
             Line::from(""),
             Line::from(Span::styled(
@@ -602,4 +603,89 @@ fn spawn_background_model_download(model_name: String) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Save the section over `source` with its Streaming field set to
+    /// `streaming`, and read the hotkey mode the config file ends up with.
+    /// The section writes its own `[whisper] on_demand_loading`, so that
+    /// field is loaded from `source`, as `AdvancedState::load` does.
+    fn hotkey_mode_after_save(source: &str, streaming: bool) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, source).unwrap();
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = AdvancedState {
+            gpu_isolation: false,
+            on_demand_loading: ed.get_bool("whisper", "on_demand_loading").unwrap_or(false),
+            flash_attention: false,
+            eager_processing: false,
+            gpu_device: None,
+            streaming,
+            field: Field::Streaming,
+            feedback: None,
+            dirty_since_load: true,
+            pending_download: None,
+        };
+        state.save_with_editor(&mut ed);
+        assert!(
+            matches!(&state.feedback, Some((level, _)) if !matches!(level, FeedbackLevel::Err)),
+            "{:?}",
+            state.feedback
+        );
+        ConfigEditor::load_from_path(path)
+            .unwrap()
+            .get_string("hotkey", "mode")
+    }
+
+    /// Turning the Streaming field on writes toggle activation exactly when
+    /// the daemon would promote push-to-talk (`Config::streaming_active`).
+    /// Buffered output, on-demand loading and an engine that does not stream
+    /// keep push-to-talk, and a save that leaves the field off never touches
+    /// the hotkey mode.
+    ///
+    /// The configs stream through local Whisper, not Parakeet: a streaming
+    /// Parakeet model (`parakeet-unified-en-0.6b`) needs the ONNX backend, so
+    /// a default build refuses to save it, and the question asked is the same
+    /// for every engine.
+    #[test]
+    fn saving_writes_toggle_only_when_the_daemon_would() {
+        let ptt = "[hotkey]\nmode = \"push_to_talk\"\n";
+        let streaming = format!("{ptt}[whisper]\nstreaming = true\n");
+        let cases = [
+            (streaming.clone(), true, "toggle"),
+            (
+                format!("{streaming}[output]\nstreaming_buffer_output = true\n"),
+                true,
+                "push_to_talk",
+            ),
+            (
+                format!("{streaming}on_demand_loading = true\n"),
+                true,
+                "push_to_talk",
+            ),
+            // No engine set: Whisper, which does not stream here.
+            (ptt.to_string(), true, "push_to_talk"),
+            // The Streaming field off: saving another field over a config
+            // that already streams leaves the hotkey mode alone. The section
+            // writes `[parakeet] streaming`, so the table needs its model.
+            (
+                format!("{streaming}[parakeet]\nmodel = \"parakeet-tdt-0.6b-v3\"\n"),
+                false,
+                "push_to_talk",
+            ),
+        ];
+        let got: Vec<Option<String>> = cases
+            .iter()
+            .map(|(source, on, _)| hotkey_mode_after_save(source, *on))
+            .collect();
+        let want: Vec<Option<String>> = cases
+            .iter()
+            .map(|(_, _, mode)| Some(mode.to_string()))
+            .collect();
+        assert_eq!(got, want);
+    }
 }

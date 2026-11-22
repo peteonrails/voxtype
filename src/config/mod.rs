@@ -56,6 +56,7 @@ pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,
     OutputMode,
 };
+pub(crate) use parse::parse_config_salvaging;
 pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
 pub(crate) use root::EngineLanguage;
 pub use root::{ActiveGguf, Config, OmarchyConfig, TextLanguageSource, TrayConfig};

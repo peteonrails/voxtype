@@ -241,31 +241,30 @@ pub struct WhisperConfig {
 }
 
 impl WhisperConfig {
-    /// Get the effective execution mode, preferring `mode` over deprecated `backend`
+    /// The execution mode, preferring `mode` over the deprecated `backend`,
+    /// without the deprecation warning [`Self::effective_mode`] logs. For
+    /// code that asks repeatedly, such as a TUI frame.
+    pub(crate) fn configured_mode(&self) -> WhisperMode {
+        self.mode.or(self.backend).unwrap_or_default()
+    }
+
+    /// Get the effective execution mode, preferring `mode` over deprecated
+    /// `backend`, and warn when only the deprecated `backend` is set.
     pub fn effective_mode(&self) -> WhisperMode {
-        // Prefer `mode` if set
-        if let Some(mode) = self.mode {
-            return mode;
-        }
-        // Fall back to deprecated `backend` with warning
-        if let Some(backend) = self.backend {
+        if let (None, Some(backend)) = (self.mode, self.backend) {
+            let name = match backend {
+                WhisperMode::Local => "local",
+                WhisperMode::Remote => "remote",
+                WhisperMode::Cli => "cli",
+            };
             tracing::warn!("DEPRECATED: [whisper] backend is deprecated, use 'mode' instead");
             tracing::warn!(
                 "  Change 'backend = \"{}\"' to 'mode = \"{}\"' in config.toml",
-                match backend {
-                    WhisperMode::Local => "local",
-                    WhisperMode::Remote => "remote",
-                    WhisperMode::Cli => "cli",
-                },
-                match backend {
-                    WhisperMode::Local => "local",
-                    WhisperMode::Remote => "remote",
-                    WhisperMode::Cli => "cli",
-                }
+                name,
+                name
             );
-            return backend;
         }
-        WhisperMode::default()
+        self.configured_mode()
     }
 }
 
