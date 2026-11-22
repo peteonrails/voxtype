@@ -282,7 +282,7 @@ key = "BTN_SIDE"
 
 The `BTN_` prefix is optional, so `side` and `btn-extra` also work. Primary and secondary click (`BTN_LEFT`, `BTN_RIGHT`) are not accepted: binding push-to-talk to them makes the desktop unusable.
 
-Voxtype opens the mouse's event device automatically when the hotkey is a button, so no extra configuration is needed. Your user still needs to be in the `input` group, the same as for keyboard hotkeys. Run `evtest` to confirm which button your mouse reports; some mice send a keyboard keycode from a second interface rather than a `BTN_` event, in which case use that key name instead.
+Voxtype opens the mouse's event device automatically when the hotkey is a button, so no extra configuration is needed. Like keyboard hotkeys, this needs `input` group membership, with the same security cost ([trade-off](USER_MANUAL.md#the-input-group-trade-off)). Compositors that bind mouse buttons can run `voxtype record` without it, for example Hyprland's `mouse:276`. Run `evtest` to confirm which button your mouse reports; some mice send a keyboard keycode from a second interface rather than a `BTN_` event, in which case use that key name instead.
 
 **Numeric keycodes:**
 
@@ -357,7 +357,7 @@ When set to `false`, voxtype will not listen for keyboard events via evdev. Inst
 
 **When to disable:**
 - You prefer using your compositor's native keybindings (Hyprland, Sway)
-- You don't want to add your user to the `input` group
+- You don't want to add your user to the `input` group, which lets every program you run read every keystroke ([trade-off](USER_MANUAL.md#the-input-group-trade-off))
 - You want to use key combinations not supported by evdev (e.g., Super+V)
 
 **Example:**

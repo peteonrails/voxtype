@@ -524,32 +524,33 @@ Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout
 
 ### "Cannot open input device" or "Permission denied"
 
-**Cause:** User is not in the `input` group, required for evdev access.
+**Cause:** The built-in evdev hotkey reads `/dev/input/event*` directly, and only members of the `input` group may. Your user is not one, which is the safer state: membership lets every program you run read every keystroke. Some distributions, Omarchy among them, remove users from the group on purpose.
 
-**Solution:**
-```bash
-# Add user to input group
-sudo usermod -aG input $USER
+**Solution (recommended):** trigger voxtype from a compositor or desktop keybinding instead. Bind `voxtype record start` and `voxtype record stop` (or `voxtype record toggle` where the desktop has no key-release binds), then turn the built-in hotkey off:
 
-# IMPORTANT: Log out and back in for changes to take effect
-# Verify membership
-groups | grep input
+```toml
+[hotkey]
+enabled = false
 ```
+
+This works on Hyprland, Sway, River, niri, KDE Plasma and GNOME without any extra permissions. See [Compositor Keybindings](USER_MANUAL.md#compositor-keybindings).
+
+**Only if nothing can run `voxtype record`** (some X11 window managers, the console): adding yourself to the `input` group makes the built-in hotkey work, at the cost described above. Read [The `input` group trade-off](USER_MANUAL.md#the-input-group-trade-off) before you decide. Never do this on Hyprland or Omarchy, where a keybinding does the same job.
 
 When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: built-in hotkey unavailable" desktop notification. It is shown once, not on every start, and again only if the cause changes or the built-in hotkey breaks after having worked; the daemon log has the warning on every start. The notification names the cause:
 
-- **Not in the `input` group:** run `sudo usermod -aG input $USER`, then log out and back in.
+- **Not in the `input` group:** bind `voxtype record` in your compositor and set `[hotkey] enabled = false`, as above. The group is a deliberate trade-off, not the default fix.
 - **In the group, but this session started before you were added:** `/etc/group` lists you, but the running daemon does not have the group yet. Log out completely and back in, or reboot. A systemd user service keeps the old groups until every session of yours has ended.
 - **In the group and still denied:** the device nodes have unusual ownership or permissions. Check `ls -l /dev/input/event*`.
 - **No keyboard found:** nothing in `/dev/input` looks like a keyboard. Plug one in and restart voxtype.
 
-If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`. If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
+If you already use a compositor keybinding, your hotkey works and this notification is only about the built-in one: `[hotkey] enabled = false` (or starting the daemon with `--no-hotkey`) turns the built-in hotkey off and stops the notification.
 
 ### "Failed to access /dev/input/event*"
 
-**Cause:** udev rules preventing access, or input group not applied.
+**Cause:** The built-in evdev hotkey cannot read the keyboard: you are not in the `input` group, the membership has not reached this session yet, or udev rules give the devices an unusual owner.
 
-**Solution:**
+**Solution:** Prefer a compositor keybinding and `[hotkey] enabled = false` (see above). If you have deliberately chosen the `input` group ([trade-off](USER_MANUAL.md#the-input-group-trade-off)):
 1. Verify group membership: `groups | grep input`
 2. If not shown, log out and back in completely
 3. If still failing, check udev rules:
@@ -573,6 +574,8 @@ echo "uinput" | sudo tee /etc/modules-load.d/uinput.conf
 # Check ydotool daemon
 systemctl --user status ydotool
 ```
+
+If the module is loaded and ydotoold still cannot open `/dev/uinput`, give it write access through a dedicated group rather than the `input` group: see [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 ---
 
@@ -1065,7 +1068,9 @@ Look for log messages about speech detection to understand what VAD is doing wit
 
 **What happens:** Voxtype detects this failure and automatically falls back to dotool, then ydotool. If neither is set up, it falls back to clipboard mode.
 
-**Solution 1 (Recommended):** Install dotool. Unlike ydotool, direct dotool fallback does not require a daemon and supports keyboard layouts for non-US keyboards:
+**Solution 1 (Recommended):** Install dotool. Unlike ydotool, direct dotool fallback does not require a daemon and supports keyboard layouts for non-US keyboards. eitype needs no device access at all and is the simpler choice on a US layout.
+
+dotool needs write access to `/dev/uinput`. Grant it with a dedicated `uinput` group, not the `input` group, which would also let your programs read every keystroke. The commands are in [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 ```bash
 # 1. Install dotool (check your distribution's package manager)
@@ -1073,9 +1078,7 @@ Look for log messages about speech detection to understand what VAD is doing wit
 yay -S dotool
 # From source: https://sr.ht/~geb/dotool/
 
-# 2. Add user to input group (required for uinput access)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
+# 2. Give your user write access to /dev/uinput (dedicated group, see link above)
 
 # 3. Configure keyboard layout if needed (non-US keyboards)
 # Add to config.toml:
@@ -1150,11 +1153,9 @@ cd dotool && ./build.sh && sudo cp dotool /usr/local/bin/
 
 # Arch (AUR):
 yay -S dotool
-
-# Add user to input group
-sudo usermod -aG input $USER
-# Log out and back in
 ```
+
+Then give your user write access to `/dev/uinput` through a dedicated group, not the `input` group: see [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 **Option 2: Install ydotool**
 
@@ -1211,9 +1212,9 @@ yay -S dotool
 # Fedora (from source):
 # See https://sr.ht/~geb/dotool/ for instructions
 
-# 2. Add user to input group (required for uinput access)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
+# 2. Give your user write access to /dev/uinput through a dedicated
+#    group, not the input group (which would also expose every keystroke):
+#    see USER_MANUAL.md, "Giving dotool and ydotool access to uinput"
 
 # 3. Configure your keyboard layout in config.toml:
 ```
@@ -2310,7 +2311,8 @@ journalctl --user -u voxtype -n 50
 # If that prints nothing: journalctl _SYSTEMD_USER_UNIT=voxtype.service -n 50
 
 # Common issues:
-# - Not in input group (log out/in after adding)
+# - Built-in hotkey can't read the keyboard (use a compositor keybinding
+#   and [hotkey] enabled = false; the daemon keeps running either way)
 # - Model not downloaded
 # - ydotool not running
 ```
