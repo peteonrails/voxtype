@@ -16,6 +16,12 @@ pub const DEFAULT_REALTIME_MODEL: &str = "stt-rt-v6";
 /// is enabled (including meeting mode).
 pub const DEFAULT_ASYNC_MODEL: &str = "stt-async-v6";
 
+/// Realtime models that were voxtype's default before `model` became
+/// optional. Configs that pinned one of them always had it swapped to the
+/// async default under `async_api`, so they keep that swap: the async API
+/// rejects realtime model ids.
+const LEGACY_REALTIME_DEFAULTS: [&str; 2] = ["stt-rt-v4", "stt-rt-v6"];
+
 /// Soniox cloud streaming WebSocket STT configuration
 ///
 /// Soniox is a paid cloud STT provider. API key required:
@@ -37,7 +43,9 @@ pub struct SonioxConfig {
     /// for the active mode: `stt-rt-v6` for the realtime WebSocket, or
     /// `stt-async-v6` when `async_api = true` (including meeting mode, which
     /// always uses the async API). Set an explicit value to override; an
-    /// explicit model is used verbatim in both modes (no auto-swap).
+    /// explicit model is used verbatim in both modes, except that a pinned
+    /// former default (`stt-rt-v4` or `stt-rt-v6`) still becomes
+    /// `stt-async-v6` under `async_api`, as it always has.
     #[serde(default)]
     pub model: Option<String>,
 
@@ -107,9 +115,15 @@ fn default_soniox_region() -> String {
 impl SonioxConfig {
     /// Resolve the Soniox model id for the active mode. An explicit `model`
     /// is used verbatim; when unset, the per-mode default is chosen
-    /// (`stt-async-v6` under `async_api`, otherwise `stt-rt-v6`).
+    /// (`stt-async-v6` under `async_api`, otherwise `stt-rt-v6`). A pinned
+    /// former default realtime model resolves to the async default under
+    /// `async_api`, so configs written before `model` was optional keep
+    /// working in meeting mode.
     pub fn resolved_model(&self) -> &str {
         match self.model.as_deref() {
+            Some(m) if self.async_api && LEGACY_REALTIME_DEFAULTS.contains(&m) => {
+                DEFAULT_ASYNC_MODEL
+            }
             Some(m) => m,
             None if self.async_api => DEFAULT_ASYNC_MODEL,
             None => DEFAULT_REALTIME_MODEL,
@@ -173,14 +187,32 @@ mod tests {
         };
         assert_eq!(realtime.resolved_model(), "stt-rt-v6");
 
-        // Explicit model survives async_api: no auto-swap. A user who pins a
-        // model owns the choice in both modes.
+        // Any other explicit model survives async_api as-is.
         let async_pinned = SonioxConfig {
-            model: Some("stt-rt-v6".into()),
+            model: Some("stt-async-experimental".into()),
             async_api: true,
             ..Default::default()
         };
-        assert_eq!(async_pinned.resolved_model(), "stt-rt-v6");
+        assert_eq!(async_pinned.resolved_model(), "stt-async-experimental");
+    }
+
+    #[test]
+    fn pinned_former_defaults_swap_to_async_under_async_api() {
+        for legacy in ["stt-rt-v4", "stt-rt-v6"] {
+            let async_cfg = SonioxConfig {
+                model: Some(legacy.into()),
+                async_api: true,
+                ..Default::default()
+            };
+            assert_eq!(async_cfg.resolved_model(), DEFAULT_ASYNC_MODEL, "{legacy}");
+
+            let realtime_cfg = SonioxConfig {
+                model: Some(legacy.into()),
+                async_api: false,
+                ..Default::default()
+            };
+            assert_eq!(realtime_cfg.resolved_model(), legacy);
+        }
     }
 
     #[test]

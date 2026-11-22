@@ -364,10 +364,11 @@ impl Config {
         if matches!(cfg.engine, TranscriptionEngine::Soniox) {
             if let Some(ref mut sx) = cfg.soniox {
                 if !sx.async_api {
-                    tracing::info!(
-                        "Soniox meeting mode: routing to async API (stt-async-v6); dictation path unchanged"
-                    );
                     sx.async_api = true;
+                    tracing::info!(
+                        "Soniox meeting mode: routing to async API ({}); dictation path unchanged",
+                        sx.resolved_model()
+                    );
                 }
             }
         }

@@ -1361,12 +1361,21 @@ mod tests {
 
     #[test]
     fn explicit_model_is_used_verbatim_under_async_api() {
-        // No auto-swap: a pinned model is sent as-is to whichever API is active.
+        // A pinned model other than a former default is sent as-is.
         let mut cfg = cfg_with_key(Some("k"));
         cfg.async_api = true;
         cfg.model = Some("stt-async-experimental".into());
         let t = SonioxTranscriber::new(cfg).unwrap();
         assert_eq!(t.config.resolved_model(), "stt-async-experimental");
+    }
+
+    #[test]
+    fn async_api_swaps_legacy_v4_default() {
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.async_api = true;
+        cfg.model = Some("stt-rt-v4".into());
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        assert_eq!(t.config.resolved_model(), "stt-async-v6");
     }
 
     #[test]
