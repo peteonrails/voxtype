@@ -347,14 +347,6 @@ fn cancel_applies_to(state: &State) -> bool {
     state.is_recording() || matches!(state, State::Transcribing { .. })
 }
 
-/// Clean up any stale cancel file on startup
-fn cleanup_cancel_file() {
-    let cancel_file = Config::runtime_dir().join("cancel");
-    if cancel_file.exists() {
-        let _ = std::fs::remove_file(&cancel_file);
-    }
-}
-
 /// Written by `voxtype record start` (and a toggle that starts) just before
 /// it signals the daemon, stamped with [`trigger_stamp`].
 pub const START_REQUEST_FILE: &str = "start_requested";
@@ -564,6 +556,29 @@ const RECORDING_OVERRIDE_FILES: [&str; 6] = [
 fn discard_recording_overrides_in(runtime_dir: &std::path::Path) {
     for name in RECORDING_OVERRIDE_FILES {
         let _ = std::fs::remove_file(runtime_dir.join(name));
+    }
+}
+
+/// Remove what a previous daemon left behind for a recording it never
+/// finished. A daemon killed mid-recording (SIGKILL, OOM, a crash) never
+/// consumes the overrides `voxtype record start` wrote for it, so the next
+/// daemon would apply them to its first recording, even one started from
+/// the hotkey (#853). Its state file also keeps the dead daemon's last word,
+/// which `voxtype status` reports and `record toggle` acts on until this
+/// daemon writes "idle" once the model has loaded.
+///
+/// Call it after the instance lock is held, so a second `voxtype daemon`
+/// that is about to fail cannot wipe a live daemon's overrides, and before
+/// the PID file is written. `voxtype record` writes no override until the
+/// PID file names a live daemon, so an override meant for a recording on
+/// this daemon is written after this sweep and survives it.
+fn clear_previous_daemon_files(runtime_dir: &Path, state_file: Option<&Path>) {
+    discard_recording_overrides_in(runtime_dir);
+    for name in ["no_osd_override", "cancel", START_REQUEST_FILE] {
+        let _ = std::fs::remove_file(runtime_dir.join(name));
+    }
+    if let Some(path) = state_file {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -6595,14 +6610,14 @@ impl Daemon {
             self.config.hotkey.mode = crate::config::ActivationMode::Toggle;
         }
 
-        // Clean up any stale cancel and profile override files from previous runs
-        cleanup_cancel_file();
+        // Drop a previous daemon's unfinished recording: its overrides,
+        // triggers and state word. Must stay between the instance lock above
+        // and write_pid_file below.
+        clear_previous_daemon_files(&Config::runtime_dir(), self.state_file_path.as_deref());
         // The GGUF worker rewrites this once it has bound a backend; a report
         // from a previous daemon must not describe this one.
         let _ =
             std::fs::remove_file(Config::runtime_dir().join(crate::status_json::GGUF_STATUS_FILE));
-        let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
-        cleanup_profile_override();
 
         // Clean up any stale meeting command files
         cleanup_meeting_files();
@@ -9681,6 +9696,57 @@ while True:
             assert!(!dir.path().join(name).exists(), "{name} survived");
         }
         assert!(dir.path().join("unrelated").exists());
+    }
+
+    #[test]
+    fn a_new_daemon_drops_a_killed_daemons_recording_files() {
+        // #853: `record start --file=... --no-auto-submit
+        // --no-smart-auto-submit`, then SIGKILL mid-recording. The next
+        // daemon must not send its first hotkey recording to that file.
+        let dir = TempDir::new().unwrap();
+        let runtime = dir.path();
+        fs::write(runtime.join("output_mode_override"), "file:/tmp/out.txt").unwrap();
+        fs::write(runtime.join("auto_submit_override"), "false").unwrap();
+        fs::write(runtime.join("smart_auto_submit_override"), "false").unwrap();
+        fs::write(runtime.join("shift_enter_override"), "true").unwrap();
+        fs::write(runtime.join("model_override"), "large-v3").unwrap();
+        fs::write(runtime.join("profile_override"), "slack").unwrap();
+        fs::write(runtime.join("no_osd_override"), "true").unwrap();
+        fs::write(runtime.join("cancel"), "1").unwrap();
+        fs::write(runtime.join(START_REQUEST_FILE), "1").unwrap();
+        let state_file = runtime.join("state");
+        fs::write(&state_file, "recording").unwrap();
+        // Held or owned by the starting daemon, or not ours at all.
+        fs::write(runtime.join("voxtype.lock"), "4242").unwrap();
+        fs::write(runtime.join("pid"), "4141").unwrap();
+        fs::write(runtime.join("unrelated"), "keep").unwrap();
+
+        clear_previous_daemon_files(runtime, Some(&state_file));
+
+        for name in RECORDING_OVERRIDE_FILES.iter().copied().chain([
+            "no_osd_override",
+            "cancel",
+            START_REQUEST_FILE,
+            "state",
+        ]) {
+            assert!(!runtime.join(name).exists(), "{name} survived a restart");
+        }
+        for name in ["voxtype.lock", "pid", "unrelated"] {
+            assert!(runtime.join(name).exists(), "{name} was removed");
+        }
+    }
+
+    #[test]
+    fn a_new_daemon_without_a_state_file_still_drops_overrides() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("output_mode_override"), "clipboard").unwrap();
+        fs::write(dir.path().join("state"), "recording").unwrap();
+
+        clear_previous_daemon_files(dir.path(), None);
+
+        assert!(!dir.path().join("output_mode_override").exists());
+        // state_file disabled in config: the file is not this daemon's.
+        assert!(dir.path().join("state").exists());
     }
 
     #[test]
