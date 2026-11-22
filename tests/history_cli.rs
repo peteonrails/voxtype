@@ -129,14 +129,24 @@ impl FakeTools {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         write("which", &format!("[ -x \"{}/$1\" ]", bin.display()));
+        // The fakes run with PATH set to this directory only, and the Nix
+        // build sandbox has no cat in /bin or /usr/bin, so `command -p cat`
+        // finds nothing there. Use the cat this test process can see.
+        let cat = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|dir| dir.join("cat"))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| std::path::PathBuf::from("/bin/cat"));
         for tool in [
             "wl-copy", "wtype", "dotool", "ydotool", "eitype", "xclip", "xsel",
         ] {
             write(
                 tool,
                 &format!(
-                    "printf '%s %s <' \"{tool}\" \"$*\" >> \"{log}\"\ncommand -p cat >> \"{log}\"\nprintf '>\\n' >> \"{log}\"",
-                    log = log.display()
+                    "printf '%s %s <' \"{tool}\" \"$*\" >> \"{log}\"\n\"{cat}\" >> \"{log}\"\nprintf '>\\n' >> \"{log}\"",
+                    log = log.display(),
+                    cat = cat.display()
                 ),
             );
         }
