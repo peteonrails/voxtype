@@ -708,6 +708,58 @@ duck_media_fade_ms = 150
 
 ---
 
+## [audio.dead_input]
+
+Stops a recording whose input device delivers no sound.
+
+A microphone that is off, muted in hardware, or asleep can still open and
+stream. The guard checks the beginning of every recording and stops a capture
+that has delivered nothing but exact digital silence (every sample zero) for
+the whole window. Any sample that is not zero, however quiet, counts as input,
+so a noise-gated microphone that stays at zero until you speak is only stopped
+if you say nothing for the whole window. It plays the error cue and shows a
+notification naming the audio source.
+
+```toml
+[audio.dead_input]
+enabled = true
+window_ms = 5000
+threshold_dbfs = -100.0
+```
+
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Set to `false` to record regardless of the input level. Use
+`--dead-input-check` or `--no-dead-input-check` to override this for one run.
+
+### window_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `5000`
+**Required:** No
+
+How long the guard waits, after its 100 ms settling period, for a sample that
+is not zero. A source that produces one at any point, including during the
+settling period, is live. Values below `300` are raised to
+`300`. Use `--dead-input-window <MS>` to override it for one run.
+
+### threshold_dbfs
+
+**Type:** Float (dBFS)
+**Default:** `-100.0`
+**Required:** No
+
+A frame at or above this level (measured through a 150 Hz high-pass filter)
+ends the check early as live. It cannot make the guard stop a recording: only
+exact silence is dead, whatever the threshold. Use
+`--dead-input-threshold <DBFS>` to override it for one run.
+
+---
+
 ## [audio.feedback]
 
 Controls audio feedback sounds (beeps when recording starts/stops).
@@ -5183,6 +5235,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |
 | `VOXTYPE_AUDIO_FEEDBACK` | bool | `audio.feedback.enabled` |
+| `VOXTYPE_DEAD_INPUT_DETECTION` | bool | `audio.dead_input.enabled` |
+| `VOXTYPE_DEAD_INPUT_WINDOW_MS` | integer | `audio.dead_input.window_ms` |
+| `VOXTYPE_DEAD_INPUT_THRESHOLD_DBFS` | float | `audio.dead_input.threshold_dbfs` |
 
 **Output:**
 

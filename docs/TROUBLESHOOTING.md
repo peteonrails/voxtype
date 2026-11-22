@@ -667,6 +667,36 @@ voxtype info devices
 
 If `info devices` lists your microphone again, recording works too; the daemon does not need a restart.
 
+### "Microphone silent" notification stops a recording
+
+**Cause:** Every sample the input delivered for the first 5 seconds of the
+recording was exactly zero. This usually means the
+selected microphone is off, muted in hardware, or asleep. The notification
+names the audio source that stayed silent.
+
+**Solution:** Turn the microphone on, unmute it, or select another source:
+
+```bash
+pactl get-default-source
+pactl list sources short
+pavucontrol
+```
+
+If the source is noise-gated and you often wait more than 5 seconds before
+speaking, or it takes longer than that to wake, increase `window_ms` or
+disable the guard. The threshold cannot change the verdict: only exact
+digital silence stops a recording.
+
+```toml
+[audio.dead_input]
+window_ms = 10000
+# enabled = false
+```
+
+A source stuck on a DC offset is not stopped: its samples are not zero. If a
+dictation still produces no text without this alert, record the source with
+`arecord` and check the playback.
+
 ### "Audio format not supported"
 
 **Cause:** Audio device doesn't support 16kHz sample rate.
