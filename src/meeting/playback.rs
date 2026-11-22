@@ -679,10 +679,15 @@ wc -c | tr -d ' ' > {log}.tmp && mv {log}.tmp {log}.bytes"#
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn alive(pid: u32) -> bool {
         proc_stat(pid).is_some_and(|(state, _)| state != 'Z')
     }
 
+    // Linux only, like the next test: a playback is tracked by its start
+    // time in /proc/<pid>/stat, and its players (pw-play, paplay, aplay)
+    // are Linux audio tools.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_process_is_known_by_its_start_time() {
         let (_, ticks) = proc_stat(std::process::id()).unwrap();
@@ -692,6 +697,7 @@ wc -c | tr -d ' ' > {log}.tmp && mv {log}.tmp {log}.bytes"#
         assert!(!is_running(u32::MAX, ticks));
     }
 
+    #[cfg(target_os = "linux")]
     fn diag(runtime: &Path, bin: &FakeBin, pid: u32) -> String {
         format!(
             "log={:?} ended={:?} stat={:?} cmdline={:?} ffmpeg={:?} paplay={:?}",
@@ -705,6 +711,7 @@ wc -c | tr -d ' ' > {log}.tmp && mv {log}.tmp {log}.bytes"#
         )
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_new_playback_stops_the_last_and_stop_stops_it() {
         let bin = FakeBin::new();
