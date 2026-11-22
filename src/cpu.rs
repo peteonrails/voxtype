@@ -160,6 +160,30 @@ fn cpuid_has_avx512f() -> bool {
     }
 }
 
+/// Whether the CPU has AVX2, asked of the silicon. Use this rather than
+/// `is_x86_feature_detected!`, which a Haswell-targeted build folds to
+/// `true` at compile time (see [`cpuid_has_avx2`]).
+#[cfg(target_arch = "x86_64")]
+pub fn cpu_has_avx2() -> bool {
+    cpuid_has_avx2()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn cpu_has_avx2() -> bool {
+    false
+}
+
+/// Whether the CPU has AVX-512F, asked of the silicon. See [`cpu_has_avx2`].
+#[cfg(target_arch = "x86_64")]
+pub fn cpu_has_avx512f() -> bool {
+    cpuid_has_avx512f()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn cpu_has_avx512f() -> bool {
+    false
+}
+
 /// Check CPU feature compatibility and warn if there might be issues.
 /// Returns a warning message if potential problems are detected.
 #[cfg(target_arch = "x86_64")]

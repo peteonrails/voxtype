@@ -340,8 +340,13 @@ pub(crate) async fn dispatch(
                     }
                 }
                 Some(SetupAction::Variant { to }) => {
-                    let variant =
-                        setup::binary::Variant::from_binary_name(&to).ok_or_else(|| {
+                    // Accept the short name too ("baseline"): the SIGILL
+                    // handler and the startup CPU check advise `--to baseline`.
+                    let variant = setup::binary::Variant::from_binary_name(&to)
+                        .or_else(|| {
+                            setup::binary::Variant::from_binary_name(&format!("voxtype-{to}"))
+                        })
+                        .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "Unknown variant '{}'. Expected one of: {}",
                                 to,
