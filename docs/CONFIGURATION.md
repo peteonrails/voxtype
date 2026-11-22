@@ -3399,6 +3399,19 @@ When post-processing is enabled, voxtype passes the previous dictation's text vi
 
 See the example scripts in `examples/` for how to use `VOXTYPE_CONTEXT`.
 
+### Vocabulary of the Dictation
+
+When a dictation has a vocabulary (the top-level [`[vocabulary]`](#vocabulary)
+terms, then those of the active profile), a post-processing command reads it
+from the `VOXTYPE_VOCABULARY` environment variable, one term per line. The
+variable is unset when there are no terms, and also when they add up to more
+than 64 KiB, to stay clear of the system limit for one environment variable;
+Voxtype leaves it out and logs a warning.
+
+- Stdin still contains only the current text
+- A cleanup script can tell its model to keep these spellings
+- The model backends (`omarchy`, `openai`) and meeting mode do not receive it
+
 ### Error Handling
 
 If the post-processing command fails for any reason (command not found, non-zero
@@ -3475,6 +3488,9 @@ case-insensitive matches receive the configured casing. Short terms, URLs,
 email addresses, paths, ties, and known ordinary word collisions are left
 unchanged. Correction runs before cleanup stages; `[text.replacements]` still
 runs last and can override it.
+
+A post-processing command reads the terms from the
+[`VOXTYPE_VOCABULARY`](#vocabulary-of-the-dictation) environment variable.
 
 When a recording uses a profile with its own vocabulary, the top-level terms
 come first and the profile's terms follow. Terms are compared by their ASCII

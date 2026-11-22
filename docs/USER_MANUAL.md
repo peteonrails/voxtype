@@ -2962,6 +2962,16 @@ In meeting mode, context is tracked separately for microphone and loopback audio
 
 See the example scripts in `examples/` for full implementations.
 
+When the dictation has a [vocabulary](#vocabulary-for-every-recording), your
+command also gets its terms in `VOXTYPE_VOCABULARY`, one per line, so a
+cleanup prompt can keep their spellings:
+
+```bash
+if [[ -n "${VOXTYPE_VOCABULARY:-}" ]]; then
+  PROMPT="$PROMPT Spell these terms exactly as written: ${VOXTYPE_VOCABULARY//$'\n'/, }."
+fi
+```
+
 ### Error Handling
 
 Post-processing is designed to be fault-tolerant:

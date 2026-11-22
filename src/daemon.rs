@@ -5938,7 +5938,11 @@ impl Daemon {
                             );
                             tracing::debug!("Post-processing context: {:?}", recent_context);
                             let result = profile_processor
-                                .process_with_context(&processed_text, recent_context.as_deref())
+                                .process_with_vocabulary(
+                                    &processed_text,
+                                    recent_context.as_deref(),
+                                    vocabulary,
+                                )
                                 .await;
                             tracing::info!("Post-processed: changed: {}", result != processed_text);
                             tracing::debug!("Post-processed result: {:?}", result);
@@ -5956,9 +5960,10 @@ impl Daemon {
                                     recent_context
                                 );
                                 let result = post_processor
-                                    .process_with_context(
+                                    .process_with_vocabulary(
                                         &processed_text,
                                         recent_context.as_deref(),
+                                        vocabulary,
                                     )
                                     .await;
                                 tracing::info!(
@@ -5982,7 +5987,11 @@ impl Daemon {
                             recent_context
                         );
                         let result = post_processor
-                            .process_with_context(&processed_text, recent_context.as_deref())
+                            .process_with_vocabulary(
+                                &processed_text,
+                                recent_context.as_deref(),
+                                vocabulary,
+                            )
                             .await;
                         tracing::info!("Post-processed: changed: {}", result != processed_text);
                         tracing::debug!("Post-processed result: {:?}", result);
@@ -8729,6 +8738,44 @@ while True:
 
             assert!(state.is_idle());
             assert_eq!(fs::read_to_string(&target).unwrap(), "Voxtype works\n");
+        }
+
+        /// The post-process command reads the recording's vocabulary, the
+        /// same merged list the engine gets, one term per line.
+        #[tokio::test]
+        async fn post_process_command_gets_the_recording_vocabulary() {
+            if !in_scratch_runtime("post_process_command_gets_the_recording_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut config =
+                config_with(&target, "[vocabulary]\nterms = [\"Voxtype\", \"PipeWire\"]");
+            let print_vocabulary = "printf '%s' \"$VOXTYPE_VOCABULARY\" | tr '\\n' ','";
+            config.output.post_process.as_mut().unwrap().command = print_vocabulary.to_string();
+            let calendar = config.profiles.get_mut("calendar").unwrap();
+            calendar.vocabulary.terms = vec!["Tailscale".to_string()];
+            calendar.post_process_command = Some(print_vocabulary.to_string());
+            let mut daemon = Daemon::new(config, None);
+
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "Voxtype,PipeWire\n",
+                "no profile: the global terms"
+            );
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "Voxtype,PipeWire,Tailscale\n",
+                "a profile: global terms, then the profile's"
+            );
         }
 
         #[tokio::test]

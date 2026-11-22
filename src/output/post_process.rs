@@ -28,6 +28,7 @@
 use crate::config::PostProcessConfig;
 use crate::llm::{self, omarchy::OmarchyEnv, ChatRequest, Endpoint, LlmConfig, LlmError};
 use crate::output::deferred_notice::{self, Notice};
+use crate::text::vocabulary::Vocabulary;
 use serde::Deserialize;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -179,6 +180,33 @@ impl Origin {
 }
 
 const USED_AS_IS: &str = "The text was used as transcribed, without cleanup.";
+
+/// The largest VOXTYPE_VOCABULARY value a command gets. Linux refuses to exec
+/// a program when one environment string is over 128 KiB (MAX_ARG_STRLEN,
+/// E2BIG); this cap stays well under it.
+const MAX_VOCABULARY_ENV: usize = 64 * 1024;
+
+/// The VOXTYPE_VOCABULARY value for `vocabulary`: its terms, one per line.
+/// `None` without terms, and also over [`MAX_VOCABULARY_ENV`] bytes, with a
+/// warning: the command then runs without the variable rather than come near
+/// the system limit.
+fn vocabulary_env(vocabulary: Option<&Vocabulary>) -> Option<String> {
+    let terms: Vec<&str> = vocabulary.into_iter().flat_map(|v| v.terms()).collect();
+    if terms.is_empty() {
+        return None;
+    }
+    let value = terms.join("\n");
+    if value.len() > MAX_VOCABULARY_ENV {
+        tracing::warn!(
+            "The vocabulary is {} bytes, over the {} byte limit of VOXTYPE_VOCABULARY; \
+             the post-process command runs without it",
+            value.len(),
+            MAX_VOCABULARY_ENV
+        );
+        return None;
+    }
+    Some(value)
+}
 
 impl PostProcessor {
     /// Create a new post-processor from configuration
@@ -367,16 +395,34 @@ impl PostProcessor {
         }
     }
 
-    /// Process text with optional context from a previous chunk
+    /// [`Self::process_with_vocabulary`] for a dictation without a vocabulary.
+    pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
+        self.process_with_vocabulary(text, context, None).await
+    }
+
+    /// Process text with optional context from a previous chunk and the
+    /// dictation's vocabulary.
     ///
     /// When context is provided, it is passed via the VOXTYPE_CONTEXT environment
-    /// variable so the post-processing command can use it for continuity.
+    /// variable so the post-processing command can use it for continuity. A
+    /// command reads the vocabulary's terms from the VOXTYPE_VOCABULARY
+    /// environment variable, one per line; the model backends do not get them.
+    /// A vocabulary over 64 KiB is left out of the variable, with a warning, to
+    /// stay clear of the system limit for one environment variable.
     /// Stdin always contains only the current text, keeping existing scripts compatible.
     /// Returns the processed text on success, or the original text on any failure.
-    pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
+    pub async fn process_with_vocabulary(
+        &self,
+        text: &str,
+        context: Option<&str>,
+        vocabulary: Option<&Vocabulary>,
+    ) -> String {
         let result = match &self.llm {
             Some(llm) => self.execute_model(llm, text, context).await,
-            None => self.execute_command_with_env(text, context).await,
+            None => {
+                self.execute_command_with_env(text, context, vocabulary)
+                    .await
+            }
         };
         match result {
             Ok(command_output) => {
@@ -470,6 +516,7 @@ impl PostProcessor {
         &self,
         text: &str,
         context: Option<&str>,
+        vocabulary: Option<&Vocabulary>,
     ) -> Result<String, PostProcessError> {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &self.command])
@@ -481,6 +528,11 @@ impl PostProcessor {
         cmd.env_remove("VOXTYPE_CONTEXT");
         if let Some(ctx) = context {
             cmd.env("VOXTYPE_CONTEXT", ctx);
+        }
+        // The same for the vocabulary: set only when there are terms.
+        cmd.env_remove("VOXTYPE_VOCABULARY");
+        if let Some(value) = vocabulary_env(vocabulary) {
+            cmd.env("VOXTYPE_VOCABULARY", value);
         }
 
         let mut child = cmd
@@ -1124,6 +1176,72 @@ mod tests {
         let result = processor.process_with_context("text", None).await;
         std::env::remove_var("VOXTYPE_CONTEXT");
         assert_eq!(result, "unset");
+    }
+
+    #[tokio::test]
+    async fn test_vocabulary_passed_via_env_var() {
+        let vocabulary = Vocabulary::load(&crate::config::VocabularyConfig {
+            terms: vec!["Voxtype".to_string(), "PipeWire".to_string()],
+            terms_file: None,
+        })
+        .unwrap();
+        let config = make_config(
+            "printf '%s|%s' \"$(cat)\" \"$VOXTYPE_VOCABULARY\" | tr '\\n' ','",
+            5000,
+        );
+        let result = PostProcessor::new(&config)
+            .process_with_vocabulary("text", None, Some(&vocabulary))
+            .await;
+        assert_eq!(result, "text|Voxtype,PipeWire");
+    }
+
+    /// A vocabulary over MAX_VOCABULARY_ENV is left out.
+    #[tokio::test]
+    async fn test_oversized_vocabulary_is_left_out() {
+        // Letters, not digits: terms that differ only in digits are
+        // deduplicated, so "Term1" and "Term2" would be one term.
+        let terms: Vec<String> = (0..8000u32)
+            .map(|i| {
+                let letters: String = (0..4)
+                    .map(|place| char::from(b'a' + (i / 26u32.pow(place) % 26) as u8))
+                    .collect();
+                format!("Term{letters}")
+            })
+            .collect();
+        let vocabulary = Vocabulary::load(&crate::config::VocabularyConfig {
+            terms,
+            terms_file: None,
+        })
+        .unwrap();
+        let size: usize = vocabulary.terms().map(|term| term.len() + 1).sum();
+        assert!(size > MAX_VOCABULARY_ENV, "only {size} bytes");
+        let config = make_config("echo \"${VOXTYPE_VOCABULARY:-unset}\" | head -c 5", 5000);
+        let result = PostProcessor::new(&config)
+            .process_with_vocabulary("text", None, Some(&vocabulary))
+            .await;
+        assert_eq!(result, "unset");
+    }
+
+    /// Without a vocabulary the variable is unset, even when voxtype's own
+    /// environment has one. Runs in its own process, which gets that
+    /// stale value, so no test changes this process's environment.
+    #[tokio::test]
+    async fn test_no_vocabulary_env_var_without_a_vocabulary() {
+        if !crate::test_support::own_process(
+            "output::post_process::tests::test_no_vocabulary_env_var_without_a_vocabulary",
+            |child| {
+                child.env("VOXTYPE_VOCABULARY", "stale");
+            },
+        ) {
+            return;
+        }
+        let config = make_config("echo \"${VOXTYPE_VOCABULARY:-unset}\"", 5000);
+        let processor = PostProcessor::new(&config);
+        assert_eq!(processor.process_with_context("text", None).await, "unset");
+        assert_eq!(
+            processor.process_with_vocabulary("text", None, None).await,
+            "unset"
+        );
     }
 
     // -- Model backends -----------------------------------------------------
