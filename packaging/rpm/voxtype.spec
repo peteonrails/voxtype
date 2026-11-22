@@ -233,6 +233,19 @@ export CARGO_HOME=%{_builddir}/cargo
 %post
 %systemd_user_post voxtype.service
 
+# Both builds in this package are compiled for Haswell (AVX2). The x86-64-v2
+# baseline build that runs without AVX2 ships only in the prebuilt release
+# packages.
+if [ "$(uname -m)" = "x86_64" ] && [ -r /proc/cpuinfo ] \
+    && ! grep -qw avx2 /proc/cpuinfo; then
+    echo ""
+    echo "WARNING: This CPU has no AVX2, and the voxtype builds in this"
+    echo "package need it: they stop with an illegal instruction error."
+    echo "Install the prebuilt .rpm from"
+    echo "https://github.com/peteonrails/voxtype/releases instead; it"
+    echo "includes voxtype-baseline, which runs on this CPU."
+fi
+
 if [ "$1" -eq 1 ]; then
     # Detect GPU for Vulkan acceleration recommendation
     GPU_DETECTED=""
@@ -381,6 +394,9 @@ fi
   the transcript (#827, #898)
 - info variants recommends the baseline build on a CPU without AVX2, and
   no longer the AVX2, Vulkan or ONNX builds that crash there
+- The /usr/bin/voxtype wrapper in the release .deb and .rpm runs
+  voxtype-baseline on a CPU without AVX2 instead of crashing in the AVX2
+  build, and source package installs warn on such a CPU
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
