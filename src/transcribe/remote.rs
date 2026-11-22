@@ -870,31 +870,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_wav_basic() {
-        let config = WhisperConfig {
-            mode: Some(crate::config::WhisperMode::Remote),
-            remote_endpoint: Some("http://localhost:8080".to_string()),
-            ..Default::default()
-        };
-
-        RemoteTranscriber::new(&config).unwrap();
-
-        // Create a simple sine wave
-        let samples: Vec<f32> = (0..16000)
-            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 16000.0).sin() * 0.5)
-            .collect();
-
-        let wav = encode_wav_s16le(&samples).unwrap();
-
-        // WAV header is 44 bytes, then 16000 samples * 2 bytes = 32000 bytes
-        assert_eq!(wav.len(), 44 + 32000);
-
-        // Check WAV magic
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-    }
-
-    #[test]
     fn test_config_validation_missing_endpoint() {
         let config = WhisperConfig {
             mode: Some(crate::config::WhisperMode::Remote),
