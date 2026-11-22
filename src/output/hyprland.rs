@@ -219,7 +219,6 @@ fn legacy_dispatch_args(mods: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn modifiers_map_to_hyprland_names() {
@@ -264,16 +263,14 @@ mod tests {
     fn fake_hyprctl(dir: &std::path::Path, body: &str) -> (PathBuf, PathBuf) {
         let log = dir.join("calls.log");
         let script = dir.join("hyprctl");
-        std::fs::write(
+        crate::test_support::write_script(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nIFS='|'; echo \"$*\" >> '{}'\n{}\n",
                 log.display(),
                 body
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         (script, log)
     }
 
