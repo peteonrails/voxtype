@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        1.3.1
+Version:        1.3.2
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -344,6 +344,37 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
+* Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.2-1
+- Soniox sends the API key in the WebSocket handshake, ahead of Soniox's
+  2027-01-15 cutoff, and [soniox] region selects US, EU, Japan or India
+  hosts (#864, #871)
+- A recording from an input that delivers only digital zero for 5 s stops
+  with a notice that names the source (dead_input guard)
+- A failed or stalled streaming session is recovered through batch
+  transcription; the stop timeout is 30 s ([streaming_recovery])
+- Paste mode bounds clipboard reads at 2 s and restores the clipboard
+  in the background, so the result shows as soon as the paste lands
+  (#1003, #1079)
+- A record start sent while output was still running is ignored (#1004)
+- Opt-in hyprland paste driver for XWayland and Electron apps (#938)
+- Opt-in xdotool output driver for X11 sessions
+- Whisper keeps one state between transcriptions and creates it when
+  recording starts (#1022)
+- Feedback cues open an output stream per sound, fixing silence after
+  resume and a spinning core (#848, #859)
+- Quickshell OSD animates on the frame clock (#1078)
+- A meeting pill dragged to the left edge stays there
+- macOS keeps runtime files in $TMPDIR/voxtype per user, and a background
+  user session ignores the hotkey
+- setup gpu --enable refuses machines where the Vulkan build would crash
+- Below x86-64-v2, every binary says so instead of pointing at baseline
+- Input device docs and messages lead with compositor keybindings, not
+  the input group
+- whisper-cli mode is offered only when whisper-cli is installed, and a
+  bare whisper on PATH is never used as whisper-cli
+- Meeting summaries, Ask and dictation cleanup can use Omarchy's local
+  model or any OpenAI-compatible server
+
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
   failed and cancelled ones, with the history command, search alongside
