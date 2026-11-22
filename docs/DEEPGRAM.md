@@ -4,6 +4,10 @@ Voxtype can transcribe with Deepgram's cloud speech-to-text API. Deepgram is ava
 
 Dictation streams to Deepgram's realtime API while you speak, so the transcript is ready when you stop. A finished recording (`voxtype transcribe file.wav`, meeting chunks, and dictation with `streaming = false`) goes to Deepgram's pre-recorded API in one request.
 
+## Privacy
+
+Audio is sent to Deepgram over TLS and processed on Deepgram's servers. With `mip_opt_out = true`, the default, Deepgram does not use it for its Model Improvement Program. Vocabulary terms are sent as query parameters and appear in the account's usage records. **Use a local engine (Whisper, Parakeet) instead if your dictation contains anything you cannot send off-device.** See [Deepgram Backend Issues](TROUBLESHOOTING.md#deepgram-backend-issues) for errors.
+
 ## Configuration
 
 ```toml
@@ -56,7 +60,7 @@ The configuration TUI reports whether a credential came from the environment or 
 
 ## Vocabulary
 
-Profile vocabulary (`[profiles.<name>.vocabulary]`) reaches Deepgram as `keyterm` on nova-3 models and as `keywords` on older models. Deepgram accepts up to 100 terms and 500 tokens of `keyterm`, or 100 `keywords`, and refuses a request over the limit. Deepgram does not publish how it counts tokens, so Voxtype counts about three characters per token, which is more than most words take, and drops the terms past the limit with a warning in the log.
+Profile vocabulary (`[profiles.<name>.vocabulary]`) reaches Deepgram as `keyterm` on nova-3 models and as `keywords` on older models. Deepgram documents up to 100 terms for either, and refuses a request whose keyterms come to more than 500 tokens. Deepgram does not publish how it counts tokens, so Voxtype counts a token per two characters, and at least one per word, which is more than most words take. It drops the terms past either limit with a warning in the log.
 
 ## Request behavior
 
@@ -64,7 +68,7 @@ Profile vocabulary (`[profiles.<name>.vocabulary]`) reaches Deepgram as `keyterm
 
 **Finished recordings.** Voxtype encodes the 16 kHz mono recording as PCM WAV and sends one HTTPS `POST` with `Content-Type: audio/wav`. The final transcript is processed and inserted at the cursor through the same output path as local engines.
 
-Authentication, insufficient-credit, rate-limit, network, timeout, empty-result, and malformed-response failures are surfaced as transcription errors. No automatic retry is performed, so a repeated hotkey press cannot accidentally duplicate text.
+Authentication, insufficient-credit, rate-limit, network, timeout, and malformed-response failures are surfaced as transcription errors. A recording with no words gives an empty transcript, and nothing is typed. Voxtype does not retry a failed request, so a repeated hotkey press cannot duplicate text. When a stream fails before any text was typed, streaming recovery sends the recording once to the pre-recorded API.
 
 ## Live smoke test
 

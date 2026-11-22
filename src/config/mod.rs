@@ -34,8 +34,8 @@ pub use default_config::{
 pub use engines::{
     openvino_driver_packages, CohereConfig, DeepgramConfig, DolphinConfig, GgufConfig,
     MoonshineConfig, OmnilingualConfig, OpenVinoConfig, ParaformerConfig, ParakeetConfig,
-    ParakeetModelType, SenseVoiceConfig, SonioxConfig, TranscriptionEngine, DEEPGRAM_DEFAULT_MODEL,
-    SONIOX_REGIONS,
+    ParakeetModelType, SenseVoiceConfig, SonioxConfig, TranscriptionEngine,
+    DEEPGRAM_API_KEY_ENV_VARS, DEEPGRAM_DEFAULT_LANGUAGE, DEEPGRAM_DEFAULT_MODEL, SONIOX_REGIONS,
 };
 pub use history::{
     parse_app_list as parse_history_app_list, HistoryConfig, HistoryOverrides,

@@ -23,8 +23,8 @@ confirm, change, verify.
   doesn't support. `voxtype config schema` lists every key it accepts.
 - **Don't guess flags.** If a command here fails, run it with `--help`. The
   `--help` output is Voxtype's documentation.
-- **Never pick a cloud engine (Soniox, remote Whisper) without asking.** Every
-  other engine keeps the audio on the machine.
+- **Never pick a cloud engine (Soniox, Deepgram, remote Whisper) without
+  asking.** Every other engine keeps the audio on the machine.
 
 ## 1. Look
 

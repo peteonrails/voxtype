@@ -535,7 +535,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
 
     // Streaming dictation requires toggle activation; if the user has it
     // enabled, suppress PTT-pair suggestions in favor of a toggle binding.
-    // Covers all streaming-capable backends (Parakeet, Soniox, future).
+    // Covers all streaming-capable backends (Parakeet, Soniox, Deepgram, future).
     let streaming = {
         let ed = ConfigEditor::load().ok();
         let engine = ed

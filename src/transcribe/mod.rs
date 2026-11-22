@@ -447,14 +447,11 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "OpenVINO engine requested but voxtype was not compiled with --features openvino-whisper"
                 .to_string(),
         )),
-        TranscriptionEngine::Deepgram => {
-            let cfg = config.deepgram.as_ref().ok_or_else(|| {
-                TranscribeError::InitFailed(
-                    "Deepgram engine selected but [deepgram] config section is missing".to_string(),
-                )
-            })?;
-            Ok(Box::new(deepgram::DeepgramTranscriber::new(cfg.clone())?))
-        }
+        // Every [deepgram] field has a default and the key can come from
+        // the environment, so a missing table means the defaults.
+        TranscriptionEngine::Deepgram => Ok(Box::new(deepgram::DeepgramTranscriber::new(
+            config.deepgram.clone().unwrap_or_default(),
+        )?)),
     }
 }
 

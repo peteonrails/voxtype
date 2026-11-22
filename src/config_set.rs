@@ -97,12 +97,15 @@ impl ConfigSetError {
     }
 }
 
-/// Engines `config set engine` and the settings UIs offer, in
-/// [`TranscriptionEngine`] declaration order. Deliberately narrower than the
-/// enum: `soniox` is configured through its own `[soniox]` table and is not
-/// offered by the TUI picker or `config set engine`, so it is excluded here.
-/// The `engine_names_track_the_enum` test pins this list against the enum so
-/// a new variant can't be silently forgotten.
+/// Engines the settings UIs offer, in [`TranscriptionEngine`] declaration
+/// order: the TUI picker, the schema's `engine` choices (which the Omarchy
+/// panel lists) and `info engines`. `config set engine` accepts any compiled
+/// engine, `soniox` included. Being listed does not mean an engine has models
+/// to download; [`crate::model_catalog::CATALOG_ENGINES`] lists those, and
+/// the cloud engine `deepgram` is here without being there. `soniox` is not
+/// listed: it is configured through its own `[soniox]` table. The
+/// `engine_names_track_the_enum` test pins this list against the enum so a
+/// new variant can't be silently forgotten.
 pub const ENGINE_NAMES: &[&str] = &[
     "whisper",
     "parakeet",
@@ -131,7 +134,7 @@ pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
 /// Was this binary compiled with the feature needed to run the given engine?
 ///
 /// Whisper, Soniox, and Deepgram are unconditional (Soniox was
-/// un-feature-gated in #441); every local ONNX engine is gated on the
+/// un-feature-gated in #441); every other engine is gated on the
 /// corresponding Cargo feature.
 /// This is the source-of-truth check that matches what the TUI shows on
 /// source builds (see `EngineState::refresh_binary_match` in
@@ -240,7 +243,7 @@ fn set_engine_with_models(
         .map_err(ConfigSetError::IncompatibleModel)?;
     }
     editor.set_string("", "engine", name);
-    let default = crate::model_catalog::seed_model(name);
+    let default = crate::model_catalog::default_model(name);
     if !default.is_empty() && editor.get_string(name, "model").is_none() {
         editor.set_string(name, "model", default);
     }
@@ -274,12 +277,11 @@ fn select_model_in(
     language: Option<&str>,
     models_dir: &std::path::Path,
 ) -> Result<PathBuf, ConfigSetError> {
-    // Every engine `config set engine` offers has a downloadable model.
-    // Soniox is a cloud engine with no installed model to select.
+    // Cloud engines (Soniox, Deepgram) have no installed model to select.
     let Some(parsed) = parse_engine(engine) else {
         return Err(ConfigSetError::UnknownEngine(engine.to_string()));
     };
-    if !ENGINE_NAMES.contains(&engine) {
+    if !crate::model_catalog::CATALOG_ENGINES.contains(&engine) {
         return Err(ConfigSetError::IncompatibleModel(format!(
             "select-model selects a downloaded model, and {engine} has none. Use `voxtype config set engine {engine}`. Config unchanged."
         )));
@@ -807,19 +809,21 @@ gguf_backend = "cpu"
         }
     }
 
-    /// Deepgram has no model catalog, but the transcriber factory needs a
-    /// `[deepgram]` table, so selecting it writes one.
+    /// Deepgram has no model catalog, so selecting it writes no table, and a
+    /// config with none runs on `DeepgramConfig`'s defaults.
     #[test]
-    fn selecting_deepgram_writes_the_table_the_daemon_needs() {
+    fn selecting_deepgram_needs_no_table() {
         let (_dir, path) = temp_config("");
         fs::write(&path, crate::config::default_config_content()).unwrap();
         set_engine(path.clone(), "deepgram").expect("set deepgram");
         let config = crate::config::load_config(Some(&path)).unwrap();
         assert_eq!(config.engine, crate::config::TranscriptionEngine::Deepgram);
+        assert_eq!(config.model_name(), crate::config::DEEPGRAM_DEFAULT_MODEL);
         assert_eq!(
-            config.deepgram.map(|d| d.model).as_deref(),
-            Some(crate::config::DeepgramConfig::default().model.as_str())
+            config.active_language(),
+            Some(crate::config::DEEPGRAM_DEFAULT_LANGUAGE)
         );
+        assert!(config.streaming_enabled());
     }
 
     #[test]
@@ -1765,6 +1769,26 @@ type_delay_ms = 5
                 original,
                 "{engine} {model}"
             );
+        }
+    }
+
+    /// Cloud engines have nothing to download, so select-model refuses them
+    /// with the `config set engine` command, not a download that cannot work.
+    #[test]
+    fn select_model_points_cloud_engines_at_set_engine() {
+        let original = "engine = \"parakeet\"\n";
+        let (_dir, path) = temp_config(original);
+        let models = tempfile::tempdir().unwrap();
+        for (engine, model) in [("soniox", "stt-rt-v6"), ("deepgram", "nova-3")] {
+            let error =
+                select_model_in(path.clone(), engine, model, None, models.path()).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("has none"), "{engine}: {message}");
+            assert!(
+                message.contains(&format!("voxtype config set engine {engine}")),
+                "{engine}: {message}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), original, "{engine}");
         }
     }
 

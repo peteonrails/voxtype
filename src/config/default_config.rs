@@ -237,7 +237,7 @@ translate = false
 # smart_format = true
 # mip_opt_out = true
 # streaming = true
-# endpointing_ms = 300  # streaming: silence that ends a segment (Deepgram's default if unset)
+# endpointing_ms = 300  # streaming: silence that ends a segment; unset uses Deepgram's default
 # timeout_secs = 30
 # endpoint = "https://api.deepgram.com/v1/listen"
 

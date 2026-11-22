@@ -7,6 +7,13 @@ use super::super::default_true;
 /// The model a new `[deepgram]` table starts with.
 pub const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
 
+/// The language of a new `[deepgram]` table, and of a config with none.
+pub const DEEPGRAM_DEFAULT_LANGUAGE: &str = "en";
+
+/// Environment variables that hold the API key, in the order they are read.
+/// Either one takes precedence over `[deepgram] api_key`.
+pub const DEEPGRAM_API_KEY_ENV_VARS: [&str; 2] = ["VOXTYPE_DEEPGRAM_API_KEY", "DEEPGRAM_API_KEY"];
+
 /// Deepgram speech-to-text configuration.
 ///
 /// Credentials are resolved from `VOXTYPE_DEEPGRAM_API_KEY` or
@@ -66,7 +73,7 @@ fn default_model() -> String {
 }
 
 fn default_language() -> String {
-    "en".to_string()
+    DEEPGRAM_DEFAULT_LANGUAGE.to_string()
 }
 
 fn default_timeout_secs() -> u64 {
@@ -90,6 +97,22 @@ impl Default for DeepgramConfig {
             timeout_secs: default_timeout_secs(),
             endpoint: default_endpoint(),
         }
+    }
+}
+
+impl DeepgramConfig {
+    /// The API key the engine uses: the first non-blank of the
+    /// environment variables, then `api_key`, without the whitespace around
+    /// it, which a pasted key or a key file often carries (a trailing space,
+    /// a `\r\n`). The transcriber and the doctor decide through this; the
+    /// configuration screen reports the source in the same order.
+    pub fn resolve_api_key(&self) -> Option<String> {
+        DEEPGRAM_API_KEY_ENV_VARS
+            .iter()
+            .filter_map(|var| std::env::var(var).ok())
+            .chain(self.api_key.clone())
+            .map(|key| key.trim().to_string())
+            .find(|key| !key.is_empty())
     }
 }
 

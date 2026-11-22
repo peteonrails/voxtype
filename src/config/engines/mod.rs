@@ -15,7 +15,9 @@ mod sensevoice;
 mod soniox;
 
 pub use cohere::CohereConfig;
-pub use deepgram::{DeepgramConfig, DEEPGRAM_DEFAULT_MODEL};
+pub use deepgram::{
+    DeepgramConfig, DEEPGRAM_API_KEY_ENV_VARS, DEEPGRAM_DEFAULT_LANGUAGE, DEEPGRAM_DEFAULT_MODEL,
+};
 pub use dolphin::DolphinConfig;
 pub use gguf::GgufConfig;
 pub use moonshine::MoonshineConfig;

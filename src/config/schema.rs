@@ -223,7 +223,10 @@ const WHISPER_LANG_CHOICES: &[&str] = &[
 ];
 /// Presets for `text.language`. Any language code is accepted.
 const TEXT_LANG_CHOICES: &[&str] = WHISPER_LANG_CHOICES;
-const DEEPGRAM_LANG_CHOICES: &[&str] = &["auto", "multi", "en", "en-US", "en-GB"];
+/// Same list as the TUI's `DEEPGRAM_LANG_CHOICES`.
+const DEEPGRAM_LANG_CHOICES: &[&str] = &[
+    "en", "auto", "multi", "es", "fr", "de", "it", "pt", "nl", "hi", "ja", "ru",
+];
 const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
@@ -452,9 +455,9 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Model name to request from the remote endpoint (e.g. whisper-1).",
     )
     .for_engine("whisper"),
-    // deepgram. `api_key` is intentionally omitted: credentials may be read
-    // from config for compatibility, but schema consumers must not display or
-    // round-trip secret values.
+    // deepgram. `api_key` is left out so a settings client never shows or
+    // writes the key: it belongs in DEEPGRAM_API_KEY. (Soniox's `api_key`
+    // predates this and is listed.)
     spec(
         "deepgram.model",
         "deepgram",
@@ -3354,11 +3357,10 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
 /// `*_section_existed` guards in `src/tui/engine.rs`).
 fn ensure_required_siblings(editor: &mut ConfigEditor, spec: &KeySpec) {
     let Some(engine) = spec.engine else { return };
-    // Whisper's table is not optional and its `model` has a serde default,
-    // as does Deepgram's. An engine with no catalog default (Soniox) defaults
-    // `model` in serde too.
+    // Whisper's table is not optional and its `model` has a serde default.
+    // An engine with no catalog default (Soniox) defaults `model` in serde.
     let default = crate::model_catalog::default_model(engine);
-    if engine == "whisper" || engine == "deepgram" || spec.field == "model" || default.is_empty() {
+    if engine == "whisper" || spec.field == "model" || default.is_empty() {
         return;
     }
     if editor.get_string(spec.table, "model").is_none() {
@@ -4485,7 +4487,7 @@ mod tests {
                     s.requires_feature.is_none(),
                     "{} should not be feature-gated; {} is always compiled in",
                     s.key,
-                    engine,
+                    engine
                 );
             } else {
                 assert_eq!(
@@ -4797,7 +4799,7 @@ mod tests {
         // Lists, which need a hand edit.
         "output.driver_order",
         "soniox.terms",
-        // Secrets a settings client must not display or round-trip.
+        // Left out on purpose; see the deepgram entries.
         "deepgram.api_key",
     ];
 

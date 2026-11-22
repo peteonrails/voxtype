@@ -426,6 +426,7 @@ impl EngineState {
         let engine = ed
             .get_string("", "engine")
             .unwrap_or_else(|| "whisper".to_string());
+        let dg = crate::config::DeepgramConfig::default();
         let fields = AllFields {
             // Whisper
             w_model: ed
@@ -554,27 +555,26 @@ impl EngineState {
             ov_section_existed: ed.get_string("openvino", "model").is_some(),
 
             // Deepgram
-            dg_model: ed
-                .get_string("deepgram", "model")
-                .unwrap_or_else(|| "nova-3".to_string()),
-            dg_language: ed
-                .get_string("deepgram", "language")
-                .unwrap_or_else(|| "en".to_string()),
-            dg_smart_format: ed.get_bool("deepgram", "smart_format").unwrap_or(true),
-            dg_mip_opt_out: ed.get_bool("deepgram", "mip_opt_out").unwrap_or(true),
-            dg_streaming: ed.get_bool("deepgram", "streaming").unwrap_or(true),
-            dg_timeout_secs: ed.get_int("deepgram", "timeout_secs").unwrap_or(30),
-            dg_endpoint: ed
-                .get_string("deepgram", "endpoint")
-                .unwrap_or_else(|| "https://api.deepgram.com/v1/listen".to_string()),
+            dg_model: ed.get_string("deepgram", "model").unwrap_or(dg.model),
+            dg_language: ed.get_string("deepgram", "language").unwrap_or(dg.language),
+            dg_smart_format: ed
+                .get_bool("deepgram", "smart_format")
+                .unwrap_or(dg.smart_format),
+            dg_mip_opt_out: ed
+                .get_bool("deepgram", "mip_opt_out")
+                .unwrap_or(dg.mip_opt_out),
+            dg_streaming: ed.get_bool("deepgram", "streaming").unwrap_or(dg.streaming),
+            dg_timeout_secs: ed
+                .get_int("deepgram", "timeout_secs")
+                .unwrap_or(dg.timeout_secs as i64),
+            dg_endpoint: ed.get_string("deepgram", "endpoint").unwrap_or(dg.endpoint),
             dg_api_key_in_config: ed
                 .get_string("deepgram", "api_key")
                 .is_some_and(|key| !key.trim().is_empty()),
-            dg_api_key_in_environment: crate::transcribe::deepgram::API_KEY_ENV_VARS
+            dg_api_key_in_environment: crate::config::DEEPGRAM_API_KEY_ENV_VARS
                 .iter()
                 .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty())),
-            dg_section_existed: ed.get_string("deepgram", "model").is_some()
-                || ed.get_string("deepgram", "endpoint").is_some(),
+            dg_section_existed: ed.get_string("deepgram", "model").is_some(),
         };
         let mut state = Self {
             engine,
@@ -594,7 +594,7 @@ impl EngineState {
     /// Required binary family for an engine name. Whisper needs a Whisper
     /// binary; everything ONNX-based needs an ONNX binary.
     fn required_family(engine: &str) -> EngineFamily {
-        if matches!(engine, "whisper" | "deepgram" | "soniox") {
+        if engine == "whisper" {
             EngineFamily::Whisper
         } else {
             EngineFamily::Onnx
@@ -658,7 +658,7 @@ impl EngineState {
             // supports the chosen engine depends on its compiled features.
             // Best we can do is flag it.
             let supported = match self.engine.as_str() {
-                "whisper" | "deepgram" | "soniox" => true,
+                "whisper" => true,
                 "parakeet" => inv.compiled_features.contains(&"parakeet"),
                 _ => inv.compiled_features.contains(&self.engine.as_str()),
             };
@@ -1268,7 +1268,7 @@ impl EngineState {
             FieldId::DgMipOptOut => f.dg_mip_opt_out = !f.dg_mip_opt_out,
             FieldId::DgStreaming => f.dg_streaming = !f.dg_streaming,
             FieldId::DgTimeout => {
-                f.dg_timeout_secs = (f.dg_timeout_secs + delta as i64 * 5).clamp(5, 300)
+                f.dg_timeout_secs = (f.dg_timeout_secs + delta as i64 * 5).clamp(1, 300)
             }
             FieldId::DgCredential => return,
         }
@@ -1342,7 +1342,8 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
     // Also include engines the running binary itself was compiled with —
     // covers pure source builds with no /usr/lib/voxtype/. The
     // no-features cargo default still ships the Whisper engine, so
-    // Whisper is always present.
+    // Whisper is always present, and Deepgram is a cloud client built
+    // into every binary.
     let inv = binary::inventory();
     out.insert("whisper");
     out.insert("deepgram");
@@ -1843,6 +1844,12 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
             "OpenVINO GenAI Whisper (Intel NPU/GPU/CPU). Included in the \
              x86_64 ONNX release binaries; its runtime and device drivers \
              are loaded only when this engine is selected.",
+        ),
+        (
+            "deepgram",
+            "Deepgram cloud speech-to-text. Streams while you speak, or \
+             sends the finished recording; built into every binary. Needs \
+             DEEPGRAM_API_KEY and sends audio off-device.",
         ),
     ] {
         lines.push(Line::from(Span::styled(
@@ -2950,6 +2957,45 @@ mod tests {
         state.fields.pk_model = "/models/parakeet-migraphx".to_string();
         state.refresh_binary_match_with_inventory(&inv);
         assert!(state.binary_switch_blocked.is_some());
+    }
+
+    /// Cloud engines need no ONNX binary: selecting one on a binary with no
+    /// ONNX variant asks for no switch.
+    #[test]
+    fn cloud_engines_need_no_binary_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        let mut inv = binary::inventory();
+        inv.install_kind = InstallKind::Package;
+        inv.active_variant = Some(Variant::WhisperVulkan);
+        inv.variants.clear();
+        for engine in ["deepgram", "soniox"] {
+            state.engine = engine.to_string();
+            state.refresh_binary_match_with_inventory(&inv);
+            assert!(state.pending_variant_switch.is_none(), "{engine}");
+            assert!(state.binary_switch_blocked.is_none(), "{engine}");
+        }
+    }
+
+    /// The screen never shows the Deepgram key, so it must never write one:
+    /// a key in the config survives opening and saving the Engine section.
+    #[test]
+    fn deepgram_key_survives_tui_open_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "engine = \"deepgram\"\n[deepgram]\nmodel = \"nova-3\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        state.fields.dg_streaming = false;
+        state.save_to_editor(&mut ed);
+        let after: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["deepgram"]["api_key"].as_str(), Some("k"));
+        assert_eq!(after["deepgram"]["streaming"].as_bool(), Some(false));
     }
 
     #[test]

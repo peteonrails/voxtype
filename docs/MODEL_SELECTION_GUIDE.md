@@ -36,7 +36,7 @@ What language(s) do you speak?
 │   ├─ Want best accuracy + punctuation? → Parakeet TDT (ONNX binary)
 │   ├─ Want smallest/fastest model?      → Moonshine tiny (ONNX binary)
 │   ├─ Want simplest setup?              → Whisper small.en (standard binary)
-│   ├─ Want to offload a slow laptop?     → Deepgram (cloud)
+│   ├─ Want to offload a slow laptop?    → Deepgram (cloud)
 │   └─ On a laptop / saving battery?     → Whisper small.en + on_demand_loading
 │
 ├─ Chinese (Mandarin or Cantonese)

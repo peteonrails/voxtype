@@ -2015,7 +2015,7 @@ Deepgram is a paid cloud STT provider. No model runs on your machine. With `stre
 
 | Option | Environment Variable | Default | Description |
 |--------|---------------------|---------|-------------|
-| `api_key` | `DEEPGRAM_API_KEY`, `VOXTYPE_DEEPGRAM_API_KEY` | none (required) | Deepgram API key. Either variable takes precedence over the config value |
+| `api_key` | `VOXTYPE_DEEPGRAM_API_KEY`, `DEEPGRAM_API_KEY` (read in that order) | none (required) | Deepgram API key. Either variable takes precedence over the config value |
 | `model` | - | `"nova-3"` | Deepgram model |
 | `language` | - | `"en"` | BCP-47 code, `"auto"` (finished recordings only; a streamed dictation is English), or `"multi"` |
 | `smart_format` | - | `true` | Punctuation, numerals, dates and related formatting |
@@ -2025,7 +2025,7 @@ Deepgram is a paid cloud STT provider. No model runs on your machine. With `stre
 | `timeout_secs` | - | `30` | Wait for Deepgram: the whole request for a finished recording; the connection and the last transcript when streaming |
 | `endpoint` | - | `"https://api.deepgram.com/v1/listen"` | `/v1/listen` endpoint; streaming uses the same URL over `wss://`. HTTPS is required except for localhost |
 
-Profile vocabulary reaches Deepgram as `keyterm` (nova-3, flux) or `keywords` (older models). See [DEEPGRAM.md](DEEPGRAM.md) for credentials and request behavior.
+Profile vocabulary reaches Deepgram as `keyterm` (nova-3) or `keywords` (older models). See [DEEPGRAM.md](DEEPGRAM.md) for credentials and request behavior.
 
 ---
 
@@ -5411,6 +5411,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
+| `VOXTYPE_DEEPGRAM_API_KEY` | string | `deepgram.api_key` (also read from `DEEPGRAM_API_KEY`) |
 
 **Streaming recovery:**
 

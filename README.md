@@ -6,7 +6,7 @@
 
 Voice-to-text for Linux. 9-11× realtime on your CPU. Local by default.
 
-Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and six more engines if you want them. Local engines are the default; Deepgram and Soniox are optional cloud backends.
+Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and six more engines if you want them. No cloud by default, no subscription, no telemetry; Deepgram and Soniox are optional cloud engines.
 
 ## Features
 

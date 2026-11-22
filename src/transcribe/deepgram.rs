@@ -31,15 +31,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::http::header::{HeaderValue, AUTHORIZATION};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Environment variables that hold the API key, in the order they are read.
-/// Either one takes precedence over `[deepgram] api_key`.
-pub const API_KEY_ENV_VARS: [&str; 2] = ["VOXTYPE_DEEPGRAM_API_KEY", "DEEPGRAM_API_KEY"];
-
-/// Deepgram's limits on `keyterm`: 100 terms and 500 tokens across all of
-/// them, refusing a request over either.
+/// Deepgram's limits on `keyterm`: up to 100 terms, and a request whose
+/// keyterms come to more than 500 tokens is refused.
 /// https://developers.deepgram.com/docs/keyterm
 const KEYTERM_TOKEN_BUDGET: usize = 500;
 
@@ -97,8 +94,9 @@ struct DeepgramAlternative {
 }
 
 /// One message from the realtime socket. Only `Results` and `Error` carry
-/// anything the session acts on; `Metadata`, `SpeechStarted` and
-/// `UtteranceEnd` parse with the defaults and are skipped.
+/// anything the session acts on; `Metadata` parses with the defaults and is
+/// skipped. (`SpeechStarted` and `UtteranceEnd` carry `channel` as an array
+/// and would not parse, but the session never asks for them.)
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct StreamMessage {
@@ -125,23 +123,42 @@ impl StreamMessage {
     }
 }
 
+/// Check a `[deepgram]` config the way the engine does at startup: the
+/// endpoint, the model, language and timeout, and the API key. Logs
+/// nothing, so `voxtype doctor` can call it too.
+pub fn check_config(config: &DeepgramConfig) -> Result<(), TranscribeError> {
+    checked(config).map(|_| ())
+}
+
+/// [`check_config`], returning what the engine needs: the key and the
+/// pre-recorded and realtime endpoints.
+fn checked(config: &DeepgramConfig) -> Result<(String, Url, Url), TranscribeError> {
+    let (rest_url, ws_url) = endpoints(&config.endpoint)?;
+    validate_config(config)?;
+    let api_key = config.resolve_api_key().ok_or_else(|| {
+        TranscribeError::ConfigError(
+            "Deepgram API key required: set DEEPGRAM_API_KEY or [deepgram] api_key".into(),
+        )
+    })?;
+    // Both APIs send the key in a header. A Deepgram key is visible ASCII:
+    // the pre-recorded client (ureq) refuses a line break or a typographic
+    // quote in a header, and whitespace inside a key cannot be part of it,
+    // so such a key is refused here, at startup, rather than on the first
+    // request. Whitespace around the key is already trimmed.
+    if !api_key.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(TranscribeError::ConfigError(
+            "Deepgram API key contains characters that cannot be sent in an HTTP header. \
+             Check VOXTYPE_DEEPGRAM_API_KEY, DEEPGRAM_API_KEY or [deepgram] api_key for \
+             stray quotes, or spaces or line breaks inside the key."
+                .into(),
+        ));
+    }
+    Ok((api_key, rest_url, ws_url))
+}
+
 impl DeepgramTranscriber {
     pub fn new(config: DeepgramConfig) -> Result<Self, TranscribeError> {
-        let (rest_url, ws_url) = endpoints(&config.endpoint)?;
-        validate_config(&config)?;
-
-        // The first non-blank key wins: each variable in order, then the
-        // config file.
-        let api_key = API_KEY_ENV_VARS
-            .iter()
-            .filter_map(|var| std::env::var(var).ok())
-            .chain(config.api_key.clone())
-            .find(|key| !key.trim().is_empty())
-            .ok_or_else(|| {
-                TranscribeError::ConfigError(
-                    "Deepgram API key required: set DEEPGRAM_API_KEY or [deepgram] api_key".into(),
-                )
-            })?;
+        let (api_key, rest_url, ws_url) = checked(&config)?;
 
         tracing::info!(
             "Deepgram backend configured: endpoint={}, model={}, language={}, streaming={}, smart_format={}, mip_opt_out={}, timeout={}s",
@@ -153,6 +170,13 @@ impl DeepgramTranscriber {
             config.mip_opt_out,
             config.timeout_secs,
         );
+        if config.streaming && config.language == "auto" {
+            tracing::warn!(
+                "Deepgram cannot detect the language of a live stream, so streamed dictation \
+                 is transcribed as English; finished recordings still detect it. Set \
+                 [deepgram] language to the language you speak, or \"multi\"."
+            );
+        }
 
         Ok(Self {
             config,
@@ -224,11 +248,13 @@ impl DeepgramTranscriber {
         let mut request = url.as_str().into_client_request().map_err(|e| {
             TranscribeError::ConfigError(format!("Invalid Deepgram endpoint URL: {}", e))
         })?;
-        let auth = HeaderValue::from_str(&format!("Token {}", self.api_key)).map_err(|_| {
+        // `check_config` refuses such a key at startup; this is the fallback.
+        let mut auth = HeaderValue::from_str(&format!("Token {}", self.api_key)).map_err(|_| {
             TranscribeError::ConfigError(
                 "Deepgram API key contains characters that cannot be sent in an HTTP header".into(),
             )
         })?;
+        auth.set_sensitive(true);
         request.headers_mut().insert(AUTHORIZATION, auth);
         Ok(request)
     }
@@ -238,7 +264,9 @@ impl DeepgramTranscriber {
             TranscribeError::RemoteError(format!("Deepgram returned malformed JSON: {}", e))
         })?;
 
-        let transcript = response
+        // An empty transcript is a recording with no words, which the
+        // daemon and meeting mode handle as such; it is not an error.
+        response
             .results
             .channels
             .first()
@@ -248,15 +276,7 @@ impl DeepgramTranscriber {
                 TranscribeError::RemoteError(
                     "Deepgram response contained no channel alternatives".into(),
                 )
-            })?;
-
-        if transcript.is_empty() {
-            return Err(TranscribeError::RemoteError(
-                "Deepgram returned an empty transcript".into(),
-            ));
-        }
-
-        Ok(transcript)
+            })
     }
 }
 
@@ -300,9 +320,14 @@ impl Transcriber for DeepgramTranscriber {
     }
 
     fn last_detected_language(&self) -> Option<String> {
+        // The trait reports a two-letter code; Deepgram takes BCP-47 tags
+        // such as "en-US", whose primary subtag is that code.
         match self.config.language.as_str() {
             "auto" | "multi" => None,
-            language => Some(language.to_string()),
+            language => language
+                .split(['-', '_'])
+                .next()
+                .map(str::to_ascii_lowercase),
         }
     }
 }
@@ -312,12 +337,6 @@ impl StreamingTranscriber for DeepgramTranscriber {
         &self,
         samples_rx: mpsc::Receiver<Vec<f32>>,
     ) -> Result<StreamHandle, TranscribeError> {
-        if self.config.language == "auto" {
-            tracing::info!(
-                "Deepgram cannot detect the language of a live stream; it is transcribed as \
-                 English. Set [deepgram] language to the language you speak, or \"multi\"."
-            );
-        }
         let request = self.ws_request()?;
         let timeout = Duration::from_secs(self.config.timeout_secs);
         let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
@@ -337,10 +356,8 @@ impl StreamingTranscriber for DeepgramTranscriber {
 
 /// Emit `Error` then `Ended`, so the daemon reports the error and returns to
 /// idle (or recovers the recording through the pre-recorded endpoint).
-async fn send_fatal(events_tx: &mpsc::Sender<StreamingEvent>, message: String) {
-    let _ = events_tx
-        .send(StreamingEvent::Error(TranscribeError::RemoteError(message)))
-        .await;
+async fn send_fatal(events_tx: &mpsc::Sender<StreamingEvent>, error: TranscribeError) {
+    let _ = events_tx.send(StreamingEvent::Error(error)).await;
     let _ = events_tx.send(StreamingEvent::Ended).await;
 }
 
@@ -376,7 +393,10 @@ async fn run_streaming_session(
             Err(_) => {
                 send_fatal(
                     &events_tx,
-                    format!("Deepgram connection timed out after {}s", timeout.as_secs()),
+                    TranscribeError::NetworkError(format!(
+                        "Deepgram connection timed out after {}s",
+                        timeout.as_secs()
+                    )),
                 )
                 .await;
                 return Ok(());
@@ -389,7 +409,7 @@ async fn run_streaming_session(
         .send(Message::Binary(silence_primer()))
         .await
         .err()
-        .map(|e| format!("Deepgram: send audio failed: {}", e));
+        .map(|e| TranscribeError::NetworkError(format!("Deepgram: send audio failed: {}", e)));
     let mut next_segment: SegmentId = 0;
     // Set when the daemon closes the samples channel; the drain deadline
     // counts from it.
@@ -415,29 +435,36 @@ async fn run_streaming_session(
             }
 
             _ = drain_timer, if samples_closed => {
-                fatal = Some(format!(
+                fatal = Some(TranscribeError::RemoteError(format!(
                     "Deepgram did not finish within {}s after recording stopped",
                     timeout.as_secs()
-                ));
+                )));
             }
 
             message = read.next() => {
                 let text = match message {
                     Some(Ok(Message::Text(text))) => text,
                     Some(Ok(Message::Close(frame))) => {
-                        if !samples_closed {
-                            fatal = Some(closed_early(frame));
+                        // After the stop a normal close ends the stream; any
+                        // other code (1011 is Deepgram's internal error) is
+                        // reported, so recovery can run.
+                        let abnormal = frame.as_ref().is_some_and(|f| f.code != CloseCode::Normal);
+                        if !samples_closed || abnormal {
+                            fatal = Some(closed(frame, samples_closed));
                         }
                         break;
                     }
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => {
-                        fatal = Some(format!("Deepgram connection error: {}", e));
-                        continue;
+                        fatal = Some(TranscribeError::NetworkError(format!(
+                            "Deepgram connection error: {}",
+                            e
+                        )));
+                        break;
                     }
                     None => {
                         if !samples_closed {
-                            fatal = Some(closed_early(None));
+                            fatal = Some(closed(None, false));
                         }
                         break;
                     }
@@ -481,13 +508,13 @@ async fn run_streaming_session(
                         }
                     }
                     "Error" => {
-                        fatal = Some(format!(
+                        fatal = Some(TranscribeError::RemoteError(format!(
                             "Deepgram error: {}",
                             parsed
                                 .description
                                 .or(parsed.message)
                                 .unwrap_or_else(|| "no description".into())
-                        ));
+                        )));
                     }
                     _ => {}
                 }
@@ -496,7 +523,10 @@ async fn run_streaming_session(
             chunk = samples_rx.recv(), if !samples_closed => match chunk {
                 Some(samples) if !samples.is_empty() => {
                     if let Err(e) = write.send(Message::Binary(pcm_s16le(&samples))).await {
-                        fatal = Some(format!("Deepgram: send audio failed: {}", e));
+                        fatal = Some(TranscribeError::NetworkError(format!(
+                            "Deepgram: send audio failed: {}",
+                            e
+                        )));
                     }
                 }
                 Some(_) => {}
@@ -504,7 +534,10 @@ async fn run_streaming_session(
                     stopped_at = Some(tokio::time::Instant::now());
                     for frame in [FINALIZE_FRAME, CLOSE_STREAM_FRAME] {
                         if let Err(e) = write.send(Message::Text(frame.into())).await {
-                            fatal = Some(format!("Deepgram: ending the stream failed: {}", e));
+                            fatal = Some(TranscribeError::NetworkError(format!(
+                                "Deepgram: ending the stream failed: {}",
+                                e
+                            )));
                             break;
                         }
                     }
@@ -513,16 +546,17 @@ async fn run_streaming_session(
         }
     }
 
-    // Release the connection on every exit path. After a clean stop
-    // `CloseStream` already went out; on cancel and errors it tells Deepgram
-    // to stop billing for a stream nobody is reading.
+    // Release the connection. After a stop `CloseStream` already went out.
+    // When the session gets here before the stop (an error, or a cancel the
+    // daemon has not aborted yet) it tells Deepgram to end the stream; an
+    // aborted task just drops the socket, which ends it too.
     if stopped_at.is_none() {
         let _ = write.send(Message::Text(CLOSE_STREAM_FRAME.into())).await;
     }
     let _ = write.send(Message::Close(None)).await;
 
-    if let Some(message) = fatal {
-        send_fatal(&events_tx, message).await;
+    if let Some(error) = fatal {
+        send_fatal(&events_tx, error).await;
         return Ok(());
     }
     if let Some(stopped_at) = stopped_at {
@@ -536,26 +570,32 @@ async fn run_streaming_session(
     Ok(())
 }
 
-/// The error for a socket Deepgram closed while audio was still being sent:
-/// an idle timeout, an undecodable stream or a revoked key end it this way.
-fn closed_early(frame: Option<CloseFrame<'_>>) -> String {
-    match frame {
+/// The error for a socket Deepgram closed while audio was still being sent
+/// (an idle timeout, an undecodable stream or a revoked key end it this way),
+/// or closed with an error code after the stop.
+fn closed(frame: Option<CloseFrame<'_>>, after_stop: bool) -> TranscribeError {
+    let when = if after_stop {
+        "after recording stopped"
+    } else {
+        "during recording"
+    };
+    TranscribeError::RemoteError(match frame {
         Some(frame) if !frame.reason.is_empty() => format!(
-            "Deepgram closed the connection during recording ({}: {})",
+            "Deepgram closed the connection {when} ({}: {})",
             u16::from(frame.code),
             frame.reason
         ),
         Some(frame) => format!(
-            "Deepgram closed the connection during recording ({})",
+            "Deepgram closed the connection {when} ({})",
             u16::from(frame.code)
         ),
-        None => "Deepgram closed the connection during recording".into(),
-    }
+        None => format!("Deepgram closed the connection {when}"),
+    })
 }
 
 /// The handshake error, with the same categories as a failed pre-recorded
 /// request, so a bad key reads the same on both paths.
-fn connect_error(error: tokio_tungstenite::tungstenite::Error) -> String {
+fn connect_error(error: tokio_tungstenite::tungstenite::Error) -> TranscribeError {
     match error {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             let detail = response
@@ -563,9 +603,9 @@ fn connect_error(error: tokio_tungstenite::tungstenite::Error) -> String {
                 .as_deref()
                 .map(|body| truncate_detail(&String::from_utf8_lossy(body)))
                 .filter(|detail| !detail.is_empty());
-            status_message(response.status().as_u16(), detail)
+            TranscribeError::RemoteError(status_message(response.status().as_u16(), detail))
         }
-        other => format!("Deepgram connection failed: {}", other),
+        other => TranscribeError::NetworkError(format!("Deepgram connection failed: {}", other)),
     }
 }
 
@@ -686,7 +726,9 @@ fn validate_config(config: &DeepgramConfig) -> Result<(), TranscribeError> {
 /// the same whether the pre-recorded request or the socket handshake hit it.
 fn status_message(code: u16, detail: Option<String>) -> String {
     let summary = match code {
-        401 | 403 => "authentication failed",
+        401 => "authentication failed",
+        // https://developers.deepgram.com/docs/errors
+        403 => "access denied: the key's project has no access to this model",
         402 => "account has insufficient credit",
         429 => "rate limit exceeded",
         _ => "request failed",
@@ -743,7 +785,7 @@ mod tests {
     }
 
     fn clear_key_env() {
-        for var in API_KEY_ENV_VARS {
+        for var in crate::config::DEEPGRAM_API_KEY_ENV_VARS {
             std::env::remove_var(var);
         }
     }
@@ -836,6 +878,23 @@ mod tests {
         let result = DeepgramTranscriber::new(DeepgramConfig::default());
         clear_key_env();
         assert_eq!(result.unwrap().api_key, "environment-key");
+    }
+
+    /// Every `[deepgram]` field has a default and the key can come from the
+    /// environment, so a config with no table still builds the engine.
+    #[test]
+    fn a_missing_table_runs_on_the_defaults() {
+        let _guard = env_lock();
+        clear_key_env();
+        std::env::set_var("DEEPGRAM_API_KEY", "environment-key");
+        let config = crate::config::Config {
+            engine: crate::config::TranscriptionEngine::Deepgram,
+            deepgram: None,
+            ..Default::default()
+        };
+        let result = crate::transcribe::create_transcriber(&config);
+        clear_key_env();
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 
     #[test]
@@ -992,16 +1051,54 @@ mod tests {
         assert!(!uri.contains("ws-secret"), "{uri}");
     }
 
+    /// Whitespace around a key is not part of it: a trailing space, `\n` or
+    /// `\r\n` from a pasted key or a key file is trimmed, and the trimmed key
+    /// is sent. A key that still cannot be sent in a header is refused at
+    /// startup, for both APIs, with where to look: whitespace inside it, or
+    /// a typographic quote, which the pre-recorded client refuses although
+    /// a WebSocket header would take it.
     #[test]
-    fn ws_request_rejects_key_with_newline() {
-        let transcriber = new_transcriber(DeepgramConfig {
-            api_key: Some("abc\n".into()),
-            ..Default::default()
-        });
-        assert!(matches!(
-            transcriber.ws_request(),
-            Err(TranscribeError::ConfigError(_))
-        ));
+    fn keys_are_trimmed_and_unsendable_keys_are_refused_at_startup() {
+        let _guard = env_lock();
+        clear_key_env();
+        for key in ["abc\n", "abc\r\n", "abc ", " abc"] {
+            let transcriber = DeepgramTranscriber::new(DeepgramConfig {
+                api_key: Some(key.into()),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(transcriber.api_key, "abc", "{key:?}");
+        }
+        for key in ["ab c", "ab\nc", "\u{201c}abc\u{201d}"] {
+            let error = DeepgramTranscriber::new(DeepgramConfig {
+                api_key: Some(key.into()),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(matches!(error, TranscribeError::ConfigError(_)), "{key:?}");
+            assert!(
+                error.to_string().contains("stray quotes"),
+                "{key:?}: {error}"
+            );
+        }
+        assert!(check_config(&config_with_key()).is_ok());
+    }
+
+    /// The trait reports a two-letter code; a BCP-47 tag gives its primary
+    /// subtag, and automatic or multilingual detection gives none.
+    #[test]
+    fn the_reported_language_is_the_primary_subtag() {
+        let language = |code: &str| {
+            new_transcriber(DeepgramConfig {
+                language: code.into(),
+                ..config_with_key()
+            })
+            .last_detected_language()
+        };
+        assert_eq!(language("en-US").as_deref(), Some("en"));
+        assert_eq!(language("fr").as_deref(), Some("fr"));
+        assert_eq!(language("auto"), None);
+        assert_eq!(language("multi"), None);
     }
 
     #[test]
@@ -1016,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_transcript_and_rejects_empty_transcript() {
+    fn parses_transcript_and_accepts_an_empty_one() {
         let body =
             r#"{"results":{"channels":[{"alternatives":[{"transcript":" hello world "}]}]}}"#;
         assert_eq!(
@@ -1024,11 +1121,9 @@ mod tests {
             "hello world"
         );
 
+        // Silence: the daemon logs "Transcription was empty" and types nothing.
         let empty = r#"{"results":{"channels":[{"alternatives":[{"transcript":""}]}]}}"#;
-        assert!(DeepgramTranscriber::parse_response(empty)
-            .unwrap_err()
-            .to_string()
-            .contains("empty transcript"));
+        assert_eq!(DeepgramTranscriber::parse_response(empty).unwrap(), "");
     }
 
     #[test]
@@ -1123,6 +1218,9 @@ mod tests {
         /// One final while audio flows; the stop is never answered and the
         /// socket stays open.
         Silent,
+        /// One final while audio flows; the stop is answered by a close with
+        /// Deepgram's internal-error code.
+        CloseWithError,
     }
 
     /// What the fake server saw during one session.
@@ -1204,6 +1302,14 @@ mod tests {
                             ws.send(Message::Text(LAST_FINAL.replace("FROM", "true")))
                                 .await
                                 .unwrap();
+                        }
+                        if text == CLOSE_STREAM_FRAME && matches!(script, Script::CloseWithError) {
+                            let frame = CloseFrame {
+                                code: CloseCode::Error,
+                                reason: "NET-0000".into(),
+                            };
+                            let _ = ws.close(Some(frame)).await;
+                            break;
                         }
                         if text == CLOSE_STREAM_FRAME && matches!(script, Script::CloseOnly) {
                             ws.send(Message::Text(LAST_FINAL.replace("FROM", "false")))
@@ -1328,6 +1434,17 @@ mod tests {
         );
         // The connection is released after the error.
         assert_eq!(seen.control, [CLOSE_STREAM_FRAME]);
+    }
+
+    #[tokio::test]
+    async fn an_error_close_after_the_stop_is_an_error() {
+        let (finals, error, _) = dictate(Script::CloseWithError, 2).await;
+        assert_eq!(finals, ["Hello world."]);
+        let error = error.expect("the error close is reported");
+        assert!(
+            error.contains("closed the connection after recording stopped (1011: NET-0000)"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
