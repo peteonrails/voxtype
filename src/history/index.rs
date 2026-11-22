@@ -167,8 +167,17 @@ impl HistoryIndex {
             .into());
         }
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        // SQLite's NOFOLLOW refuses a link anywhere in the path, root's own
+        // included (macOS's /var). The directories were vetted above, so
+        // SQLite gets them resolved and still refuses a linked file.
+        let resolved = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                parent.canonicalize()?.join(name)
+            }
+            _ => path.to_path_buf(),
+        };
         let conn = Connection::open_with_flags(
-            path,
+            &resolved,
             rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         Self::with_connection(conn)
