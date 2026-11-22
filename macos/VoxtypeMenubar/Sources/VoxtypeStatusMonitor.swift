@@ -7,7 +7,15 @@ class VoxtypeStatusMonitor: ObservableObject {
     @Published var daemonRunning: Bool = false
 
     private var timer: Timer?
-    private let stateFilePath = "/tmp/voxtype/state"
+    private let stateFilePath = (VoxtypeStatusMonitor.runtimeDir as NSString).appendingPathComponent("state")
+
+    /// Mirrors `Config::runtime_dir()` in the Rust daemon: $XDG_RUNTIME_DIR/voxtype,
+    /// else the per-user temp dir. A fixed directory under /tmp is shared by every
+    /// account on the Mac, so one user's files would block the others.
+    static var runtimeDir: String {
+        let base = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? NSTemporaryDirectory()
+        return (base as NSString).appendingPathComponent("voxtype")
+    }
 
     var iconName: String {
         switch state {
@@ -103,7 +111,7 @@ class VoxtypeStatusMonitor: ObservableObject {
         } catch {}
 
         // Fall back to checking if daemon process is running via PID file
-        let pidPath = "/tmp/voxtype/pid"
+        let pidPath = (VoxtypeStatusMonitor.runtimeDir as NSString).appendingPathComponent("pid")
         guard let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8),
               let pid = Int32(pidString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             return false
