@@ -3952,7 +3952,10 @@ impl Daemon {
     }
 
     /// The transcriber eager processing sends a recording's chunks to; it
-    /// also transcribes what is left at stop.
+    /// also transcribes what is left at stop. It gets the recording's
+    /// vocabulary here, because the transcriber it can come from was not
+    /// given one when the recording started: the cached local Whisper model,
+    /// or the remote and whisper-cli transcribers it builds fresh.
     async fn select_eager_transcriber(
         &mut self,
         model_override: Option<&str>,
@@ -3989,6 +3992,9 @@ impl Daemon {
                     }
                 }
             }
+        }
+        if let Some(transcriber) = &selected {
+            transcriber.set_vocabulary(&self.recording_vocabulary_terms());
         }
         selected
     }
@@ -5607,6 +5613,9 @@ impl Daemon {
             .unwrap_or(0);
         let tail_start = eager::tail_start(&boundaries, chunks_sent);
 
+        // A meeting that took dictation's model while the chunks ran cleared
+        // its vocabulary; the tail is this recording's.
+        let tail_vocabulary = self.recording_vocabulary_terms();
         let tail_task = (accumulated_audio.len().saturating_sub(tail_start) >= 4800).then(|| {
             let tail_audio = accumulated_audio[tail_start..].to_vec();
             tracing::debug!(
@@ -5615,6 +5624,7 @@ impl Daemon {
                 tail_start
             );
             let tail_transcriber = transcriber.clone();
+            tail_transcriber.set_vocabulary(&tail_vocabulary);
             let decoded = self.eager_decoded.clone();
             tokio::task::spawn_blocking(move || {
                 let result = tail_transcriber.transcribe(&tail_audio);
@@ -8792,15 +8802,21 @@ while True:
             );
         }
 
-        /// Records the vocabulary it was last given.
+        /// Records the vocabulary it was last given, and the one each
+        /// transcription ran with.
         #[derive(Default)]
         struct VocabularyProbe {
             last_set: std::sync::Mutex<Vec<String>>,
+            per_transcription: std::sync::Mutex<Vec<Vec<String>>>,
         }
 
         impl VocabularyProbe {
             fn terms(&self) -> Vec<String> {
                 self.last_set.lock().unwrap().clone()
+            }
+
+            fn transcribed_with(&self) -> Vec<Vec<String>> {
+                self.per_transcription.lock().unwrap().clone()
             }
         }
 
@@ -8809,6 +8825,7 @@ while True:
                 &self,
                 _samples: &[f32],
             ) -> std::result::Result<String, crate::error::TranscribeError> {
+                self.per_transcription.lock().unwrap().push(self.terms());
                 Ok(String::new())
             }
 
@@ -8859,6 +8876,68 @@ while True:
                 "the meeting got {:?}",
                 probe.terms()
             );
+        }
+
+        /// Eager processing on dictation's cached local Whisper model sends
+        /// its chunks, and what is left at stop, with the recording's
+        /// vocabulary.
+        #[tokio::test]
+        async fn eager_whisper_chunks_get_the_recording_vocabulary() {
+            if !in_scratch_runtime("eager_whisper_chunks_get_the_recording_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_whisper_model(&mut daemon, probe.clone());
+
+            daemon.prepare_for_recording(None);
+            assert!(daemon.select_eager_transcriber(None).await.is_some());
+
+            assert_eq!(probe.terms(), ["Voxtype"]);
+        }
+
+        /// A meeting that takes dictation's model mid-dictation clears its
+        /// vocabulary; the eager tail is still transcribed with the
+        /// recording's terms.
+        #[tokio::test]
+        async fn the_eager_tail_gets_the_recording_vocabulary_after_a_meeting_clears_it() {
+            if !in_scratch_runtime(
+                "the_eager_tail_gets_the_recording_vocabulary_after_a_meeting_clears_it",
+            ) {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let mut config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            config.vad.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_whisper_model(&mut daemon, probe.clone());
+
+            daemon.prepare_for_recording(None);
+            let selected = daemon.select_eager_transcriber(None).await.unwrap();
+            let meeting = daemon.config.clone();
+            assert!(daemon.resident_transcriber_for(&meeting).is_some());
+            assert!(probe.terms().is_empty(), "the meeting cleared them");
+
+            let mut state = State::EagerRecording {
+                started_at: std::time::Instant::now(),
+                model_override: None,
+                accumulated_audio: vec![0.2; 16_000],
+                chunks_sent: 0,
+                chunk_results: Vec::new(),
+                tasks_in_flight: 0,
+            };
+            daemon.finish_eager_recording(&mut state, selected).await;
+
+            assert_eq!(probe.transcribed_with(), [vec!["Voxtype".to_string()]]);
         }
 
         #[tokio::test]

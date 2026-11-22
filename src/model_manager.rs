@@ -269,6 +269,9 @@ impl ModelManager {
     ///
     /// A local model that is already loaded creates its Whisper state, which
     /// takes most of a second on the GPU the first time.
+    ///
+    /// `vocabulary` reaches only the gpu_isolation worker. Callers set the
+    /// recording's vocabulary on what `get_prepared_transcriber` returns.
     pub fn prepare_model(
         &mut self,
         model: Option<&str>,
