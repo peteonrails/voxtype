@@ -43,9 +43,29 @@ pub fn view_visible() -> bool {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    view_visible_at(&state_path(), now, |pid| {
-        Path::new(&format!("/proc/{pid}")).exists()
-    })
+    view_visible_at(&state_path(), now, host_alive)
+}
+
+/// Whether the host process `pid` still exists.
+#[cfg(target_os = "linux")]
+fn host_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Whether the host process `pid` still exists. There is no /proc here;
+/// signal 0 checks for the process without sending anything, and a refusal
+/// means it exists under another user.
+#[cfg(not(target_os = "linux"))]
+fn host_alive(pid: u32) -> bool {
+    use nix::errno::Errno;
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    pid > 0
+        && matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Ok(()) | Err(Errno::EPERM)
+        )
 }
 
 /// [`view_visible`] with the clock and the liveness check passed in.
@@ -113,12 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn the_real_reader_checks_proc_for_the_pid() {
+    fn the_real_reader_finds_a_live_host() {
         // This process is alive; pid 0 never is a host.
         let dir = tempfile::tempdir().unwrap();
         let path = write(dir.path(), &state(true, false, std::process::id(), NOW));
-        assert!(view_visible_at(&path, NOW, |pid| {
-            Path::new(&format!("/proc/{pid}")).exists()
-        }));
+        assert!(view_visible_at(&path, NOW, host_alive));
+        assert!(!host_alive(u32::MAX));
     }
 }
