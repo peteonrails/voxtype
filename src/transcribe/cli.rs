@@ -308,20 +308,12 @@ pub fn find_whisper_cli(configured: Option<&str>) -> Option<PathBuf> {
         return p.exists().then_some(p);
     }
 
-    let candidates = [
-        // In PATH
-        which::which("whisper-cli").ok(),
-        which::which("whisper").ok(),
-        // Local builds
-        Some(PathBuf::from("./whisper-cli")),
-        Some(PathBuf::from("./build/bin/whisper-cli")),
-        // System locations
-        Some(PathBuf::from("/usr/local/bin/whisper-cli")),
-        Some(PathBuf::from("/usr/bin/whisper-cli")),
-        // Home directory
-        directories::BaseDirs::new().map(|d| d.home_dir().join(".local/bin/whisper-cli")),
-    ];
-    candidates.into_iter().flatten().find(|c| c.exists())
+    cli_candidates(
+        |n| which::which(n).ok(),
+        directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()),
+    )
+    .into_iter()
+    .find(|c| c.exists())
 }
 
 /// What is wrong with `config` running in cli mode on this machine, or
@@ -356,6 +348,30 @@ fn resolve_cli_path(configured_path: Option<&str>) -> Result<PathBuf, Transcribe
         ),
         None => format!("whisper-cli not found. {MISSING_CLI_FIX}"),
     }))
+}
+
+/// Where whisper-cli may be, in search order. Only the name `whisper-cli`
+/// is accepted: a bare `whisper` on PATH is OpenAI's Python CLI, which
+/// takes different arguments and would fail every transcription, or worse,
+/// run a second, slow model. whisper.cpp itself has shipped the binary as
+/// `whisper-cli` since it retired `main`, never as `whisper`, so no legacy
+/// name needs probing.
+fn cli_candidates(which: impl Fn(&str) -> Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    [
+        // In PATH
+        which("whisper-cli"),
+        // Local builds
+        Some(PathBuf::from("./whisper-cli")),
+        Some(PathBuf::from("./build/bin/whisper-cli")),
+        // System locations
+        Some(PathBuf::from("/usr/local/bin/whisper-cli")),
+        Some(PathBuf::from("/usr/bin/whisper-cli")),
+        // Home directory
+        home.map(|h| h.join(".local/bin/whisper-cli")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Resolve model name to file path
@@ -421,6 +437,27 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare `whisper` on PATH is OpenAI's Python CLI, not whisper.cpp.
+    #[test]
+    fn a_bare_whisper_on_path_is_never_a_candidate() {
+        let python_whisper = PathBuf::from("/usr/bin/whisper");
+        let which = |name: &str| (name == "whisper").then(|| python_whisper.clone());
+        let found = cli_candidates(which, Some(PathBuf::from("/home/u")));
+        assert!(!found.contains(&python_whisper), "{found:?}");
+        assert!(found
+            .iter()
+            .all(|p| p.file_name().and_then(|n| n.to_str()) == Some("whisper-cli")));
+    }
+
+    #[test]
+    fn whisper_cli_on_path_is_searched_first() {
+        let on_path = PathBuf::from("/opt/wcpp/bin/whisper-cli");
+        let which = |name: &str| (name == "whisper-cli").then(|| on_path.clone());
+        let found = cli_candidates(which, None);
+        assert_eq!(found.first(), Some(&on_path));
+        assert!(found.contains(&PathBuf::from("/usr/bin/whisper-cli")));
+    }
 
     #[test]
     fn test_resolve_cli_not_found() {
