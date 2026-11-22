@@ -1625,6 +1625,14 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 3. On X11, make sure `xclip` is installed for clipboard restoration support.
 
+4. If you copied something after the paste and before the restore, the restore is skipped on purpose so your newer copy is kept.
+
+5. If the log says "Could not save the clipboard", the clipboard could not be read before the paste, usually because the app that owns it stopped responding (each read gives up after 2 seconds). The dictation is still pasted, and the clipboard keeps it. Copy the original again from its source.
+
+### Formatted text comes back as plain text after a paste
+
+With `restore_clipboard = true`, only one representation of the clipboard can be put back, and voxtype keeps the plain-text one. If you copied formatted text (HTML from a browser, for example), pasting it after a dictation gives the plain text. Copy it again from the source to get the formatting back.
+
 ### "Post-processing failed", "timed out", "command not found", "returned nothing" or "edit list rejected"
 
 **Cause:** The `[output.post_process]` command (or a profile's `post_process_command`) didn't produce cleaned text, so Voxtype typed the original transcription instead. The notification says which case it was.

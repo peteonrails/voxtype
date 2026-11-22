@@ -2468,10 +2468,18 @@ Also settable with `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS_TERMINAL`.
 When `true`, voxtype saves your clipboard content before transcription and restores it after the paste operation completes. This prevents your original clipboard content from being overwritten by the transcription.
 
 **How it works:**
-1. Before transcription: Save current clipboard content (including MIME type for binary data)
-2. Copy transcribed text to clipboard
-3. Simulate paste keystroke
-4. After brief delay: Restore original clipboard content
+1. Before pasting: save the current clipboard content and its MIME type
+2. Copy the transcribed text to the clipboard
+3. Simulate the paste keystroke. The dictation is done here: the OSD shows the result and the daemon accepts the next recording
+4. After `restore_clipboard_delay_ms`, in the background: if the clipboard still holds the transcription, put the original back
+
+**What is saved.** `wl-copy` can only offer one representation, so one is saved. When the clipboard offers a text representation (`text/plain;charset=utf-8`, `text/plain`, `UTF8_STRING` and so on), that one is kept, so a later plain-text paste gives the original plain text. Rich formats such as HTML are not restored alongside it. When nothing textual is offered, the first type is kept (an image, for example).
+
+**A newer copy wins.** If you copy something between the paste and the restore, the restore is skipped and your new copy stays.
+
+**When the clipboard cannot be read.** Each clipboard read gives up after 2 seconds, which only happens when the app that owns the clipboard has stopped responding. A failed read is not treated as an empty clipboard: the dictation is still pasted, a warning is logged, and the clipboard keeps the dictation, because there is nothing to restore.
+
+The `post_output_command` hook now runs right after the paste, before the restore.
 
 **Example:**
 ```toml

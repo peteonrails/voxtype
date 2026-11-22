@@ -10,6 +10,7 @@
 //!   - eitype: EI protocol, works on GNOME/KDE/Sway with libei
 //!   - ydotool: Works on X11/Wayland/TTY, requires ydotoold daemon
 
+use super::clipboard_restore::{self, Snapshot};
 use super::session::{detect, DisplaySession};
 use super::TextOutput;
 use crate::config::OutputDriver;
@@ -316,22 +317,6 @@ fn key_name_to_evdev(name: &str) -> Result<u16, String> {
     }
 }
 
-/// Clipboard content with MIME type for restoration
-#[derive(Clone)]
-struct ClipboardContent {
-    data: Vec<u8>,
-    mime_type: String,
-}
-
-impl std::fmt::Debug for ClipboardContent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClipboardContent")
-            .field("mime_type", &self.mime_type)
-            .field("data", &format!("[{} bytes]", self.data.len()))
-            .finish()
-    }
-}
-
 /// Paste-based text output (clipboard + paste keystroke)
 pub struct PasteOutput {
     /// Whether to send Enter key after output
@@ -434,241 +419,6 @@ impl PasteOutput {
         if !status.success() {
             return Err(OutputError::InjectionFailed(
                 "wl-copy exited with error".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Read current clipboard content using wl-paste (Wayland) or xclip (X11 fallback)
-    async fn read_clipboard(&self) -> Result<Option<ClipboardContent>, OutputError> {
-        // Try wl-paste first (Wayland)
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            match self.read_clipboard_wl_paste().await {
-                Ok(content) => return Ok(content),
-                Err(e) => {
-                    tracing::debug!("wl-paste failed, trying xclip: {}", e);
-                }
-            }
-        }
-
-        // Fallback to xclip (X11)
-        self.read_clipboard_xclip().await
-    }
-
-    /// Read clipboard using wl-paste
-    async fn read_clipboard_wl_paste(&self) -> Result<Option<ClipboardContent>, OutputError> {
-        // First, check if clipboard is empty by listing types
-        let types_output = Command::new("wl-paste")
-            .arg("--list-types")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    OutputError::WlPasteNotFound
-                } else {
-                    OutputError::InjectionFailed(e.to_string())
-                }
-            })?;
-
-        if !types_output.status.success() {
-            // Clipboard might be empty or error occurred
-            let stderr = String::from_utf8_lossy(&types_output.stderr);
-            tracing::debug!("wl-paste --list-types failed: {}", stderr);
-            return Ok(None);
-        }
-
-        let types_str = String::from_utf8_lossy(&types_output.stdout);
-        let mime_type = types_str
-            .lines()
-            .next()
-            .unwrap_or("text/plain")
-            .trim()
-            .to_string();
-
-        if mime_type.is_empty() {
-            return Ok(None);
-        }
-
-        // Read the actual content
-        let content_output = Command::new("wl-paste")
-            .arg("--type")
-            .arg(&mime_type)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-
-        if !content_output.status.success() {
-            let stderr = String::from_utf8_lossy(&content_output.stderr);
-            tracing::debug!("wl-paste failed to read content: {}", stderr);
-            return Ok(None);
-        }
-
-        const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100 MB
-        if content_output.stdout.len() > MAX_CLIPBOARD_SIZE {
-            tracing::warn!(
-                "Clipboard content too large ({} bytes), skipping restoration",
-                content_output.stdout.len()
-            );
-            return Ok(None);
-        }
-
-        Ok(Some(ClipboardContent {
-            data: content_output.stdout,
-            mime_type,
-        }))
-    }
-
-    /// Read clipboard using xclip (X11 fallback)
-    async fn read_clipboard_xclip(&self) -> Result<Option<ClipboardContent>, OutputError> {
-        // Check if DISPLAY is set (X11 environment)
-        if std::env::var("DISPLAY").is_err() {
-            return Ok(None);
-        }
-
-        let output = Command::new("xclip")
-            .args(["-selection", "clipboard", "-o"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    OutputError::XclipNotFound
-                } else {
-                    OutputError::InjectionFailed(e.to_string())
-                }
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::debug!("xclip failed: {}", stderr);
-            return Ok(None);
-        }
-
-        const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100 MB
-        if output.stdout.len() > MAX_CLIPBOARD_SIZE {
-            tracing::warn!(
-                "Clipboard content too large ({} bytes), skipping restoration",
-                output.stdout.len()
-            );
-            return Ok(None);
-        }
-
-        // xclip doesn't provide MIME type, assume text/plain or infer from content
-        let mime_type = if output.stdout.is_empty() {
-            return Ok(None);
-        } else {
-            // Try to detect if it's text or binary
-            match std::str::from_utf8(&output.stdout) {
-                Ok(_) => "text/plain".to_string(),
-                Err(_) => "application/octet-stream".to_string(),
-            }
-        };
-
-        Ok(Some(ClipboardContent {
-            data: output.stdout,
-            mime_type,
-        }))
-    }
-
-    /// Restore clipboard content using wl-copy or xclip
-    async fn restore_clipboard_content(
-        &self,
-        content: &ClipboardContent,
-    ) -> Result<(), OutputError> {
-        // Try wl-copy first (Wayland)
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            match self.restore_clipboard_wl_copy(content).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::debug!("wl-copy restore failed, trying xclip: {}", e);
-                }
-            }
-        }
-
-        // Fallback to xclip
-        self.restore_clipboard_xclip(content).await
-    }
-
-    /// Restore clipboard using wl-copy with MIME type preservation
-    async fn restore_clipboard_wl_copy(
-        &self,
-        content: &ClipboardContent,
-    ) -> Result<(), OutputError> {
-        let mut child = Command::new("wl-copy")
-            .arg("--type")
-            .arg(&content.mime_type)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    OutputError::WlCopyNotFound
-                } else {
-                    OutputError::InjectionFailed(e.to_string())
-                }
-            })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&content.data)
-                .await
-                .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-            drop(stdin);
-        }
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-
-        if !status.success() {
-            return Err(OutputError::InjectionFailed(
-                "wl-copy exited with error during restore".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Restore clipboard using xclip
-    async fn restore_clipboard_xclip(&self, content: &ClipboardContent) -> Result<(), OutputError> {
-        let mut child = Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    OutputError::XclipNotFound
-                } else {
-                    OutputError::InjectionFailed(e.to_string())
-                }
-            })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&content.data)
-                .await
-                .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-            drop(stdin);
-        }
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-
-        if !status.success() {
-            return Err(OutputError::InjectionFailed(
-                "xclip exited with error during restore".to_string(),
             ));
         }
 
@@ -966,24 +716,25 @@ impl TextOutput for PasteOutput {
             return Ok(());
         }
 
-        // Save original clipboard content if restoration is enabled
-        let original_clipboard = if self.restore_clipboard {
-            match self.read_clipboard().await {
-                Ok(content) => {
-                    if content.is_some() {
-                        tracing::debug!("Saved clipboard content for restoration");
-                    } else {
-                        tracing::debug!("Clipboard was empty, nothing to restore");
-                    }
-                    content
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read clipboard for restoration: {}", e);
-                    None
-                }
+        // Save the clipboard first, so the restore can put it back. A
+        // restore still pending from the previous paste is settled before
+        // the read: otherwise this paste would save that paste's
+        // transcript as the "original".
+        let snapshot = if self.restore_clipboard {
+            let pending = clipboard_restore::take_pending().await;
+            let snapshot =
+                clipboard_restore::merge_pending(clipboard_restore::snapshot().await, pending);
+            match &snapshot {
+                Snapshot::Saved(_) => tracing::debug!("Saved clipboard content for restoration"),
+                Snapshot::Empty => tracing::debug!("Clipboard was empty, nothing to restore"),
+                Snapshot::Failed(e) => tracing::warn!(
+                    "Could not save the clipboard ({}); pasting anyway, and the clipboard will keep the dictation",
+                    e
+                ),
             }
+            snapshot
         } else {
-            None
+            Snapshot::Empty
         };
 
         // Prepare text with optional append
@@ -1027,22 +778,15 @@ impl TextOutput for PasteOutput {
             self.send_enter().await?;
         }
 
-        // Restore original clipboard content if we saved something
-        if let Some(content) = original_clipboard {
-            // Wait for paste to complete before restoring
-            tokio::time::sleep(std::time::Duration::from_millis(
-                self.restore_clipboard_delay_ms as u64,
-            ))
-            .await;
-
-            match self.restore_clipboard_content(&content).await {
-                Ok(()) => {
-                    tracing::debug!("Restored original clipboard content");
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to restore clipboard content: {}", e);
-                }
-            }
+        // Put the original back after the delay, without holding the
+        // caller: the paste has landed, so the daemon reports success and
+        // goes idle now instead of restore_clipboard_delay_ms later (#1079).
+        if let Snapshot::Saved(original) = snapshot {
+            clipboard_restore::schedule_restore(
+                original,
+                text_to_paste.as_bytes().to_vec(),
+                std::time::Duration::from_millis(self.restore_clipboard_delay_ms as u64),
+            );
         }
 
         tracing::info!(
@@ -1278,18 +1022,6 @@ mod tests {
     }
 
     #[test]
-    fn test_clipboard_content_debug_redacts_data() {
-        let content = ClipboardContent {
-            data: vec![1, 2, 3, 4, 5],
-            mime_type: "text/plain".to_string(),
-        };
-        let debug_str = format!("{:?}", content);
-        assert!(debug_str.contains("[5 bytes]"));
-        assert!(debug_str.contains("text/plain"));
-        assert!(!debug_str.contains("[1, 2, 3"));
-    }
-
-    #[test]
     fn wtype_args_name_super_logo() {
         // wtype exits with "Invalid modifier name 'super'" otherwise.
         let k = ParsedKeystroke::parse("super+v").unwrap();
@@ -1299,5 +1031,182 @@ mod tests {
             k.to_wtype_args(),
             ["-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
         );
+    }
+
+    /// A fake Wayland clipboard and keyboard in a scratch PATH: wl-copy,
+    /// wl-paste and wtype are shell scripts over files in `$HOME/clip`, so
+    /// the test never touches the real clipboard or types anything.
+    mod fake_clipboard {
+        use super::*;
+        use crate::output::clipboard_restore::{wait_pending, RestoreOutcome};
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        const TEST: &str =
+            "output::paste::tests::fake_clipboard::paste_restore_follows_the_clipboard_rules";
+
+        fn type_file(dir: &Path, mime: &str) -> PathBuf {
+            dir.join(format!("data-{}", mime.replace(['/', ';', '='], "_")))
+        }
+
+        fn set_clipboard(dir: &Path, offers: &[(&str, &str)]) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                if entry.file_name().to_string_lossy().starts_with("data-") {
+                    std::fs::remove_file(entry.path()).unwrap();
+                }
+            }
+            let types: Vec<&str> = offers.iter().map(|(t, _)| *t).collect();
+            std::fs::write(dir.join("types"), types.join("\n")).unwrap();
+            for (mime, data) in offers {
+                std::fs::write(type_file(dir, mime), data).unwrap();
+            }
+        }
+
+        fn clipboard(dir: &Path, mime: &str) -> String {
+            std::fs::read_to_string(type_file(dir, mime)).unwrap_or_default()
+        }
+
+        fn output(delay_ms: u32) -> PasteOutput {
+            PasteOutput::new(
+                false,
+                None,
+                Some("ctrl+v".into()),
+                None,
+                None,
+                0,
+                1,
+                true,
+                delay_ms,
+            )
+        }
+
+        fn install_fakes(home: &Path) {
+            let bin = home.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(home.join("clip")).unwrap();
+            for name in ["sh", "cat", "tr", "sleep", "which", "printf", "rm"] {
+                if let Ok(path) = which::which(name) {
+                    let _ = std::os::unix::fs::symlink(path, bin.join(name));
+                }
+            }
+            let sh = which::which("sh").unwrap();
+            let sh = sh.display();
+            let file = r#"f() { printf '%s/clip/data-%s' "$HOME" "$(printf '%s' "$1" | tr '/;=' '___')"; }"#;
+            crate::test_support::write_script(
+                &bin.join("wl-paste"),
+                &format!(
+                    "#!{sh}\n{file}\nC=\"$HOME/clip\"\n\
+                     if [ -f \"$C/stall\" ]; then sleep 30 & echo $! > \"$C/stall-child\"; wait; exit 0; fi\n\
+                     if [ -f \"$C/fail\" ]; then echo 'Failed to connect to a Wayland server' >&2; exit 1; fi\n\
+                     if [ ! -s \"$C/types\" ]; then echo 'Nothing is copied' >&2; exit 1; fi\n\
+                     if [ \"$1\" = --list-types ]; then cat \"$C/types\"; echo; exit 0; fi\n\
+                     cat \"$(f \"$3\")\"\n"
+                ),
+            );
+            crate::test_support::write_script(
+                &bin.join("wl-copy"),
+                &format!(
+                    "#!{sh}\n{file}\nC=\"$HOME/clip\"\nfor x in \"$C\"/data-*; do [ -e \"$x\" ] && rm \"$x\"; done\n\
+                     cat > \"$(f \"$2\")\"\nprintf '%s' \"$2\" > \"$C/types\"\n\
+                     case \"$2\" in 'text/plain;charset=utf-8') ;; text/*) cat \"$(f \"$2\")\" > \"$(f 'text/plain;charset=utf-8')\";; esac\n\
+                     echo \"$2\" >> \"$C/copies\"\n"
+                ),
+            );
+            crate::test_support::write_script(
+                &bin.join("wtype"),
+                &format!("#!{sh}\necho \"$*\" >> \"$HOME/clip/keys\"\n"),
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn paste_restore_follows_the_clipboard_rules() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            if !crate::test_support::own_process(TEST, |child| {
+                install_fakes(scratch.path());
+                // Not env_clear(): own_process marks the child through the
+                // environment. PATH holds only the fakes.
+                child
+                    .env_remove("DISPLAY")
+                    .env_remove("XDG_RUNTIME_DIR")
+                    .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+                    .env_remove("NIRI_SOCKET")
+                    .env_remove("SWAYSOCK")
+                    .env("HOME", scratch.path())
+                    .env("PATH", scratch.path().join("bin"))
+                    .env("WAYLAND_DISPLAY", "voxtype-test-no-display");
+            }) {
+                return;
+            }
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let clip = home.join("clip");
+            let plain = "text/plain;charset=utf-8";
+
+            // #1079: output returns as soon as the paste lands; the restore
+            // runs after it. #1003: the plain-text representation is the one
+            // saved, not the HTML listed first.
+            set_clipboard(&clip, &[("text/html", "<b>orig</b>"), (plain, "orig")]);
+            let started = Instant::now();
+            output(400).output("dictated").await.unwrap();
+            assert!(
+                started.elapsed() < Duration::from_millis(400),
+                "{:?}",
+                started.elapsed()
+            );
+            assert_eq!(clipboard(&clip, plain), "dictated");
+            assert!(std::fs::read_to_string(clip.join("keys"))
+                .unwrap()
+                .contains("-k v"));
+            assert_eq!(wait_pending().await, Some(RestoreOutcome::Restored));
+            assert_eq!(clipboard(&clip, plain), "orig");
+
+            // A copy made after the paste wins over the restore.
+            set_clipboard(&clip, &[(plain, "orig")]);
+            output(300).output("dictated").await.unwrap();
+            set_clipboard(&clip, &[(plain, "newer copy")]);
+            assert_eq!(wait_pending().await, Some(RestoreOutcome::KeptNewerCopy));
+            assert_eq!(clipboard(&clip, plain), "newer copy");
+
+            // A failed read is not an empty clipboard: the paste goes ahead,
+            // and nothing is restored over it.
+            set_clipboard(&clip, &[(plain, "orig")]);
+            std::fs::write(clip.join("fail"), "").unwrap();
+            output(50).output("dictated").await.unwrap();
+            std::fs::remove_file(clip.join("fail")).unwrap();
+            assert_eq!(wait_pending().await, None);
+            assert_eq!(clipboard(&clip, plain), "dictated");
+
+            // A clipboard owner that never answers costs the read deadline,
+            // not the dictation, and the reader's own children are reaped.
+            set_clipboard(&clip, &[(plain, "orig")]);
+            std::fs::write(clip.join("stall"), "").unwrap();
+            let started = Instant::now();
+            output(50).output("dictated").await.unwrap();
+            std::fs::remove_file(clip.join("stall")).unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{:?}",
+                started.elapsed()
+            );
+            assert_eq!(clipboard(&clip, plain), "dictated");
+            let child: i32 = std::fs::read_to_string(clip.join("stall-child"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let alive = std::fs::read_to_string(format!("/proc/{child}/stat"))
+                .map(|stat| !stat.contains(") Z "))
+                .unwrap_or(false);
+            assert!(!alive, "wl-paste's child {child} outlived the deadline");
+            assert_eq!(wait_pending().await, None);
+
+            // A second paste inside the first one's delay restores the
+            // user's original, not the first transcript.
+            set_clipboard(&clip, &[(plain, "orig")]);
+            output(2_000).output("first").await.unwrap();
+            output(50).output("second").await.unwrap();
+            assert_eq!(wait_pending().await, Some(RestoreOutcome::Restored));
+            assert_eq!(clipboard(&clip, plain), "orig");
+        }
     }
 }
