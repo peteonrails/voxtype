@@ -799,6 +799,22 @@ fn refuse_unrunnable_vulkan(tiered: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The error for `setup gpu --enable` when no Vulkan build is installed,
+/// with the fix for how this voxtype was installed.
+fn vulkan_not_installed() -> String {
+    vulkan_not_installed_message(&super::install_hint::hint(
+        super::install_hint::Need::Variant(super::binary::Variant::WhisperVulkan),
+    ))
+}
+
+fn vulkan_not_installed_message(hint: &super::install_hint::Hint) -> String {
+    format!(
+        "Vulkan backend not installed: there is no {}/voxtype-vulkan.\n\
+         To fix this, {hint}.",
+        VOXTYPE_LIB_DIR
+    )
+}
+
 /// Enable GPU in simple mode (switch symlink from native to vulkan)
 fn enable_simple_mode() -> anyhow::Result<()> {
     let vulkan_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-vulkan");
@@ -806,11 +822,7 @@ fn enable_simple_mode() -> anyhow::Result<()> {
     let active_bin = get_active_binary_path();
 
     if !vulkan_path.exists() {
-        anyhow::bail!(
-            "Vulkan backend not installed.\n\
-             The voxtype-vulkan binary was not found in {}",
-            VOXTYPE_LIB_DIR
-        );
+        anyhow::bail!("{}", vulkan_not_installed());
     }
 
     // Check if already using vulkan (symlink points to vulkan)
@@ -934,6 +946,11 @@ fn disable_simple_mode() -> anyhow::Result<()> {
 /// variant hints below do not apply to it.
 pub fn show_status(config: &crate::config::Config) {
     println!("=== Voxtype Backend Status ===\n");
+
+    if super::install_hint::running_from_nix() {
+        show_nix_status(config);
+        return;
+    }
 
     let tiered = is_tiered_mode();
     let active_bin = get_active_binary_path();
@@ -1165,35 +1182,7 @@ pub fn show_status(config: &crate::config::Config) {
         }
     }
 
-    // GPU detection
-    println!();
-    let gpus = detect_gpus();
-    if gpus.is_empty() {
-        println!("GPU: not detected");
-    } else {
-        println!("GPUs detected:");
-        for (i, gpu) in gpus.iter().enumerate() {
-            println!("  {}. [{}] {}", i + 1, gpu.vendor.display_name(), gpu.name);
-        }
-
-        // Show Vulkan runtime status
-        println!();
-        if check_vulkan_runtime() {
-            println!("Vulkan runtime: installed");
-        } else {
-            println!("Vulkan runtime: NOT FOUND");
-            println!("  Install vulkan-icd-loader for GPU acceleration");
-        }
-
-        // Show GPU selection status if multiple GPUs
-        if gpus.len() > 1 {
-            println!();
-            let vendors: Vec<GpuVendor> = gpus.iter().map(|g| g.vendor).collect();
-            for line in gpu_selection_advice(&vendors, get_selected_gpu_vendor()) {
-                println!("{}", line);
-            }
-        }
-    }
+    print_gpus();
 
     // Usage hints
     println!();
@@ -1239,6 +1228,76 @@ pub fn show_status(config: &crate::config::Config) {
     } else if current == Some(Backend::Vulkan) {
         println!("To switch back to CPU:");
         println!("  sudo voxtype setup gpu --disable");
+    }
+}
+
+/// The detected GPUs, the Vulkan runtime and, with several GPUs, which one
+/// voxtype uses.
+fn print_gpus() {
+    println!();
+    let gpus = detect_gpus();
+    if gpus.is_empty() {
+        println!("GPU: not detected");
+    } else {
+        println!("GPUs detected:");
+        for (i, gpu) in gpus.iter().enumerate() {
+            println!("  {}. [{}] {}", i + 1, gpu.vendor.display_name(), gpu.name);
+        }
+
+        // Show Vulkan runtime status
+        println!();
+        if check_vulkan_runtime() {
+            println!("Vulkan runtime: installed");
+        } else {
+            println!("Vulkan runtime: NOT FOUND");
+            println!("  Install vulkan-icd-loader for GPU acceleration");
+        }
+
+        // Show GPU selection status if multiple GPUs
+        if gpus.len() > 1 {
+            println!();
+            let vendors: Vec<GpuVendor> = gpus.iter().map(|g| g.vendor).collect();
+            for line in gpu_selection_advice(&vendors, get_selected_gpu_vendor()) {
+                println!("{}", line);
+            }
+        }
+    }
+}
+
+/// `setup gpu` on a Nix install: which flake package is running and which
+/// to install for another backend. There is no /usr/lib/voxtype to list.
+fn show_nix_status(config: &crate::config::Config) {
+    let exe = super::binary::current_binary_path();
+    let running = super::install_hint::running_nix_package();
+    for line in super::install_hint::nix_status_lines(&exe, running) {
+        println!("{line}");
+    }
+
+    print_gpus();
+
+    println!();
+    let gguf = config.active_gguf();
+    if let Some(active) = &gguf {
+        // The default flake package links the CPU-only GGUF worker; the
+        // others link the Vulkan one.
+        for line in gguf_status_hint(active, running != "default", false) {
+            println!("{line}");
+        }
+    }
+    // A GGUF model already has a Vulkan worker outside the default package,
+    // and an ONNX build on a machine without CUDA or MIGraphX has no GPU
+    // ONNX package to move to.
+    let target = super::install_hint::nix_gpu_target(true);
+    let suggest = match running {
+        "default" => true,
+        "onnx" => gguf.is_none() && target != super::binary::Variant::WhisperVulkan,
+        _ => false,
+    };
+    if suggest {
+        println!(
+            "To enable GPU acceleration, {}.",
+            super::install_hint::hint(super::install_hint::Need::Variant(target))
+        );
     }
 }
 
@@ -1392,6 +1451,17 @@ fn pick_parakeet_gpu_backend(
 
 /// Enable GPU backend (engine-aware: Vulkan for Whisper, CUDA/MIGraphX for Parakeet)
 pub fn enable() -> anyhow::Result<()> {
+    if super::install_hint::running_from_nix() {
+        anyhow::bail!(
+            "{}",
+            super::install_hint::nix_switch_refusal(
+                "setup gpu --enable",
+                super::install_hint::nix_gpu_target(true),
+                super::install_hint::running_nix_package()
+            )
+        );
+    }
+
     // Check which engine is active by looking at the current symlink
     let is_parakeet = is_parakeet_binary_active();
 
@@ -1450,11 +1520,7 @@ pub fn enable() -> anyhow::Result<()> {
         // Whisper mode: switch to Vulkan backend
         let vulkan_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-vulkan");
         if !vulkan_path.exists() {
-            anyhow::bail!(
-                "Vulkan backend not installed.\n\
-                 The voxtype-vulkan binary was not found in {}",
-                VOXTYPE_LIB_DIR
-            );
+            anyhow::bail!("{}", vulkan_not_installed());
         }
 
         // Check Vulkan runtime
@@ -1494,6 +1560,17 @@ pub fn enable() -> anyhow::Result<()> {
 
 /// Disable GPU backend (engine-aware: switch to best CPU backend)
 pub fn disable() -> anyhow::Result<()> {
+    if super::install_hint::running_from_nix() {
+        anyhow::bail!(
+            "{}",
+            super::install_hint::nix_switch_refusal(
+                "setup gpu --disable",
+                super::install_hint::nix_gpu_target(false),
+                super::install_hint::running_nix_package()
+            )
+        );
+    }
+
     // Check which engine is active by looking at the current symlink
     let is_parakeet = is_parakeet_binary_active();
 
@@ -1935,6 +2012,33 @@ GPU1:
         assert_eq!(pick_vendor_index(&[], GpuVendor::Nvidia), None);
     }
     use super::*;
+
+    #[test]
+    fn missing_vulkan_build_names_the_fix_for_the_install() {
+        use crate::setup::install_hint::Hint;
+        let switch = vulkan_not_installed_message(&Hint::Switch {
+            command: "sudo voxtype setup gpu --enable",
+        });
+        assert_eq!(
+            switch,
+            "Vulkan backend not installed: there is no /usr/lib/voxtype/voxtype-vulkan.\n\
+             To fix this, run `sudo voxtype setup gpu --enable`."
+        );
+        let aur = vulkan_not_installed_message(&Hint::AurVariant {
+            token: "vulkan".into(),
+        });
+        assert!(
+            aur.contains("VOXTYPE_VARIANTS=vulkan yay -S --rebuild voxtype-bin"),
+            "{aur}"
+        );
+        let source = vulkan_not_installed_message(&Hint::Rebuild {
+            feature: Some("gpu-vulkan"),
+        });
+        assert!(
+            source.ends_with("To fix this, rebuild with --features gpu-vulkan."),
+            "{source}"
+        );
+    }
 
     #[test]
     fn backend_names_round_trip() {

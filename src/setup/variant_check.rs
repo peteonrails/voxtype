@@ -41,14 +41,20 @@ impl VariantMismatch {
     /// [`crate::setup::install_hint`], so it names the command for how
     /// voxtype was installed on this machine.
     pub fn explanation(&self) -> String {
-        use crate::setup::install_hint::{self, Hint, Need};
+        use crate::setup::install_hint::{self, Need};
+        self.explanation_with(&install_hint::hint(Need::Feature(self.required_feature)))
+    }
+
+    /// [`Self::explanation`] with the install's remediation already worked
+    /// out, so each wording can be tested without this machine's install.
+    pub fn explanation_with(&self, hint: &crate::setup::install_hint::Hint) -> String {
+        use crate::setup::install_hint::Hint;
 
         let active = self
             .active_variant_name
             .as_deref()
             .unwrap_or("the running binary");
-        let hint = install_hint::hint(Need::Feature(self.required_feature));
-        match (&self.remediation, &hint) {
+        match (&self.remediation, hint) {
             (Remediation::SwitchToVariant { target: None }, _) => format!(
                 "{} was built without --features {}, and the builds that have it need a CPU \
                  with AVX2, which this one lacks. Choose an engine the running build supports.",
@@ -78,6 +84,11 @@ impl VariantMismatch {
                  To enable the {} engine, {}.",
                 feature, self.configured_engine, hint,
             ),
+            (Remediation::NixPackage { feature }, hint) => format!(
+                "This voxtype flake package was built without --features {}. \
+                 To enable the {} engine, {}.",
+                feature, self.configured_engine, hint,
+            ),
         }
     }
 }
@@ -100,6 +111,10 @@ pub enum Remediation {
     /// rebuild — there's no separate ONNX variant to swap to. `feature`
     /// is the Cargo feature to add to the build, e.g. `"parakeet"`.
     Rebuild { feature: &'static str },
+    /// Nix install (a voxtype flake package in the read-only store). There
+    /// is nothing to rebuild or switch in place; the fix is another flake
+    /// package. `feature` is the Cargo feature the engine needs.
+    NixPackage { feature: &'static str },
 }
 
 /// Map a `TranscriptionEngine` to its required Cargo feature, or `None`
@@ -136,6 +151,11 @@ pub fn detect_mismatch(config: &Config, inventory: &Inventory) -> Option<Variant
         .map(|v| v.binary_name().to_string());
 
     let remediation = match inventory.install_kind {
+        crate::setup::binary::InstallKind::Source
+            if crate::setup::install_hint::is_nix_store_path(&inventory.binary_path) =>
+        {
+            Remediation::NixPackage { feature }
+        }
         crate::setup::binary::InstallKind::Source => Remediation::Rebuild { feature },
         // Package installs: recommend the hardware-appropriate ONNX variant.
         // The Inventory's recommendation pass already picked the best one
@@ -248,7 +268,7 @@ mod tests {
                 assert_eq!(target, Some(Variant::OnnxAvx2));
                 assert_eq!(target.map(Variant::family), Some(EngineFamily::Onnx));
             }
-            Remediation::Rebuild { .. } => panic!("package install should recommend variant swap"),
+            other => panic!("package install should recommend variant swap, got {other:?}"),
         }
     }
 
@@ -276,10 +296,100 @@ mod tests {
         let m = detect_mismatch(&cfg, &inv).expect("should detect");
         match m.remediation {
             Remediation::Rebuild { feature } => assert_eq!(feature, "cohere"),
-            Remediation::SwitchToVariant { .. } => {
-                panic!("source install should recommend rebuild, not variant swap")
-            }
+            other => panic!("source install should recommend rebuild, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nix_install_recommends_a_flake_package_not_a_rebuild() {
+        let mut inv = fake_inventory(
+            InstallKind::Source,
+            vec!["gpu-vulkan"],
+            Variant::WhisperNative,
+            Variant::OnnxAvx2,
+        );
+        inv.binary_path = "/nix/store/abc-voxtype-vulkan-1.3.1/bin/voxtype".into();
+        inv.package_lib_dir = None;
+        let cfg = config_with_engine(TranscriptionEngine::Parakeet);
+        let m = detect_mismatch(&cfg, &inv).expect("should detect");
+        assert!(matches!(
+            m.remediation,
+            Remediation::NixPackage {
+                feature: "parakeet"
+            }
+        ));
+        let text = m.explanation_with(&crate::setup::install_hint::Hint::Nix {
+            package: Some("onnx"),
+            feature: Some("parakeet"),
+        });
+        assert!(
+            text.starts_with("This voxtype flake package was built without --features parakeet."),
+            "{text}"
+        );
+        assert!(text.contains("voxtype.packages.${system}.onnx"), "{text}");
+        assert!(!text.contains("source build"), "{text}");
+        assert!(!text.contains("rebuild"), "{text}");
+    }
+
+    #[test]
+    fn explanation_names_the_package_fix_for_package_installs() {
+        use crate::setup::install_hint::Hint;
+        let inv = fake_inventory(
+            InstallKind::Package,
+            vec![],
+            Variant::WhisperAvx2,
+            Variant::OnnxAvx2,
+        );
+        let m = detect_mismatch(&config_with_engine(TranscriptionEngine::Moonshine), &inv)
+            .expect("should detect");
+
+        let switch = m.explanation_with(&Hint::Switch {
+            command: "sudo voxtype setup onnx --enable",
+        });
+        assert_eq!(
+            switch,
+            "voxtype-avx2 was built without --features moonshine. \
+             Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+             to switch to voxtype-onnx-avx2."
+        );
+
+        let aur = m.explanation_with(&Hint::AurVariant {
+            token: "onnx-avx2".into(),
+        });
+        assert!(aur.contains("no installed variant has it"), "{aur}");
+        assert!(
+            aur.contains("VOXTYPE_VARIANTS=onnx-avx2 yay -S --rebuild voxtype-bin"),
+            "{aur}"
+        );
+        assert!(!aur.contains("--features moonshine."), "{aur}");
+
+        let reinstall = m.explanation_with(&Hint::Reinstall {
+            method: crate::model_upgrade::InstallMethod::Dpkg("voxtype".into()),
+        });
+        assert!(
+            reinstall.contains("sudo apt install --reinstall voxtype"),
+            "{reinstall}"
+        );
+        assert!(!reinstall.contains("source build"), "{reinstall}");
+    }
+
+    #[test]
+    fn explanation_says_rebuild_only_for_source_builds() {
+        let inv = fake_inventory(
+            InstallKind::Source,
+            vec![],
+            Variant::WhisperNative,
+            Variant::OnnxNative,
+        );
+        let m = detect_mismatch(&config_with_engine(TranscriptionEngine::Cohere), &inv)
+            .expect("should detect");
+        assert_eq!(
+            m.explanation_with(&crate::setup::install_hint::Hint::Rebuild {
+                feature: Some("cohere")
+            }),
+            "This source build was compiled without --features cohere. \
+             To enable the cohere engine, rebuild with --features cohere."
+        );
     }
 
     #[test]

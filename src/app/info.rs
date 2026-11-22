@@ -504,6 +504,13 @@ fn print_variants_text(inv: &setup::binary::Inventory, config: &Config) {
 
     println!();
     if matches!(inv.install_kind, InstallKind::Source) {
+        if setup::install_hint::is_nix_store_path(&inv.binary_path) {
+            let running = setup::install_hint::running_nix_package();
+            for line in setup::install_hint::nix_status_lines(&inv.binary_path, running) {
+                println!("{line}");
+            }
+            return;
+        }
         println!("Source build: variant switching not applicable.");
         println!("To enable a different engine, rebuild with the appropriate Cargo features.");
         return;

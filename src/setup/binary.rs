@@ -1035,6 +1035,17 @@ pub fn inventory() -> Inventory {
 /// Rewrite `/usr/bin/voxtype` to point at the requested variant's binary.
 /// Requires write access to `/usr/bin/`; callers should run with sudo.
 pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
+    if super::install_hint::running_from_nix() {
+        anyhow::bail!(
+            "{}",
+            super::install_hint::nix_switch_refusal(
+                &format!("setup variant --to {}", variant.binary_name()),
+                variant,
+                super::install_hint::running_nix_package()
+            )
+        );
+    }
+
     let binary_path = Path::new(LIB_DIR).join(variant.binary_name());
 
     if !binary_path.exists() {

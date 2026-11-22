@@ -955,7 +955,9 @@ pub fn variant_check(mismatch: Option<&super::variant_check::VariantMismatch>) -
             // A source build is judged by its own features, whatever the
             // package symlink points at.
             let binary = match (&m.remediation, m.active_variant_name.as_deref()) {
-                (Remediation::Rebuild { .. }, _) | (_, None) => "this voxtype build",
+                (Remediation::Rebuild { .. } | Remediation::NixPackage { .. }, _) | (_, None) => {
+                    "this voxtype build"
+                }
                 (_, Some(name)) => name,
             };
             Check::error(

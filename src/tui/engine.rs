@@ -600,8 +600,13 @@ impl EngineState {
             };
             if !supported {
                 self.binary_switch_blocked = Some(
-                    "Source build: rebuild voxtype with the corresponding \
-                     Cargo feature for this engine.",
+                    if crate::setup::install_hint::is_nix_store_path(&inv.binary_path) {
+                        "Nix install: set programs.voxtype.package to the voxtype \
+                         flake's onnx package (or onnx-cuda, onnx-migraphx) for this engine."
+                    } else {
+                        "Source build: rebuild voxtype with the corresponding \
+                         Cargo feature for this engine."
+                    },
                 );
             }
             return;
