@@ -397,6 +397,7 @@ fn listener_is_ours(_port: u16) -> bool {
 
 /// Whether a `/proc/net/tcp{,6}` table has a socket listening on `port`
 /// owned by `uid`.
+#[cfg(target_os = "linux")]
 fn proc_net_has_listener(table: &str, port: u16, uid: u32) -> bool {
     table.lines().skip(1).any(|line| {
         let cols: Vec<&str> = line.split_whitespace().collect();
@@ -619,6 +620,7 @@ mod tests {
         assert!(server.requests().is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn proc_net_listener_ownership() {
         let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\

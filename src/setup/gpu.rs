@@ -1632,7 +1632,9 @@ mod tests {
         move |n| names.contains(&n)
     }
 
-    use super::{cpu_fallback_hint, pick_cpu_backend, Backend};
+    #[cfg(target_arch = "x86_64")]
+    use super::pick_cpu_backend;
+    use super::{cpu_fallback_hint, Backend};
 
     /// `setup gpu --disable` on a pre-AVX2 machine used to pick voxtype-avx2.
     #[test]
