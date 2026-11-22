@@ -374,6 +374,11 @@ fi
   bare whisper on PATH is never used as whisper-cli
 - Meeting summaries, Ask and dictation cleanup can use Omarchy's local
   model or any OpenAI-compatible server
+- Dictation history works below system links such as macOS's /var and
+  /tmp and atomic Fedora's /home, where it recorded nothing before
+- Whisper retries with beam search when the decoder loops on a phrase,
+  and drops the repeated copy when a reduced audio context restarts
+  the transcript (#827, #898)
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
