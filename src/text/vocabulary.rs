@@ -23,12 +23,16 @@ struct Term {
 }
 
 impl Vocabulary {
-    /// Load inline terms and an optional JSON terms file.
+    /// Load inline terms and an optional JSON terms file. A terms file
+    /// written `~/...` is read from the home directory.
     pub fn load(config: &VocabularyConfig) -> Result<Self, VocabularyLoadError> {
         let mut terms = config.terms.clone();
-        if let Some(path) = &config.terms_file {
+        if let Some(configured) = &config.terms_file {
+            let path = configured
+                .to_str()
+                .map_or_else(|| configured.clone(), crate::llm::expand_home);
             let contents =
-                fs::read_to_string(path).map_err(|source| VocabularyLoadError::Read {
+                fs::read_to_string(&path).map_err(|source| VocabularyLoadError::Read {
                     path: path.display().to_string(),
                     source,
                 })?;
@@ -287,5 +291,35 @@ mod tests {
             vocabulary.correct("Vox tipe uses pipe wire and tail scale"),
             "Voxtype uses PipeWire and Tailscale"
         );
+    }
+
+    /// A terms file under the home directory can be written `~/...`, as
+    /// config.toml paths usually are. Runs in its own process with a
+    /// scratch HOME, so it never reads the real home directory.
+    #[test]
+    fn terms_file_expands_a_leading_tilde() {
+        let scratch = tempfile::tempdir().unwrap();
+        if !crate::test_support::own_process(
+            "text::vocabulary::tests::terms_file_expands_a_leading_tilde",
+            |child| {
+                child.env("HOME", scratch.path());
+            },
+        ) {
+            return;
+        }
+        let home = std::env::var_os("HOME").unwrap();
+        std::fs::write(
+            std::path::Path::new(&home).join("terms.json"),
+            r#"["PipeWire"]"#,
+        )
+        .unwrap();
+
+        let vocabulary = Vocabulary::load(&VocabularyConfig {
+            terms: Vec::new(),
+            terms_file: Some("~/terms.json".into()),
+        })
+        .unwrap();
+
+        assert_eq!(vocabulary.terms().collect::<Vec<_>>(), ["PipeWire"]);
     }
 }

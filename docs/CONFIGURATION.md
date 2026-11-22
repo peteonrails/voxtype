@@ -3469,7 +3469,7 @@ output_mode = "clipboard"
 
 [profiles.code.vocabulary]
 terms = ["Voxtype", "Hyprland", "PipeWire"]
-terms_file = "/home/me/.config/voxtype/work-terms.json"
+terms_file = "~/.config/voxtype/work-terms.json"
 
 [profiles.email]
 post_process_command = "ollama run llama3.2:1b 'Format as professional email:'"
@@ -3506,7 +3506,8 @@ runs last and can override it.
 **Default:** None
 **Required:** No
 
-Path to a UTF-8 JSON array of additional terms, for example:
+Path to a UTF-8 JSON array of additional terms. A leading `~/` means your home
+directory. For example:
 
 ```json
 ["Shae Wilde", "PipeWire", "Tailscale"]

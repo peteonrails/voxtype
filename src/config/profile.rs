@@ -13,7 +13,8 @@ pub struct VocabularyConfig {
     #[serde(default)]
     pub terms: Vec<String>,
 
-    /// JSON file containing an array of additional terms.
+    /// JSON file containing an array of additional terms. A leading `~/`
+    /// means the home directory.
     #[serde(default)]
     pub terms_file: Option<PathBuf>,
 }
