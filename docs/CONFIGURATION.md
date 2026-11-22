@@ -2141,7 +2141,7 @@ terms = ["Voxtype", "Hyprland", "tokio-tungstenite"]
 **Default:** unset
 **Required:** No
 
-Path to a JSON file containing a list of vocabulary boost terms — `["term1", "term2", ...]`. Loaded once at daemon startup and merged into `context.terms`. Useful for sharing a corrections list across multiple voxtype config snapshots or projects.
+Path to a JSON file containing a list of vocabulary boost terms — `["term1", "term2", ...]`. A leading `~/` means your home directory. Loaded once at daemon startup and merged into `context.terms`. Useful for sharing a corrections list across multiple voxtype config snapshots or projects.
 
 ```toml
 [soniox]
