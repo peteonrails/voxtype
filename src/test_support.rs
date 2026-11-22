@@ -6,6 +6,29 @@ use std::path::Path;
 /// script it writes exits at once when it sees it.
 pub const PROBE_ENV: &str = "VOXTYPE_TEST_SCRIPT_PROBE";
 
+/// The environment variable that lets tests create real uinput devices or
+/// open real evdev devices. See [`real_input_devices_allowed`].
+pub const REAL_INPUT_DEVICES_ENV: &str = "VOXTYPE_TEST_UINPUT";
+
+/// Whether a test that creates a real uinput device, or opens a real evdev
+/// device, may run. Off unless `VOXTYPE_TEST_UINPUT=1`.
+///
+/// A uinput device is a real keyboard to the desktop: when /dev/uinput is
+/// writable, the compositor picks it up and the keys a test emits can land
+/// in whatever window has focus. These tests belong in a VM or a session
+/// nobody is typing in, so `cargo test` skips them by default and says why.
+pub fn real_input_devices_allowed(test: &str) -> bool {
+    if std::env::var(REAL_INPUT_DEVICES_ENV).as_deref() == Ok("1") {
+        return true;
+    }
+    eprintln!(
+        "skipping {test}: it uses a real input device that the desktop session can see \
+         (keys it emits can reach the focused window). Set {REAL_INPUT_DEVICES_ENV}=1 \
+         to run it, in a VM or a session you are not using."
+    );
+    false
+}
+
 /// Write an executable script that is safe to run straight away.
 ///
 /// Writing a file and then executing it races with any other thread that
@@ -224,5 +247,42 @@ mod tests {
         let safe = hammer(2000, true);
         eprintln!("write_script: {safe}/2000 runs failed with ETXTBSY");
         assert_eq!(safe, 0);
+    }
+}
+
+#[cfg(test)]
+mod real_input_gate {
+    /// Every test that builds a uinput device must ask
+    /// [`super::real_input_devices_allowed`] first, so a plain `cargo test`
+    /// never creates a keyboard the desktop can see.
+    #[test]
+    fn every_uinput_device_in_the_tree_is_behind_the_opt_in() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        walk(&root.join("src"), &mut files);
+        walk(&root.join("tests"), &mut files);
+        let builder = ["VirtualDevice", "::builder()"].concat();
+        let gate = ["real_input_devices_allowed", "("].concat();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let devices = text.matches(builder.as_str()).count();
+            let gates = text.matches(gate.as_str()).count();
+            assert!(
+                gates >= devices,
+                "{}: {devices} uinput device(s) but {gates} opt-in check(s); \
+                 call crate::test_support::real_input_devices_allowed first",
+                file.display()
+            );
+        }
     }
 }

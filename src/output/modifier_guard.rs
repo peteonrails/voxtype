@@ -191,6 +191,11 @@ mod tests {
 
     #[test]
     fn new_does_not_panic_without_permission() {
+        // Opens the real keyboards under /dev/input (read-only, no grab).
+        if !crate::test_support::real_input_devices_allowed("new_does_not_panic_without_permission")
+        {
+            return;
+        }
         // Whether or not /dev/input is readable in the test environment, this
         // must produce a usable guard rather than panicking. The test runner
         // is typically not in the 'input' group, so we expect Disabled.

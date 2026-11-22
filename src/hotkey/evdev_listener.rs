@@ -1319,6 +1319,11 @@ mod tests {
 
     #[test]
     fn poll_guard_drops_real_torn_down_evdev_device() {
+        if !crate::test_support::real_input_devices_allowed(
+            "poll_guard_drops_real_torn_down_evdev_device",
+        ) {
+            return;
+        }
         use evdev::{uinput::VirtualDevice, AttributeSet};
         use std::thread::sleep;
         use std::time::Duration;
@@ -1420,6 +1425,11 @@ mod tests {
 
     #[test]
     fn synced_fetch_recovers_multiple_held_keys_after_overflow() {
+        if !crate::test_support::real_input_devices_allowed(
+            "synced_fetch_recovers_multiple_held_keys_after_overflow",
+        ) {
+            return;
+        }
         use evdev::{uinput::VirtualDevice, AttributeSet, InputEvent};
         use std::thread::sleep;
         use std::time::Duration;
