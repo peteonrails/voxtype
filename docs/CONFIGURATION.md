@@ -3515,9 +3515,10 @@ post_process_timeout_ms = 45000
 Canonical spellings for product names, people, acronyms, and jargon used by
 this profile. Voxtype sends the terms through each backend's native vocabulary
 mechanism when one exists: the local Whisper and whisper-cli prompts, the
-OpenAI-compatible remote `prompt` field, and Soniox `context.terms`. An
-explicit `[whisper] initial_prompt` or `[soniox] terms` list is preserved and
-the profile terms are appended.
+OpenAI-compatible remote `prompt` field, Soniox `context.terms`, and Deepgram
+`keyterm` (nova-3) or `keywords` (older models). An explicit
+`[whisper] initial_prompt` or `[soniox] terms` list is preserved and the
+profile terms are appended.
 
 When text becomes final, Voxtype also corrects only unambiguous phonetic
 near-matches. Provisional streaming text is not corrected. Exact

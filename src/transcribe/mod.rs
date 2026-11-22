@@ -13,7 +13,7 @@
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
-//! - Deepgram batch transcription over HTTPS (available in every binary)
+//! - Deepgram cloud transcription, streamed over WebSocket or sent whole over HTTPS (available in every binary)
 
 pub mod audio;
 pub mod cli;

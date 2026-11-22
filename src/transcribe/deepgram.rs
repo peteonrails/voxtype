@@ -38,13 +38,21 @@ use tokio_tungstenite::tungstenite::Message;
 /// Either one takes precedence over `[deepgram] api_key`.
 pub const API_KEY_ENV_VARS: [&str; 2] = ["VOXTYPE_DEEPGRAM_API_KEY", "DEEPGRAM_API_KEY"];
 
-/// Deepgram's limit on `keyterm`: 500 tokens across all terms.
+/// Deepgram's limits on `keyterm`: 100 terms and 500 tokens across all of
+/// them, refusing a request over either.
 /// https://developers.deepgram.com/docs/keyterm
 const KEYTERM_TOKEN_BUDGET: usize = 500;
 
-/// Deepgram's limit on the older `keywords` parameter: 100 terms.
+/// Deepgram does not publish how it counts keyterm tokens: its staff put the
+/// count closer to syllables than words, and 170 one-word terms, mostly
+/// codes such as "EZS93AV", went over 500 (deepgram/deepgram-python-sdk#503).
+/// Counting a token per two characters stays under the limit for both.
+const KEYTERM_CHARS_PER_TOKEN: usize = 2;
+
+/// Deepgram's limit on the number of terms, for `keyterm` and the older
+/// `keywords` parameter alike.
 /// https://developers.deepgram.com/docs/keywords
-const KEYWORDS_TERM_LIMIT: usize = 100;
+const VOCABULARY_TERM_LIMIT: usize = 100;
 
 /// Deepgram drops audio in the first ~200-300 ms after the socket opens. A
 /// short silence ahead of the microphone keeps the first word.
@@ -566,33 +574,37 @@ fn silence_primer() -> Vec<u8> {
     vec![0u8; (SILENCE_PRIMER_MS * SAMPLE_RATE as u64 / 1000 * 2) as usize]
 }
 
-/// nova-3 and flux take `keyterm`; older models (nova-2, nova, enhanced,
-/// base) take `keywords`. nova-3 refuses `keywords` with a 400, so a request
-/// carries one or the other, never both.
+/// nova-3 takes `keyterm`; older models (nova-2, nova, enhanced, base) take
+/// `keywords`. nova-3 refuses `keywords` with a 400, so a request carries
+/// one or the other, never both. (Flux also takes `keyterm`, but only on
+/// `/v2/listen`, which this engine does not use.)
 fn uses_keyterms(model: &str) -> bool {
-    model.starts_with("nova-3") || model.starts_with("flux")
+    model.starts_with("nova-3")
 }
 
-/// Keep the vocabulary within the parameter's limit: 500 tokens for
-/// `keyterm` (counting whitespace-separated words), 100 terms for
-/// `keywords`. Terms past the limit are dropped, and named in a warning.
+/// The tokens Deepgram is likely to count for one keyterm, rounded up: at
+/// least one per word, and one per `KEYTERM_CHARS_PER_TOKEN` characters.
+fn estimated_tokens(term: &str) -> usize {
+    let words = term.split_whitespace().count();
+    let chars = term.chars().filter(|c| !c.is_whitespace()).count();
+    words.max(chars.div_ceil(KEYTERM_CHARS_PER_TOKEN)).max(1)
+}
+
+/// Keep the vocabulary within Deepgram's limits: 100 terms, and for
+/// `keyterm` an estimated 500 tokens. Terms past a limit are dropped, and
+/// named in a warning.
 fn budget_terms(terms: Vec<String>, keyterm_mode: bool) -> Vec<String> {
     let mut used = 0usize;
     let mut kept: Vec<String> = Vec::new();
     let mut dropped: Vec<String> = Vec::new();
     for term in terms {
-        let fits = if keyterm_mode {
-            let cost = term.split_whitespace().count().max(1);
-            if used + cost <= KEYTERM_TOKEN_BUDGET {
-                used += cost;
-                true
-            } else {
-                false
-            }
+        let cost = if keyterm_mode {
+            estimated_tokens(&term)
         } else {
-            kept.len() < KEYWORDS_TERM_LIMIT
+            0
         };
-        if fits {
+        if kept.len() < VOCABULARY_TERM_LIMIT && used + cost <= KEYTERM_TOKEN_BUDGET {
+            used += cost;
             kept.push(term);
         } else {
             dropped.push(term);
@@ -602,9 +614,9 @@ fn budget_terms(terms: Vec<String>, keyterm_mode: bool) -> Vec<String> {
         tracing::warn!(
             "Deepgram vocabulary exceeds the {} limit; dropped: {}",
             if keyterm_mode {
-                format!("{KEYTERM_TOKEN_BUDGET}-token keyterm")
+                format!("{VOCABULARY_TERM_LIMIT}-term, {KEYTERM_TOKEN_BUDGET}-token keyterm")
             } else {
-                format!("{KEYWORDS_TERM_LIMIT}-keyword")
+                format!("{VOCABULARY_TERM_LIMIT}-keyword")
             },
             dropped.join(", ")
         );
@@ -884,27 +896,36 @@ mod tests {
     fn keyterm_models_selected_by_prefix() {
         assert!(uses_keyterms("nova-3"));
         assert!(uses_keyterms("nova-3-medical"));
-        assert!(uses_keyterms("flux-general-en"));
         assert!(!uses_keyterms("nova-2"));
         assert!(!uses_keyterms("enhanced"));
         assert!(!uses_keyterms("base"));
     }
 
     #[test]
-    fn budget_keeps_keyterms_within_500_tokens() {
-        // 260 two-word terms are 520 tokens; 250 of them fit.
-        let terms: Vec<String> = (0..260).map(|i| format!("term number{i}")).collect();
+    fn keyterms_stop_at_100_terms() {
+        let terms: Vec<String> = (0..150).map(|i| format!("t{i}")).collect();
         let kept = budget_terms(terms, true);
-        assert_eq!(kept.len(), 250);
-        assert_eq!(kept[0], "term number0");
+        assert_eq!(kept.len(), 100);
+        assert_eq!(kept[0], "t0");
+    }
+
+    #[test]
+    fn keyterm_tokens_are_estimated_from_characters() {
+        // 30 characters each, fifteen estimated tokens: 33 fit in 500.
+        let terms: Vec<String> = (0..60).map(|i| format!("{i:0>30}")).collect();
+        let kept = budget_terms(terms, true);
+        assert_eq!(kept.len(), 33);
+        // Each word is at least one token.
+        assert_eq!(estimated_tokens("a b c d"), 4);
+        assert_eq!(estimated_tokens("Hyprland"), 4);
     }
 
     #[test]
     fn budget_caps_keywords_at_100_terms() {
-        let terms: Vec<String> = (0..150).map(|i| format!("term{i}")).collect();
+        let terms: Vec<String> = (0..150).map(|i| format!("term number{i}")).collect();
         let kept = budget_terms(terms, false);
         assert_eq!(kept.len(), 100);
-        assert_eq!(kept[0], "term0");
+        assert_eq!(kept[0], "term number0");
     }
 
     #[test]
@@ -1097,6 +1118,11 @@ mod tests {
         CloseEarly,
         /// The handshake is refused with 401.
         Unauthorized,
+        /// Deepgram reports an error after the first audio frame.
+        DeepgramError,
+        /// One final while audio flows; the stop is never answered and the
+        /// socket stays open.
+        Silent,
     }
 
     /// What the fake server saw during one session.
@@ -1161,6 +1187,11 @@ mod tests {
                                 let _ = ws.close(None).await;
                                 break;
                             }
+                            Script::DeepgramError => {
+                                let error =
+                                    r#"{"type":"Error","description":"NET-0001: no audio"}"#;
+                                ws.send(Message::Text(error.into())).await.unwrap();
+                            }
                             _ => {
                                 ws.send(Message::Text(FIRST_FINAL.into())).await.unwrap();
                                 ws.send(Message::Text(INTERIM.into())).await.unwrap();
@@ -1199,11 +1230,19 @@ mod tests {
     /// Run one dictation of `chunks` 100 ms chunks against `script` and
     /// return the finals, the error (if any) and what the server saw.
     async fn dictate(script: Script, chunks: usize) -> (Vec<String>, Option<String>, Seen) {
+        dictate_within(script, chunks, 5).await
+    }
+
+    async fn dictate_within(
+        script: Script,
+        chunks: usize,
+        timeout_secs: u64,
+    ) -> (Vec<String>, Option<String>, Seen) {
         let (endpoint, server) = fake_deepgram(script).await;
         let transcriber = new_transcriber(DeepgramConfig {
             endpoint,
             api_key: Some("stream-key".into()),
-            timeout_secs: 5,
+            timeout_secs,
             ..Default::default()
         });
         let (samples_tx, samples_rx) = mpsc::channel(16);
@@ -1276,6 +1315,27 @@ mod tests {
         assert!(error.contains("authentication failed"), "{error}");
         assert!(error.contains("401"), "{error}");
         assert_eq!(seen.audio_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn a_deepgram_error_message_ends_the_stream_with_it() {
+        let (finals, error, seen) = dictate(Script::DeepgramError, 3).await;
+        assert!(finals.is_empty());
+        let error = error.expect("Deepgram's error is reported");
+        assert!(
+            error.contains("Deepgram error: NET-0001: no audio"),
+            "{error}"
+        );
+        // The connection is released after the error.
+        assert_eq!(seen.control, [CLOSE_STREAM_FRAME]);
+    }
+
+    #[tokio::test]
+    async fn a_stop_deepgram_never_answers_times_out() {
+        let (finals, error, _) = dictate_within(Script::Silent, 2, 1).await;
+        assert_eq!(finals, ["Hello world."]);
+        let error = error.expect("the drain timeout is reported");
+        assert!(error.contains("did not finish within 1s"), "{error}");
     }
 
     #[tokio::test]

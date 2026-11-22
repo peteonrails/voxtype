@@ -1069,7 +1069,7 @@ mip_opt_out = true
 streaming = true
 ```
 
-With `streaming = true` (the default), audio streams to Deepgram while you speak and each phrase is typed when Deepgram finalizes it at a pause, so the last words appear a fraction of a second after you stop. With `streaming = false`, Voxtype uploads one completed WAV after recording stops, then inserts the transcript. `voxtype transcribe` and meeting mode always send finished recordings. See [DEEPGRAM.md](DEEPGRAM.md) for credentials, privacy, language detection, and error handling.
+With `streaming = true` (the default), audio streams to Deepgram while you speak and each phrase is typed when Deepgram finalizes it at a pause, so the last words appear a fraction of a second after you stop. Streaming switches the built-in push-to-talk hotkey to toggle mode, as Soniox does. With `streaming = false`, Voxtype uploads one completed WAV after recording stops, then inserts the transcript. `voxtype transcribe` and meeting mode always send finished recordings. See [DEEPGRAM.md](DEEPGRAM.md) for credentials, privacy, language detection, and error handling.
 
 ### Cloud Backend: Soniox
 
@@ -3067,8 +3067,8 @@ Each profile can override these settings:
 - If a profile doesn't specify an option, the default from your config is used
 - Unknown profile names log a warning and fall back to default behavior
 - Profiles work with all recording modes (evdev hotkey, compositor keybindings)
-- Profile terms bias Whisper-compatible and Soniox backends without replacing
-  an explicit backend prompt or Soniox terms list
+- Profile terms bias Whisper-compatible, Soniox and Deepgram backends without
+  replacing an explicit backend prompt or Soniox terms list
 - Vocabulary correction runs when batch or streaming text becomes final;
   provisional streaming text is left untouched
 - `[text.replacements]` runs after vocabulary correction and can override it

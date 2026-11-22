@@ -108,7 +108,7 @@ pub struct Config {
     #[serde(default)]
     pub streaming_recovery: Option<StreamingRecoveryConfig>,
 
-    /// Deepgram cloud batch STT configuration
+    /// Deepgram cloud STT configuration, streaming and batch
     /// (optional, only used when engine = "deepgram")
     #[serde(default)]
     pub deepgram: Option<DeepgramConfig>,

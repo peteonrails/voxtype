@@ -33,6 +33,8 @@ endpoint = "https://api.deepgram.com/v1/listen"
 
 Deepgram detects the language of a finished recording only. With `language = "auto"`, a streamed dictation is transcribed as English; set the language you speak, or `multi`.
 
+With `streaming = true`, the built-in push-to-talk hotkey switches to toggle mode, as it does for Soniox: text is typed while you speak, so the key does not have to be held. Compositor bindings that call `voxtype record start` and `voxtype record stop` work unchanged.
+
 ## Credentials
 
 Set `DEEPGRAM_API_KEY` (or `VOXTYPE_DEEPGRAM_API_KEY`) in the daemon environment. Either takes precedence over the optional `[deepgram] api_key` fallback:
@@ -54,11 +56,11 @@ The configuration TUI reports whether a credential came from the environment or 
 
 ## Vocabulary
 
-Profile vocabulary (`[profiles.<name>.vocabulary]`) reaches Deepgram as `keyterm` on nova-3 and flux models and as `keywords` on older models, within each parameter's limit (500 keyterm tokens, 100 keywords). Terms past the limit are dropped with a warning in the log.
+Profile vocabulary (`[profiles.<name>.vocabulary]`) reaches Deepgram as `keyterm` on nova-3 models and as `keywords` on older models. Deepgram accepts up to 100 terms and 500 tokens of `keyterm`, or 100 `keywords`, and refuses a request over the limit. Deepgram does not publish how it counts tokens, so Voxtype counts about three characters per token, which is more than most words take, and drops the terms past the limit with a warning in the log.
 
 ## Request behavior
 
-**Streaming.** Voxtype opens a WebSocket to the realtime API when recording starts, authenticated with an `Authorization: Token ...` header, and sends 16 kHz mono 16-bit PCM as it is captured. Deepgram returns a final transcript for each segment, at a pause in speech, and Voxtype types each one as it arrives (or holds them, in file output). When recording stops, Voxtype asks Deepgram to finalize the last segment and close the stream; with audio arriving at microphone speed, that answer takes a fraction of a second. If the stream fails before it produces any text, Voxtype transcribes the recording through the pre-recorded API instead.
+**Streaming.** Voxtype opens a WebSocket to the realtime API when recording starts, authenticated with an `Authorization: Token ...` header, and sends 16 kHz mono 16-bit PCM as it is captured. Deepgram returns a final transcript for each segment, at a pause in speech, and Voxtype types each one as it arrives (or holds them, in file output). When recording stops, Voxtype asks Deepgram to finalize the last segment and close the stream; with audio arriving at microphone speed, that answer takes a fraction of a second, and Voxtype types it after the text already typed. If the stream fails before it produces any text, Voxtype transcribes the recording through the pre-recorded API instead.
 
 **Finished recordings.** Voxtype encodes the 16 kHz mono recording as PCM WAV and sends one HTTPS `POST` with `Content-Type: audio/wav`. The final transcript is processed and inserted at the cursor through the same output path as local engines.
 
