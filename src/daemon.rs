@@ -3082,10 +3082,11 @@ impl Daemon {
     /// like a batch dictation.
     fn deliver_buffered_streaming_text(&mut self, state: &mut State, text: String) {
         tracing::info!("Delivering buffered streaming text through normal output");
-        self.history_note(|p| p.transcribing(0));
         *state = State::Transcribing { audio: Vec::new() };
         self.update_state("transcribing");
-        self.active_transcriber = None;
+        // The engine that produced the text stays in `active_transcriber`:
+        // the result handler records its measured facts in history, as
+        // end_streaming does for a session that typed.
         self.transcription_task = Some(tokio::task::spawn_blocking(move || Ok(text)));
     }
 

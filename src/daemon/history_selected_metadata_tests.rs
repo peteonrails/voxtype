@@ -86,6 +86,57 @@ async fn history_selected_metadata_eager_empty() { selected_metadata_case("daemo
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn history_selected_metadata_eager_error() { selected_metadata_case("daemon::tests::history_contracts::history_selected_metadata_eager_error",true,true,false,false).await; }
 
+/// Text a streaming session held without typing it (text that arrived after a
+/// stop disowned the typing surface, or a buffered session's whole transcript)
+/// goes through the batch result path. Its history entry keeps the facts the
+/// engine measured, as it does for a session that typed.
+async fn held_stream_text_metadata(name: &str, buffered: bool) {
+    if !enter_private_case(name) { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut daemon = fidelity_daemon(root.path());
+    // Not file output: end_streaming writes a file itself, without the batch path.
+    daemon.config.output.mode = crate::config::OutputMode::Type;
+    daemon.config.output.streaming_buffer_output = buffered;
+    let delivered = Arc::new(std::sync::Mutex::new(None));
+    daemon.history_test_output_chain = Some(vec![Box::new(RecordingOutput { got: delivered.clone(), succeed: true })]);
+    let typed = Arc::new(std::sync::Mutex::new(None));
+    daemon.history_test_streaming_chain = Some(vec![Box::new(RecordingOutput { got: typed.clone(), succeed: true })]);
+    let selected: Arc<dyn Transcriber> = Arc::new(SelectedMetadataFixture { fail: false, empty: false, attempted: std::sync::atomic::AtomicBool::new(false) });
+    let adapter = crate::transcribe::SlidingWindowStreamingTranscriber::new(selected.clone(), crate::transcribe::SlidingWindowConfig { interval_s: 0.02, min_audio_s: 0.0, min_speech_rms: 0.0, ..Default::default() });
+    daemon.transcriber_preloaded = Some(Arc::new(adapter));
+    daemon.history_test_capture = Some(Box::new(StreamingFidelityAudio { samples: vec![0.2;16000], stop: None, delivered: None }));
+    let mut state = State::Idle;
+    let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
+    assert!(daemon.try_start_streaming(&mut state, &mut capture, &mut handle, &mut session, &mut chain, None, false).await);
+    let mut stopped = false;
+    while state.is_streaming() {
+        let event = tokio::time::timeout(Duration::from_secs(10), handle.as_mut().unwrap().events.recv()).await.unwrap();
+        // Stop before the first event is routed, so that without buffering
+        // the session also holds every word instead of typing it.
+        if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await; stopped = true; }
+        daemon.handle_streaming_event(event, &mut state, &mut capture, &mut handle, &mut session, &mut chain).await;
+    }
+    let task = daemon.transcription_task.take().expect("held text must reach the batch result path");
+    daemon.handle_transcription_result(&mut state, task.await).await;
+    let entries = wait_for_entries(root.path(), 1).await;
+    let entry = &entries[0];
+    println!("HELD_STREAM_TEXT_METADATA {}", serde_json::json!({"buffered":buffered,"entry":entry}));
+    assert_eq!(*typed.lock().unwrap(), None, "nothing may be typed while streaming");
+    assert!(delivered.lock().unwrap().is_some(), "the batch path delivers the held text");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entry.outcome, crate::history::Outcome::Delivered);
+    assert_eq!(entry.raw_text, "Controlled selected transcript");
+    assert_eq!(entry.model, "measured-selected-not-configured.bin");
+    assert_eq!(entry.backend.as_deref(), Some("controlled-measured-backend"));
+    assert_eq!(entry.language.as_deref(), Some("de"));
+    assert_eq!(entry.model_load_ms, Some(29));
+    assert_eq!(entry.audio_ms, 16000 / 16, "the capture's length, recorded at stop");
+}
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn history_selected_metadata_stream_held_after_stop() { held_stream_text_metadata("daemon::tests::history_contracts::history_selected_metadata_stream_held_after_stop", false).await; }
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn history_selected_metadata_stream_buffered() { held_stream_text_metadata("daemon::tests::history_contracts::history_selected_metadata_stream_buffered", true).await; }
+
 async fn eager_chunk_error_contract(name: &str, poll: bool) {
     if !enter_private_case(name) { return; }
     let root = tempfile::tempdir().unwrap();
