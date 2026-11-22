@@ -1044,7 +1044,7 @@ type_delay_ms = 0
 
 [output.notification]
 # Show notification when recording starts (hotkey pressed).
-# Stays on screen until the recording ends.
+# Stays on screen until the recording ends; a recording that streams live shows "Streaming Active" for 2 seconds instead.
 on_recording_start = false
 
 # Show notification when recording stops (transcription begins)
