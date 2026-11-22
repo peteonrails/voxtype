@@ -109,7 +109,7 @@ Then disable the built-in hotkey in your config:
 enabled = false
 ```
 
-> **X11 / Built-in hotkey fallback:** If you're on X11 or prefer voxtype's built-in hotkey (ScrollLock by default), add yourself to the `input` group: `sudo usermod -aG input $USER` and log out/in. See the [User Manual](docs/USER_MANUAL.md) for details.
+> **X11 / Built-in hotkey fallback:** Where no keybinding tool can run `voxtype record`, voxtype's built-in hotkey (ScrollLock by default) reads the keyboard directly. That needs `input` group membership, which lets every program you run read every keystroke, so treat it as a trade-off rather than a setup step, and don't use it on Hyprland or Omarchy. See [The `input` group trade-off](docs/USER_MANUAL.md#the-input-group-trade-off).
 
 > **Omarchy / Multi-modifier keybindings:** If using keybindings with multiple modifiers (e.g., `SUPER+CTRL+X`), releasing keys slowly can cause typed text to trigger window manager shortcuts instead of inserting text. See [Modifier Key Interference](docs/TROUBLESHOOTING.md#modifier-key-interference-hyprlandsway) in the troubleshooting guide for the solution using output hooks and Hyprland submaps.
 
@@ -500,8 +500,8 @@ Results vary by hardware. Example on AMD RX 6800:
 
 ### Permissions
 
-- **Wayland compositors:** No special permissions needed when using compositor keybindings
-- **Built-in hotkey / X11:** User must be in the `input` group (for evdev access)
+- **Compositor keybindings (recommended):** No special permissions. Works on Hyprland, Sway, River, niri, KDE Plasma and GNOME.
+- **Built-in evdev hotkey (fallback):** Needs `input` group membership, which lets any program you run read every keystroke. Use it only where no keybinding can run `voxtype record`. See [The `input` group trade-off](docs/USER_MANUAL.md#the-input-group-trade-off).
 
 ### Installing Dependencies
 
@@ -608,16 +608,9 @@ Waybar config with model display:
 
 ### "Cannot open input device" error
 
-This only affects the built-in evdev hotkey. You have two options:
+This only affects the built-in evdev hotkey. Configure your compositor or desktop to call `voxtype record start/stop` (or `voxtype record toggle`) and disable the built-in hotkey with `[hotkey] enabled = false`. See "Compositor Keybindings" above.
 
-**Option 1: Use compositor keybindings (recommended)**
-Configure your compositor to call `voxtype record start/stop` and disable the built-in hotkey. See "Compositor Keybindings" above.
-
-**Option 2: Add yourself to the input group**
-```bash
-sudo usermod -aG input $USER
-# Log out and back in
-```
+Only where nothing can run `voxtype record` (some X11 window managers, the console) is the `input` group worth considering, and it lets every program you run read every keystroke. See [The `input` group trade-off](docs/USER_MANUAL.md#the-input-group-trade-off) before adding it.
 
 ### Text not appearing / typing not working
 
@@ -702,7 +695,7 @@ flowchart LR
 
 **Why compositor keybindings?** Wayland compositors like Hyprland, Sway, and River support key-release events, enabling push-to-talk without special permissions. Voxtype's `record start/stop` commands integrate directly with your compositor's keybinding system.
 
-**Fallback: evdev hotkey.** For X11 or compositors without key-release support, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires the user to be in the `input` group.
+**Fallback: evdev hotkey.** For desktops where nothing can run `voxtype record`, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires `input` group membership, which lets every program the user runs read all keystrokes, so it is a fallback with a security cost rather than the default.
 
 **Why wtype + dotool + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. When wtype fails (KDE/GNOME), direct dotool fallback provides keyboard layout support via XKB for non-US layouts. As a final fallback, ydotool uses uinput for text injection on X11/TTY. This combination ensures Voxtype works on any Linux desktop with proper keyboard layout support.
 

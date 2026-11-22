@@ -339,13 +339,10 @@ skill already sits at that path.
 After installation, you need to complete the initial setup:
 
 ```bash
-# 1. Ensure you're in the input group
-groups | grep input
-
-# 2. Run the setup wizard
+# 1. Run the setup wizard
 voxtype setup --download
 
-# 3. Start voxtype
+# 2. Start voxtype
 voxtype
 
 # If something doesn't work, ask voxtype what is wrong
@@ -357,6 +354,8 @@ The setup command will:
 - Verify permissions
 - Download the default Whisper model (base.en)
 - Create your configuration file
+
+Then bind `voxtype record start` and `voxtype record stop` (or `voxtype record toggle`) to a key in your compositor or desktop and set `[hotkey] enabled = false`. See [Compositor Keybindings](#compositor-keybindings). This needs no extra permissions. The built-in hotkey is the fallback for desktops without keybindings, and it needs `input` group access with a real security cost; see [The `input` group trade-off](#the-input-group-trade-off).
 
 ---
 
@@ -1235,7 +1234,7 @@ If you prefer to use your compositor's native keybindings instead of voxtype's b
 
 ### Why Use Compositor Keybindings?
 
-- **No `input` group membership required** - Voxtype's evdev-based hotkey detection requires being in the `input` group
+- **No `input` group membership required** - Voxtype's evdev-based hotkey detection requires the `input` group, which lets any program you run read every keystroke (see [The `input` group trade-off](#the-input-group-trade-off))
 - **Native feel** - Use familiar keybinding configuration patterns
 - **Modifier support** - Use any key combination your compositor supports (e.g., Super+V)
 
@@ -1328,6 +1327,16 @@ enabled = false
 
 Restart the voxtype daemon after changing the config.
 
+### niri
+
+niri binds run on key press only, so use toggle mode. In `~/.config/niri/config.kdl`:
+
+```kdl
+binds {
+    Mod+V { spawn "voxtype" "record" "toggle"; }
+}
+```
+
 ### Other Compositors/Desktops
 
 For other compositors without key release support (GNOME, etc.), use toggle mode:
@@ -1337,12 +1346,45 @@ For other compositors without key release support (GNOME, etc.), use toggle mode
 voxtype record toggle
 ```
 
+On GNOME, add it under **Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts**.
+
 ### Trade-offs
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| Built-in hotkey (evdev) | Universal, no config needed | Requires `input` group |
-| Compositor keybindings | Native feel, no `input` group | Compositor-specific config |
+| Compositor keybindings (recommended) | Native feel, no extra permissions | Compositor-specific config; toggle only where the compositor has no key-release binds |
+| Built-in hotkey (evdev) | Works without compositor support, including X11 and the TTY | Requires `input` group membership, which lets any of your programs read every keystroke |
+
+### The `input` group trade-off
+
+Use compositor keybindings whenever your desktop has them. That covers Hyprland, Sway, River, niri, KDE Plasma and GNOME. Only fall back to the built-in evdev hotkey when nothing else can trigger voxtype, such as on X11 window managers without a key-binding tool, the Linux console, or when you need hold-to-talk on a desktop that has only press bindings.
+
+The built-in hotkey reads `/dev/input/event*` directly, which only members of the `input` group may do. Membership is not limited to voxtype: every program you run, including a compromised browser extension helper or a malicious package script, can then read every key you press, passwords included. That is why some distributions remove users from the group on purpose. Omarchy did so in 4.0.2 as hardening, so on Omarchy and other Hyprland setups use a keybinding and leave the group alone.
+
+If you decide the evdev hotkey is worth that cost on your machine, add yourself to the group, then log out and back in:
+
+```bash
+sudo usermod -aG input $USER
+```
+
+To undo it later, run `sudo gpasswd -d $USER input` and log out.
+
+### Giving dotool and ydotool access to uinput
+
+dotool and ydotool type by creating a virtual keyboard through `/dev/uinput`. Many guides grant that by adding you to the `input` group, which also lets your programs read every keystroke (see above). Writing to `/dev/uinput` only needs a narrower grant. Prefer, in order:
+
+1. A driver that needs no device access: wtype on wlroots compositors (Hyprland, Sway, River, niri), eitype on GNOME and KDE.
+2. A dedicated group that can write to `/dev/uinput` and read nothing:
+
+```bash
+sudo groupadd -f uinput
+echo 'KERNEL=="uinput", GROUP="uinput", MODE="0660", OPTIONS+="static_node=uinput"' \
+  | sudo tee /etc/udev/rules.d/99-voxtype-uinput.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput
+sudo usermod -aG uinput $USER   # then log out and back in
+```
+
+This still lets your programs type into any window, so it is not free, but they can no longer read what you type. The `99-` prefix makes the rule apply after packaged rules (dotool ships one that hands uinput to `input`).
 
 ### Modifier Key Issues
 
@@ -2195,13 +2237,7 @@ For eitype (recommended for GNOME/KDE):
 cargo install eitype
 ```
 
-For dotool (recommended for non-US keyboards):
-```bash
-# Install dotool (check your distribution's package manager)
-# User must be in 'input' group for uinput access
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
-```
+For dotool (recommended for non-US keyboards), install it from your distribution's package manager, then give it write access to `/dev/uinput` through a dedicated group rather than the `input` group. See [Giving dotool and ydotool access to uinput](#giving-dotool-and-ydotool-access-to-uinput).
 
 For ydotool:
 
