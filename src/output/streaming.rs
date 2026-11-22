@@ -391,15 +391,13 @@ impl StreamingSession {
     /// File-output counterpart to `commit_segment`: same finalized_text
     /// bookkeeping, but skips `output_with_fallback` entirely — there's
     /// no cursor/focused window to type into when the session's target
-    /// is a file.
+    /// is a file. An empty `text` still commits the held partial: Soniox
+    /// sends an empty Final when the tokens it finalizes are the partial it
+    /// already sent.
     pub fn commit_segment_silent(&mut self, text: &str) {
         self.finalize_history_raw(text);
-        if text.is_empty() {
-            self.clear_partial();
-            return;
-        }
-        let finalized_tail = format!("{}{}", self.partial, text);
-        self.finalized_text.push_str(&finalized_tail);
+        self.finalized_text.push_str(&self.partial);
+        self.finalized_text.push_str(text);
         self.clear_partial();
     }
 
@@ -483,10 +481,10 @@ impl StreamingSession {
             let new_partial_len = self.partial.chars().count().saturating_sub(backspace);
             self.partial = self.partial.chars().take(new_partial_len).collect();
         }
-        if !text.is_empty() {
-            let finalized_tail = format!("{}{}", self.partial, text);
-            self.finalized_text.push_str(&finalized_tail);
-        }
+        // Like `commit_segment_silent`, an empty `text` still commits what
+        // is left of the partial.
+        self.finalized_text.push_str(&self.partial);
+        self.finalized_text.push_str(text);
         self.clear_partial();
     }
 
@@ -1108,6 +1106,29 @@ mod tests {
         session.observe_partial_delta(" wor");
         session.replace_and_commit_silent(999, "world");
         assert_eq!(session.finalized_text(), "helloworld");
+    }
+
+    /// Soniox sends an empty Final when the finalized tokens equal the
+    /// partial it already sent. The empty Final confirms that partial; it
+    /// must not drop it, as the typing path's `commit_segment` already knows.
+    #[test]
+    fn empty_silent_final_commits_the_held_partial() {
+        let mut session = StreamingSession::new();
+        session.commit_segment_silent("Hello.");
+        session.observe_partial_delta(" How are you?");
+        session.commit_segment_silent("");
+        assert_eq!(session.finalized_text(), "Hello. How are you?");
+        assert_eq!(session.partial(), "");
+    }
+
+    /// A revision with no new text still confirms the trimmed partial.
+    #[test]
+    fn empty_silent_replace_commits_the_trimmed_partial() {
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("Hello world,");
+        session.replace_and_commit_silent(1, "");
+        assert_eq!(session.finalized_text(), "Hello world");
+        assert_eq!(session.partial(), "");
     }
 
     #[tokio::test]
