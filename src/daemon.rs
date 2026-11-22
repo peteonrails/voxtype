@@ -2931,6 +2931,7 @@ impl Daemon {
         };
         self.update_state("transcribing");
 
+        let vocabulary = self.recording_vocabulary_terms();
         let preloaded = self.transcriber_preloaded.clone();
         let running_config = self.config.clone();
         let mut whisper_config = self.config.clone();
@@ -2941,7 +2942,7 @@ impl Daemon {
                 Arc<dyn Transcriber>,
                 crate::error::TranscribeError,
             > {
-                match (whisper, preloaded.clone()) {
+                let transcriber = match (whisper, preloaded.clone()) {
                     (true, _) => {
                         crate::transcribe::create_transcriber(&whisper_config).map(Arc::from)
                     }
@@ -2949,7 +2950,9 @@ impl Daemon {
                     (false, None) => {
                         crate::transcribe::create_transcriber(&running_config).map(Arc::from)
                     }
-                }
+                }?;
+                transcriber.set_vocabulary(&vocabulary);
+                Ok(transcriber)
             };
             match build(prefer_whisper) {
                 Ok(transcriber) => transcriber.transcribe(&samples),
@@ -8938,6 +8941,44 @@ while True:
             daemon.finish_eager_recording(&mut state, selected).await;
 
             assert_eq!(probe.transcribed_with(), [vec!["Voxtype".to_string()]]);
+        }
+
+        /// A streaming session that ends without text is recovered by a
+        /// freshly built batch transcriber, which gets the recording's
+        /// vocabulary like any other.
+        #[tokio::test]
+        async fn streaming_recovery_gets_the_recording_vocabulary() {
+            if !in_scratch_runtime("streaming_recovery_gets_the_recording_vocabulary") {
+                return;
+            }
+            let server = crate::llm::fake_server::FakeServer::start(vec![
+                crate::llm::fake_server::Reply::status(200, r#"{"text":"ok"}"#),
+            ]);
+            let dir = TempDir::new().unwrap();
+            let mut config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            config.vad.enabled = false;
+            config.whisper.mode = Some(crate::config::WhisperMode::Remote);
+            config.whisper.remote_endpoint = Some(format!("http://127.0.0.1:{}", server.port()));
+            let mut daemon = Daemon::new(config, None);
+
+            let mut state = streaming_state(None);
+            daemon
+                .recover_streaming_audio(&mut state, None, vec![0.0; 16_000])
+                .await;
+            let task = daemon.transcription_task.take().expect("recovery started");
+            assert_eq!(task.await.unwrap().unwrap(), "ok");
+
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0]
+                    .body
+                    .contains("name=\"prompt\"\r\n\r\nVoxtype\r\n"),
+                "no vocabulary prompt in the request"
+            );
         }
 
         #[tokio::test]
