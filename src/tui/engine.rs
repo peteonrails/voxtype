@@ -614,21 +614,24 @@ impl EngineState {
         }
 
         // Pick the recommended variant for the needed family on this hardware.
+        // No ONNX pick means no ONNX build runs on this CPU; the fallback
+        // below then finds nothing and blocks the switch.
         let target = if needed == EngineFamily::Whisper {
-            inv.recommendation.whisper
+            Some(inv.recommendation.whisper)
         } else {
             inv.recommendation.onnx
         };
 
         // Confirm the recommended variant is actually installed and runnable.
-        let runnable = inv
-            .variants
-            .iter()
-            .find(|s| s.variant == target)
-            .map(|s| s.installed && s.runs_on_this_cpu && s.gpu_available)
-            .unwrap_or(false);
+        let runnable = target.filter(|&target| {
+            inv.variants
+                .iter()
+                .find(|s| s.variant == target)
+                .map(|s| s.installed && s.runs_on_this_cpu && s.gpu_available)
+                .unwrap_or(false)
+        });
 
-        if runnable {
+        if let Some(target) = runnable {
             self.pending_variant_switch = Some(target);
         } else {
             // Fall back to any installed variant of the right family that

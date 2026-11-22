@@ -379,6 +379,8 @@ fi
 - Whisper retries with beam search when the decoder loops on a phrase,
   and drops the repeated copy when a reduced audio context restarts
   the transcript (#827, #898)
+- info variants recommends the baseline build on a CPU without AVX2, and
+  no longer the AVX2, Vulkan or ONNX builds that crash there
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including

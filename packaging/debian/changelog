@@ -34,6 +34,8 @@ voxtype (1.3.2-1) unstable; urgency=medium
   * Whisper retries with beam search when the decoder loops on a phrase,
     and drops the repeated copy when a reduced audio context restarts
     the transcript (#827, #898)
+  * info variants recommends the baseline build on a CPU without AVX2, and
+    no longer the AVX2, Vulkan or ONNX builds that crash there
 
  -- Peter Jackson <pete@peteonrails.com>  Sat, 21 Nov 2026 18:00:00 +0000
 

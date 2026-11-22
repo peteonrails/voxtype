@@ -49,7 +49,17 @@ impl VariantMismatch {
             .unwrap_or("the running binary");
         let hint = install_hint::hint(Need::Feature(self.required_feature));
         match (&self.remediation, &hint) {
-            (Remediation::SwitchToVariant { target }, Hint::Switch { command }) => format!(
+            (Remediation::SwitchToVariant { target: None }, _) => format!(
+                "{} was built without --features {}, and the builds that have it need a CPU \
+                 with AVX2, which this one lacks. Choose an engine the running build supports.",
+                active, self.required_feature,
+            ),
+            (
+                Remediation::SwitchToVariant {
+                    target: Some(target),
+                },
+                Hint::Switch { command },
+            ) => format!(
                 "{} was built without --features {}. \
                  Run `{}` (or open `voxtype configure` and press F2) \
                  to switch to {}.",
@@ -83,8 +93,9 @@ pub enum Remediation {
     /// `/usr/bin/voxtype` dispatch to the listed variant. `target` is the
     /// recommended ONNX variant for this host's hardware
     /// (`Inventory::recommendation.onnx`); the variant switcher screen
-    /// uses it as the default selection.
-    SwitchToVariant { target: Variant },
+    /// uses it as the default selection. `None` when no ONNX build runs on
+    /// this CPU (no AVX2), so there is nothing to switch to.
+    SwitchToVariant { target: Option<Variant> },
     /// Source install (cargo build from a git checkout). The user has to
     /// rebuild — there's no separate ONNX variant to swap to. `feature`
     /// is the Cargo feature to add to the build, e.g. `"parakeet"`.
@@ -176,7 +187,7 @@ mod tests {
             recommendation: Recommendation {
                 whisper: Variant::WhisperAvx2,
                 whisper_reason: "test",
-                onnx: recommendation_onnx,
+                onnx: Some(recommendation_onnx),
                 onnx_reason: "test",
                 primary: Variant::WhisperAvx2,
             },
@@ -234,8 +245,8 @@ mod tests {
         assert_eq!(m.active_variant_name.as_deref(), Some("voxtype-avx2"));
         match m.remediation {
             Remediation::SwitchToVariant { target } => {
-                assert_eq!(target, Variant::OnnxAvx2);
-                assert_eq!(target.family(), EngineFamily::Onnx);
+                assert_eq!(target, Some(Variant::OnnxAvx2));
+                assert_eq!(target.map(Variant::family), Some(EngineFamily::Onnx));
             }
             Remediation::Rebuild { .. } => panic!("package install should recommend variant swap"),
         }

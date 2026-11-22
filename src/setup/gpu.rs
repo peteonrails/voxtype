@@ -1560,7 +1560,7 @@ fn detect_best_cpu_backend() -> Backend {
 /// The CPU build to fall back to. Without AVX2 only the baseline build
 /// runs; sending such a machine to voxtype-avx2 trades a GPU crash for a
 /// SIGILL.
-fn pick_cpu_backend(
+pub(crate) fn pick_cpu_backend(
     has_avx2: bool,
     has_avx512: bool,
     installed: impl Fn(Backend) -> bool,
