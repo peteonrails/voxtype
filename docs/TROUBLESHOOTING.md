@@ -291,6 +291,8 @@ Unreadable day files are reported, not silently certified as a complete rebuild.
 Days older than a week can be `.jsonl.gz`; do not rename them to `.jsonl`.
 
 A symlinked history directory or day file is rejected rather than followed.
+Links owned by root above the history directory, such as `/var` on macOS or
+`/home` on atomic Fedora, are part of the system layout and are allowed.
 Rewrites use exclusively created, randomly named temporary files instead of
 opening a pre-existing temporary path. Check the path reported by the error. Do not solve
 this by broadly changing permissions or recursively deleting files. Preserve
