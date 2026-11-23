@@ -48,6 +48,9 @@ voxtype (1.3.2-1) unstable; urgency=medium
   * config validate-selection, doctor and the daemon's startup check catch
     a GGUF gguf_backend the active build's worker lacks, such as vulkan on
     the avx512 build, and name the fix
+  * Packaged installs that ship only baseline or avx512 (the AUR package on
+    a CPU without AVX2) are no longer taken for a source build, so setup gpu
+    --enable refuses Vulkan there too
 
  -- Peter Jackson <pete@peteonrails.com>  Sat, 21 Nov 2026 18:00:00 +0000
 

@@ -411,6 +411,9 @@ fi
 - config validate-selection, doctor and the daemon's startup check catch
   a GGUF gguf_backend the active build's worker lacks, such as vulkan on
   the avx512 build, and name the fix
+- Packaged installs that ship only baseline or avx512 (the AUR package on
+  a CPU without AVX2) are no longer taken for a source build, so setup gpu
+  --enable refuses Vulkan there too
 
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
