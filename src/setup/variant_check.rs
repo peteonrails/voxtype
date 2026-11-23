@@ -214,6 +214,8 @@ impl GgufBackendMismatch {
     fn build(&self) -> String {
         match self.worker.strip_prefix("voxtype-gguf-worker-") {
             Some(variant) => format!("voxtype-{variant}"),
+            // The packaged generic worker belongs to the baseline build.
+            None if self.worker == "voxtype-gguf-worker" => "voxtype-baseline".to_string(),
             None => "this voxtype build".to_string(),
         }
     }
@@ -285,8 +287,15 @@ pub fn detect_gguf_backend_mismatch(
     if !GGUF_GPU_BACKENDS.contains(&requested.as_str()) {
         return None;
     }
+    let in_package_dir = worker.parent() == Some(std::path::Path::new("/usr/lib/voxtype"));
     let worker = worker.file_name()?.to_str()?;
-    let worker_gpu_backends = packaged_worker_gpu_backends(worker)?;
+    // Packages install the baseline build's worker under the generic name,
+    // and it is CPU-only. Elsewhere the generic name is a source build's.
+    let worker_gpu_backends = if in_package_dir && worker == "voxtype-gguf-worker" {
+        &[][..]
+    } else {
+        packaged_worker_gpu_backends(worker)?
+    };
     if worker_gpu_backends.contains(&requested.as_str()) {
         return None;
     }
@@ -510,12 +519,12 @@ mod tests {
 
     #[test]
     fn unknown_workers_are_trusted() {
-        // Source builds, VOXTYPE_GGUF_WORKER overrides and the generic worker
-        // have whatever features they were built with.
+        // Source builds, VOXTYPE_GGUF_WORKER overrides and a generic worker
+        // outside the package directory have whatever features they were
+        // built with.
         let config = cohere_gguf("vulkan");
         for worker in [
             "/home/user/voxtype/target/release/voxtype-gguf-worker",
-            "/usr/lib/voxtype/voxtype-gguf-worker",
             "/opt/my-worker",
         ] {
             assert_eq!(
@@ -524,6 +533,24 @@ mod tests {
                 "{worker}"
             );
         }
+    }
+
+    /// Packages install the baseline build's worker under the generic name,
+    /// and it has no GPU backend, so baseline with `vulkan` must be caught.
+    #[test]
+    fn packaged_generic_worker_is_the_cpu_only_baseline_worker() {
+        let worker = std::path::Path::new("/usr/lib/voxtype/voxtype-gguf-worker");
+        let mismatch = detect_gguf_backend_mismatch(&cohere_gguf("vulkan"), worker)
+            .expect("baseline's worker has no Vulkan");
+        assert!(
+            mismatch.explanation().contains("voxtype-baseline"),
+            "{}",
+            mismatch.explanation()
+        );
+        assert_eq!(
+            detect_gguf_backend_mismatch(&cohere_gguf("auto"), worker),
+            None
+        );
     }
 
     #[test]
