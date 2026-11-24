@@ -153,6 +153,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
+- `elevenlabs` - ElevenLabs Scribe cloud transcription (requires the `elevenlabs` feature)
 
 **Example:**
 ```toml
@@ -187,6 +188,7 @@ new engine to take effect.
 - First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
 - Whisper, Remote Whisper, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
+- ElevenLabs requires the `elevenlabs` build feature, an API key, and an `[elevenlabs]` section.
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
 - Cohere Transcribe is the largest model voxtype ships (~3 GB int8); use `voxtype setup model` to download it
@@ -1999,6 +2001,197 @@ language = "en"
 ```
 
 `gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Release packages ship a Vulkan-capable worker beside the `vulkan` and x86_64 ONNX binaries and a CPU worker beside the others. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
+
+---
+
+## [elevenlabs]
+
+Configuration for the ElevenLabs Scribe cloud transcription engine. This section applies when `engine = "elevenlabs"`. Source builds require the `elevenlabs` Cargo feature.
+
+Audio leaves your machine and goes to ElevenLabs. Use a local engine when your data must remain on-device.
+
+### api_key
+
+**Type:** String (optional)
+**Default:** unset
+
+Set the API key with `ELEVENLABS_API_KEY` instead of storing it in the config file.
+
+### region
+
+**Type:** String
+**Default:** `"global"`
+
+Available regions: `global`, `us`, `eu`, `india`, and `singapore`.
+
+### language_code
+
+**Type:** String (optional)
+**Default:** unset
+
+An ISO 639-1 or ISO 639-3 language hint such as `"en"`.
+
+### mode
+
+**Type:** String
+**Default:** `"realtime"`
+
+Select one of three dictation modes:
+
+- `batch`: record first, then upload the complete recording.
+- `realtime`: stream audio and type only committed segments.
+- `partials`: stream audio and type provisional text while you speak.
+
+All three modes support `[hotkey] mode = "push_to_talk"` when the built-in
+hotkey listener is enabled. It reads the physical release directly from evdev,
+so ElevenLabs realtime output cannot hide the release event. After release,
+Voxtype closes the microphone and waits for ElevenLabs' bounded final commit.
+From the release on it only appends, because the window with focus may have
+changed: the final phrase is typed after the text already there, and
+cancelling while the final is pending leaves the typed text in place. When
+the final changes words typed before the release, the typed words stay and
+the change is dropped, so you may see the provisional wording.
+
+If `[hotkey] enabled = false` and compositor bindings trigger Voxtype, use a
+toggle binding with `realtime` or `partials`. Synthetic typing can disrupt
+held-key tracking in Hyprland, Sway, and River before their release binding
+fires. `batch` mode does not type while the key is held and remains safe with
+compositor-managed push-to-talk.
+
+Use `mode = "realtime"` when you want committed text without provisional
+cursor edits. Use `mode = "partials"` when you want live text and accept that
+the provider may revise its provisional tail.
+
+### model
+
+**Type:** String
+**Default:** `"scribe_v3"`
+
+The ElevenLabs speech-to-text model for `mode = "batch"`. Voxtype sends the
+name as given, so a model ElevenLabs adds later works without a Voxtype
+update. See [ElevenLabs models](https://elevenlabs.io/docs/overview/models).
+
+### realtime_model
+
+**Type:** String
+**Default:** `"scribe_v3_live"`
+
+The ElevenLabs realtime model for `mode = "realtime"` and `mode = "partials"`,
+such as `scribe_v3_live` or `scribe_v2_realtime`. Voxtype sends the name as
+given.
+
+### commit_strategy
+
+**Type:** String
+**Default:** `"vad"`
+
+Controls when the realtime API commits a segment:
+
+- `vad`: ElevenLabs commits after detected silence. This preserves existing
+  behavior and uses `vad_silence_threshold_secs`.
+- `manual`: Voxtype keeps the segment open until recording stops and sends an
+  explicit commit. ElevenLabs can also commit automatically after about 36
+  seconds of accumulated audio.
+
+Manual commit with partial typing is the recommended setup for provider-driven
+live cleanup:
+
+```toml
+[elevenlabs]
+mode = "partials"
+commit_strategy = "manual"
+no_verbatim = true
+```
+
+An open manual segment lets later partial snapshots use speech after a pause to
+revise punctuation, words, or disfluencies. The model may keep its earlier
+choice, so this setting does not guarantee a specific punctuation change.
+ElevenLabs cannot revise a segment that it has already committed.
+
+With `mode = "realtime"` and `commit_strategy = "manual"`, text normally
+waits until recording stops or ElevenLabs performs its long-session automatic
+commit.
+
+### no_verbatim
+
+**Type:** Boolean
+**Default:** `false`
+
+When `true`, ElevenLabs removes provider-detected filler words, false starts,
+and disfluencies. This setting applies to batch and realtime requests and works
+independently of `commit_strategy`. The default preserves verbatim output.
+
+Provider cleanup is broader and less configurable than Voxtype's local
+`[text] filler_words` list. It is useful with `mode = "partials"`: it also
+cleans the provisional text, which local text processing only reaches once a
+segment is final.
+
+### vad_silence_threshold_secs
+
+**Type:** Float
+**Default:** `1.5`
+
+Seconds of silence before ElevenLabs commits the current segment when
+`commit_strategy = "vad"`. Lower values type committed text sooner but may
+split speech at short pauses. The value must be positive and finite.
+
+The setting remains valid for configuration compatibility when
+`commit_strategy = "manual"`, but Voxtype omits it from the realtime request.
+
+```toml
+[elevenlabs]
+mode = "partials"
+commit_strategy = "vad"
+vad_silence_threshold_secs = 0.8
+```
+
+### Partial correction output
+
+Live partial revisions need a driver that can send BackSpace: `wtype`,
+`dotool` or `dotoolc`, or `ydotool`. `eitype` and clipboard-only output do
+not provide the streaming BackSpace fallback.
+
+If a revision cannot be applied, Voxtype stops that streaming session, leaves
+the visible text in place, shows one error, and returns to idle. It does not
+rewind after provider and cursor state diverge. The same happens when a partial
+goes to the clipboard instead of the cursor, because no typing driver could
+type it. Use `mode = "realtime"` when output can fall back to the clipboard.
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|----------------------|---------|-------------|
+| `api_key` | `--elevenlabs-api-key` | `ELEVENLABS_API_KEY` | none | ElevenLabs API key |
+| `region` | `--elevenlabs-region` | `VOXTYPE_ELEVENLABS_REGION` | `"global"` | API region |
+| `language_code` | `--elevenlabs-language` | `VOXTYPE_ELEVENLABS_LANGUAGE` | none | Language hint |
+| `mode` | `--elevenlabs-mode` | `VOXTYPE_ELEVENLABS_MODE` | `"realtime"` | `batch`, `realtime`, or `partials` |
+| `model` | `--elevenlabs-model` | `VOXTYPE_ELEVENLABS_MODEL` | `"scribe_v3"` | Batch model |
+| `realtime_model` | `--elevenlabs-realtime-model` | `VOXTYPE_ELEVENLABS_REALTIME_MODEL` | `"scribe_v3_live"` | Realtime and partials model |
+| `commit_strategy` | `--elevenlabs-commit-strategy` | `VOXTYPE_ELEVENLABS_COMMIT_STRATEGY` | `"vad"` | Realtime commit strategy |
+| `no_verbatim` | `--elevenlabs-no-verbatim` / `--elevenlabs-verbatim` | `VOXTYPE_ELEVENLABS_NO_VERBATIM` | `false` | Provider disfluency cleanup |
+| `vad_silence_threshold_secs` | `--elevenlabs-vad-silence-threshold-secs` | `VOXTYPE_ELEVENLABS_VAD_SILENCE_THRESHOLD_SECS` | `1.5` | Silence before a VAD commit |
+
+### Complete Example
+
+```toml
+engine = "elevenlabs"
+
+[hotkey]
+mode = "push_to_talk"
+
+[elevenlabs]
+language_code = "en"
+mode = "partials"
+commit_strategy = "manual"
+no_verbatim = true
+# Set the API key with ELEVENLABS_API_KEY
+```
+
+Build from source with:
+
+```bash
+cargo build --features elevenlabs
+```
 
 ---
 
@@ -5338,6 +5531,8 @@ systemctl --user restart voxtype
 
 Remove the line and restart when you are done: while it is set, the journal keeps every dictation. See [Troubleshooting](TROUBLESHOOTING.md#dictated-text-in-the-log) for the lines to look for.
 
+**API keys and the log.** The WebSocket library the Soniox and ElevenLabs engines use logs every handshake and frame at trace level. Those carry your API key, your audio and its transcript. A filter that traces every target, such as `RUST_LOG=trace` or `RUST_LOG=tungstenite=trace`, writes them to the log. Use `RUST_LOG=voxtype=trace,warn` to trace voxtype alone.
+
 ### XDG_CONFIG_HOME
 
 Overrides the config directory location (default: `~/.config`).
@@ -5391,6 +5586,19 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_STREAMING_RECOVERY` | bool | `streaming_recovery.enabled` |
 | `VOXTYPE_STREAMING_STOP_TIMEOUT_SECS` | integer (1-120) | `streaming_recovery.stop_timeout_secs` |
 
+**ElevenLabs:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `ELEVENLABS_API_KEY` | string | `elevenlabs.api_key` |
+| `VOXTYPE_ELEVENLABS_REGION` | string | `elevenlabs.region` |
+| `VOXTYPE_ELEVENLABS_LANGUAGE` | string | `elevenlabs.language_code` |
+| `VOXTYPE_ELEVENLABS_MODE` | string | `elevenlabs.mode` |
+| `VOXTYPE_ELEVENLABS_MODEL` | string | `elevenlabs.model` |
+| `VOXTYPE_ELEVENLABS_REALTIME_MODEL` | string | `elevenlabs.realtime_model` |
+| `VOXTYPE_ELEVENLABS_COMMIT_STRATEGY` | string | `elevenlabs.commit_strategy` |
+| `VOXTYPE_ELEVENLABS_NO_VERBATIM` | bool | `elevenlabs.no_verbatim` |
+| `VOXTYPE_ELEVENLABS_VAD_SILENCE_THRESHOLD_SECS` | float | `elevenlabs.vad_silence_threshold_secs` |
 
 **Audio:**
 

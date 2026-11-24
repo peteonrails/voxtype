@@ -371,6 +371,7 @@ what is wrong instead of showing an empty pane:
   - [Copied to clipboard, paste manually](#copied-to-clipboard-paste-manually-notification)
   - [Transcription not delivered](#transcription-not-delivered-notification)
 - [Performance Issues](#performance-issues)
+- [ElevenLabs Backend Issues](#elevenlabs-backend-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
@@ -1968,6 +1969,73 @@ model = "tiny.en"
 1. Ensure voxtype is running with normal priority
 2. Check for other applications using evdev
 3. Try a different hotkey
+
+---
+
+## ElevenLabs Backend Issues
+
+### "Streaming output stopped" or partial revisions do not rewind
+
+ElevenLabs changed a provisional tail, but Voxtype could not send the required
+BackSpace keys or could not type the replacement. Voxtype stops the stream: it
+ends the session, leaves visible text in place, shows one "Streaming Error"
+notification saying streaming output stopped, and returns to idle. It does not
+rewind text after cursor and provider state may have diverged.
+
+Install and configure at least one BackSpace-capable driver:
+
+- `wtype` on a compositor that supports the virtual keyboard protocol
+- `dotool`, or `dotoold` with `dotoolc` for lower streaming latency
+- `ydotool` with its daemon running
+
+`eitype` and clipboard-only output do not provide the streaming BackSpace
+fallback. If you cannot use a supported driver, set:
+
+```toml
+[elevenlabs]
+mode = "realtime"
+```
+
+Committed-only realtime mode avoids provisional cursor edits.
+
+### Punctuation remains stale after a pause
+
+With `commit_strategy = "vad"`, a pause can commit the preceding segment.
+ElevenLabs does not send authoritative revisions for an already committed
+segment, so later speech cannot join or repunctuate it.
+
+Keep the segment open across ordinary pauses:
+
+```toml
+[elevenlabs]
+mode = "partials"
+commit_strategy = "manual"
+```
+
+A later partial may revise the open tail, but the model does not guarantee a
+specific punctuation choice. Provider automatic commits during long sessions
+still create permanent segment boundaries.
+
+### Manual realtime mode types nothing until recording stops
+
+This is expected with `mode = "realtime"` and
+`commit_strategy = "manual"`. Realtime mode ignores partial snapshots, and
+manual mode waits for Voxtype's explicit commit on stop. ElevenLabs may also
+commit automatically after about 36 seconds.
+
+Use `mode = "partials"` for live text, or use `commit_strategy = "vad"` for
+committed output after silence.
+
+### Provisional text changes while speaking
+
+`mode = "partials"` displays provider snapshots before they are final. Words
+or punctuation may appear, retract, and change as ElevenLabs receives more
+audio. Keep focus in the target application and leave the caret at the end of
+the streamed text. Voxtype cannot recover if you move the caret or switch
+focus during a correction.
+
+Use `mode = "realtime"` when you prefer stable committed segments without
+visible partial churn.
 
 ---
 

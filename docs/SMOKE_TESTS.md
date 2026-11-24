@@ -61,6 +61,7 @@ verification.
 | [Remote Transcription](smoke_tests/remote-transcription.md) | OpenAI-compatible HTTP backend |
 | [On-Demand Model Loading](smoke_tests/on-demand-model-loading.md) | Lazy load reduces idle memory; load latency hides behind recording |
 | [Eager Processing](smoke_tests/eager-processing.md) | Eager preload paths warm caches before the first recording |
+| [ElevenLabs Live Cleanup](smoke_tests/elevenlabs-live-cleanup.md) | Manual commit, provider cleanup, partial revision, correction drivers, and failure handling |
 
 ## GPU
 
