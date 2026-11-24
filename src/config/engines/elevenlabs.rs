@@ -5,6 +5,8 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 const DEFAULT_VAD_SILENCE_THRESHOLD_SECS: f32 = 1.5;
 /// The batch model when `[elevenlabs] model` is unset.
 pub const DEFAULT_ELEVENLABS_MODEL: &str = "scribe_v3";
+/// The realtime model when `[elevenlabs] realtime_model` is unset.
+pub const DEFAULT_ELEVENLABS_REALTIME_MODEL: &str = "scribe_v3_live";
 
 /// ElevenLabs API region.
 #[derive(
@@ -52,9 +54,9 @@ pub enum ElevenLabsRegion {
 #[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 pub enum ElevenLabsMode {
     /// Upload the completed recording and return one transcript.
-    #[default]
     Batch,
     /// Stream audio but type only committed transcript segments.
+    #[default]
     Realtime,
     /// Stream audio and type provisional partial transcript extensions.
     Partials,
@@ -98,12 +100,16 @@ pub struct ElevenLabsConfig {
     #[serde(deserialize_with = "deserialize_language_code")]
     pub language_code: Option<String>,
 
-    /// Dictation behavior. Default: `batch`.
+    /// Dictation behavior. Default: `realtime`.
     pub mode: ElevenLabsMode,
 
     /// Speech-to-text model for batch transcription, passed to the API as
     /// given. Default: `scribe_v3`.
     pub model: String,
+
+    /// Speech-to-text model for the realtime and partials modes, passed to
+    /// the API as given. Default: `scribe_v3_live`.
+    pub realtime_model: String,
 
     /// Realtime segment commit strategy. Default: `vad`.
     pub commit_strategy: ElevenLabsCommitStrategy,
@@ -125,6 +131,24 @@ impl ElevenLabsConfig {
     /// Whether this mode uses the realtime WebSocket API.
     pub fn uses_realtime_api(&self) -> bool {
         self.mode != ElevenLabsMode::Batch
+    }
+
+    /// The model the selected mode sends to the API.
+    pub fn active_model(&self) -> &str {
+        if self.uses_realtime_api() {
+            &self.realtime_model
+        } else {
+            &self.model
+        }
+    }
+
+    /// Point the selected mode at `model`.
+    pub fn set_active_model(&mut self, model: String) {
+        if self.uses_realtime_api() {
+            self.realtime_model = model;
+        } else {
+            self.model = model;
+        }
     }
 
     /// Whether provisional transcript extensions should be typed.
@@ -151,8 +175,9 @@ impl Default for ElevenLabsConfig {
             api_key: None,
             region: ElevenLabsRegion::Global,
             language_code: None,
-            mode: ElevenLabsMode::Batch,
+            mode: ElevenLabsMode::Realtime,
             model: DEFAULT_ELEVENLABS_MODEL.to_string(),
+            realtime_model: DEFAULT_ELEVENLABS_REALTIME_MODEL.to_string(),
             commit_strategy: ElevenLabsCommitStrategy::Vad,
             no_verbatim: false,
             vad_silence_threshold_secs: default_vad_silence_threshold_secs(),
@@ -169,6 +194,7 @@ impl std::fmt::Debug for ElevenLabsConfig {
             .field("language_code", &self.language_code)
             .field("mode", &self.mode)
             .field("model", &self.model)
+            .field("realtime_model", &self.realtime_model)
             .field("commit_strategy", &self.commit_strategy)
             .field("no_verbatim", &self.no_verbatim)
             .field(
@@ -227,6 +253,7 @@ mod tests {
                 config.language_code,
                 config.mode,
                 config.model.as_str(),
+                config.realtime_model.as_str(),
                 config.commit_strategy,
                 config.no_verbatim,
                 config.vad_silence_threshold_secs,
@@ -235,8 +262,9 @@ mod tests {
                 None,
                 ElevenLabsRegion::Global,
                 None,
-                ElevenLabsMode::Batch,
+                ElevenLabsMode::Realtime,
                 "scribe_v3",
+                "scribe_v3_live",
                 ElevenLabsCommitStrategy::Vad,
                 false,
                 1.5,
@@ -251,6 +279,7 @@ mod tests {
                 deserialized.language_code,
                 deserialized.mode,
                 deserialized.model.as_str(),
+                deserialized.realtime_model.as_str(),
                 deserialized.commit_strategy,
                 deserialized.no_verbatim,
                 deserialized.vad_silence_threshold_secs,
@@ -259,8 +288,9 @@ mod tests {
                 None,
                 ElevenLabsRegion::Global,
                 None,
-                ElevenLabsMode::Batch,
+                ElevenLabsMode::Realtime,
                 "scribe_v3",
+                "scribe_v3_live",
                 ElevenLabsCommitStrategy::Vad,
                 false,
                 1.5,
@@ -363,6 +393,7 @@ mod tests {
             r#"
                 mode = "partials"
                 model = "scribe_v9_future"
+                realtime_model = "scribe_v9_live"
                 commit_strategy = "manual"
                 no_verbatim = true
                 vad_silence_threshold_secs = 0.75
@@ -377,6 +408,7 @@ mod tests {
         let serialized = toml::to_string(&config).unwrap();
         assert!(serialized.contains("mode = \"partials\""));
         assert!(serialized.contains("model = \"scribe_v9_future\""));
+        assert!(serialized.contains("realtime_model = \"scribe_v9_live\""));
         assert!(serialized.contains("commit_strategy = \"manual\""));
         assert!(serialized.contains("no_verbatim = true"));
         assert!(serialized.contains("vad_silence_threshold_secs = 0.75"));

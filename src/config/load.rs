@@ -446,12 +446,13 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
 
     // ElevenLabs. Any provider-specific environment value materializes the
     // optional section so environment-only source-build configurations work.
-    const ELEVENLABS_ENV_VARS: [&str; 8] = [
+    const ELEVENLABS_ENV_VARS: [&str; 9] = [
         "ELEVENLABS_API_KEY",
         "VOXTYPE_ELEVENLABS_REGION",
         "VOXTYPE_ELEVENLABS_LANGUAGE",
         "VOXTYPE_ELEVENLABS_MODE",
         "VOXTYPE_ELEVENLABS_MODEL",
+        "VOXTYPE_ELEVENLABS_REALTIME_MODEL",
         "VOXTYPE_ELEVENLABS_COMMIT_STRATEGY",
         "VOXTYPE_ELEVENLABS_NO_VERBATIM",
         "VOXTYPE_ELEVENLABS_VAD_SILENCE_THRESHOLD_SECS",
@@ -483,6 +484,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
         if let Ok(model) = std::env::var("VOXTYPE_ELEVENLABS_MODEL") {
             elevenlabs.model = model;
+        }
+        if let Ok(model) = std::env::var("VOXTYPE_ELEVENLABS_REALTIME_MODEL") {
+            elevenlabs.realtime_model = model;
         }
         if let Ok(strategy) = std::env::var("VOXTYPE_ELEVENLABS_COMMIT_STRATEGY") {
             match strategy.parse::<ElevenLabsCommitStrategy>() {

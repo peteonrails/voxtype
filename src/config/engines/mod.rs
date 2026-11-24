@@ -18,7 +18,7 @@ pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
 pub use elevenlabs::{
     ElevenLabsCommitStrategy, ElevenLabsConfig, ElevenLabsMode, ElevenLabsRegion,
-    DEFAULT_ELEVENLABS_MODEL,
+    DEFAULT_ELEVENLABS_REALTIME_MODEL,
 };
 pub use gguf::GgufConfig;
 pub use moonshine::MoonshineConfig;

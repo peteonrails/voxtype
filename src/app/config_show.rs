@@ -163,6 +163,11 @@ fn format_elevenlabs_config_section(elevenlabs: Option<&config::ElevenLabsConfig
     let _ = writeln!(section, "  model = {:?}", elevenlabs.model);
     let _ = writeln!(
         section,
+        "  realtime_model = {:?}",
+        elevenlabs.realtime_model
+    );
+    let _ = writeln!(
+        section,
         "  commit_strategy = {:?}",
         elevenlabs.commit_strategy
     );
@@ -425,6 +430,7 @@ mod tests {
             language_code: Some("de".to_string()),
             mode: config::ElevenLabsMode::Partials,
             model: "scribe_v3".to_string(),
+            realtime_model: "scribe_v3_live".to_string(),
             commit_strategy: config::ElevenLabsCommitStrategy::Manual,
             no_verbatim: true,
             vad_silence_threshold_secs: 0.75,
@@ -439,6 +445,7 @@ mod tests {
                 "  language_code = \"de\"\n",
                 "  mode = Partials\n",
                 "  model = \"scribe_v3\"\n",
+                "  realtime_model = \"scribe_v3_live\"\n",
                 "  commit_strategy = Manual\n",
                 "  no_verbatim = true\n",
                 "  vad_silence_threshold_secs = 0.75\n",

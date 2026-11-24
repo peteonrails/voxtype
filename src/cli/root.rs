@@ -343,6 +343,15 @@ pub struct Cli {
     )]
     pub elevenlabs_model: Option<String>,
 
+    /// ElevenLabs model for realtime and partials modes (e.g., scribe_v3_live)
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_realtime_model: Option<String>,
+
     /// When ElevenLabs commits realtime segments: vad or manual
     #[arg(
         long,

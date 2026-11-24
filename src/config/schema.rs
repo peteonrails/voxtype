@@ -987,6 +987,17 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     .for_engine("elevenlabs")
     .gated("elevenlabs"),
     spec(
+        "elevenlabs.realtime_model",
+        "elevenlabs",
+        "realtime_model",
+        KeyType::String,
+        "Engine",
+        "Realtime model",
+        "ElevenLabs speech-to-text model for realtime and partials modes, such as scribe_v3_live.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
         "elevenlabs.commit_strategy",
         "elevenlabs",
         "commit_strategy",
@@ -3561,6 +3572,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "elevenlabs.language_code" => opt_str(el().language_code.as_ref()),
         "elevenlabs.mode" => json!(el().mode),
         "elevenlabs.model" => json!(el().model),
+        "elevenlabs.realtime_model" => json!(el().realtime_model),
         "elevenlabs.commit_strategy" => json!(el().commit_strategy),
         "elevenlabs.no_verbatim" => json!(el().no_verbatim),
         "elevenlabs.vad_silence_threshold_secs" => json!(el().vad_silence_threshold_secs),

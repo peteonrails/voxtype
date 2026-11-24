@@ -1,14 +1,17 @@
 //! ElevenLabs Scribe cloud transcription.
 //!
-//! Batch mode uploads the finished recording (`batch`).
+//! Batch mode uploads the finished recording (`batch`). Realtime mode streams
+//! audio over a WebSocket and turns the provider's transcript snapshots into
+//! streaming events (`realtime`).
 
 mod batch;
+mod realtime;
 
 use std::sync::OnceLock;
 
 use reqwest::header::{HeaderName, HeaderValue};
 
-use super::Transcriber;
+use super::{StreamingTranscriber, Transcriber};
 use crate::{
     config::{ElevenLabsConfig, ElevenLabsRegion},
     error::TranscribeError,
@@ -91,6 +94,10 @@ impl Transcriber for ElevenLabsTranscriber {
                 runtime.block_on(run)
             }
         }
+    }
+
+    fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
+        self.config.uses_realtime_api().then_some(self as _)
     }
 }
 

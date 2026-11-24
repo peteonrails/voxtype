@@ -551,6 +551,40 @@ fn apply_output_override(
     config
 }
 
+/// Whether a push-to-talk or signal stop keeps the typing surface so the
+/// backend's last phrase is typed in place, with the session only appending
+/// from the stop on.
+///
+/// Most backends get the surface dropped at such a stop so late text is not
+/// typed into whatever window has focus by then; `end_streaming` delivers it
+/// through the batch output path instead. A toggle or duration-cap stop keeps
+/// it for every backend, with ordinary bookkeeping. ElevenLabs commits the
+/// last segment explicitly when the input stops and drains that commit within
+/// a bounded time, so it types the final phrase in place after any stop. From
+/// the stop on its session only appends and a cancel does not rewind, so a
+/// window the user switched to meanwhile gets no BackSpace.
+fn types_in_place_after_stop(engine: crate::config::TranscriptionEngine) -> bool {
+    engine == crate::config::TranscriptionEngine::ElevenLabs
+}
+
+/// Whether the backend's live partials are revised against the text it
+/// believes is at the cursor. Only ElevenLabs does; other backends append
+/// independent deltas, so one that missed the cursor costs only itself.
+fn revises_typed_partials(engine: crate::config::TranscriptionEngine) -> bool {
+    engine == crate::config::TranscriptionEngine::ElevenLabs
+}
+
+/// Why a session that revises live partials stopped when one of them could
+/// not be typed or revised at the cursor.
+fn live_partial_output_error(error: &impl std::fmt::Display) -> String {
+    format!(
+        "Streaming output stopped because voxtype could not type or revise the live \
+         partial at the cursor: {error}. Live partials need wtype, dotool or ydotool to \
+         type and send BackSpace in the focused window; [elevenlabs] mode = \"realtime\" \
+         types only committed segments."
+    )
+}
+
 /// Every override file a single recording can carry, in the runtime dir.
 const RECORDING_OVERRIDE_FILES: [&str; 6] = [
     "output_mode_override",
@@ -2369,8 +2403,42 @@ impl Daemon {
         // `mode = "file"`) session accumulates into `finalized_text` instead
         // of typing, gated on `file_output_path`; its chain goes unused.
         let output_override = read_output_mode_override();
+        let output_override_set = output_override.is_some();
         let file_output_path = self.resolve_file_output_path(&output_override, None);
         let output_config = apply_output_override(&self.config.output, output_override);
+
+        if self.config.engine == crate::config::TranscriptionEngine::ElevenLabs {
+            let profile_name = self.recording_profile();
+            let profile = profile_name.and_then(|name| self.config.get_profile(&name));
+            if let Err(error) = crate::transcribe::validate_elevenlabs_realtime_output(
+                &output_config,
+                profile,
+                output_override_set,
+            ) {
+                tracing::error!("Cannot start ElevenLabs realtime transcription: {error}");
+                let _ = handle.cancel.send(());
+                handle.task.abort();
+                self.disarm_dead_input_guard();
+                self.cut_streaming_audio();
+                self.end_external_session(false).await;
+                let mut c = capture;
+                let _ = c.stop().await;
+                self.restore_recording_media();
+                self.discard_recording_overrides();
+                self.play_feedback(SoundEvent::Error);
+                send_notification(
+                    "ElevenLabs Realtime Unavailable",
+                    &error.to_string(),
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    "critical",
+                )
+                .await;
+                // Handled: falling back to batch would silently ignore the
+                // configured mode.
+                return true;
+            }
+        }
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
@@ -2461,8 +2529,9 @@ impl Daemon {
         self.end_external_session(state.is_recording()).await;
 
         if state.is_streaming() {
-            tracing::info!("Stopping streaming session; closing capture and disowning output");
-            self.request_streaming_stop(audio_capture, streaming_chain, true)
+            let disown_output = !types_in_place_after_stop(self.config.engine);
+            tracing::info!(disown_output, "Stopping streaming session; closing capture");
+            self.request_streaming_stop(audio_capture, streaming_chain, disown_output)
                 .await;
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
@@ -2645,6 +2714,34 @@ impl Daemon {
         self.config.streaming_recovery.unwrap_or_default().enabled
     }
 
+    /// Hold the typed text of an ElevenLabs session in place once a stop kept
+    /// its typing surface (see `types_in_place_after_stop`): from then on it
+    /// only appends. Any other backend, a session whose surface the stop
+    /// dropped, and one that writes a file keep their ordinary bookkeeping.
+    fn hold_typed_text_after_stop(
+        &self,
+        state: &State,
+        streaming_chain: &Option<Vec<Box<dyn TextOutput>>>,
+        streaming_session: &mut Option<StreamingSession>,
+    ) {
+        let file_output = matches!(
+            state,
+            State::Streaming {
+                file_output_path: Some(_),
+                ..
+            }
+        );
+        if types_in_place_after_stop(self.config.engine)
+            && self.streaming_stop_deadline.is_some()
+            && streaming_chain.is_some()
+            && !file_output
+        {
+            if let Some(session) = streaming_session.as_mut() {
+                session.stop_revising();
+            }
+        }
+    }
+
     fn arm_streaming_stop_watchdog(&mut self) {
         // The bound runs from the first stop request. A repeated stop while
         // the backend drains must not push the deadline out again.
@@ -2693,6 +2790,25 @@ impl Daemon {
         // nothing for `final_flush` to send as Final. See
         // `finalize_pending_partial`.
         if let Some(session) = streaming_session.as_mut() {
+            // A partial the backend sent after a stop that kept the typing
+            // surface, with no final after it, is still only buffered.
+            if let Some(chain) = streaming_chain.as_ref() {
+                let profile = self.recording_profile();
+                let vocabulary = profile
+                    .as_ref()
+                    .and_then(|name| self.profile_vocabularies.get(name));
+                if let Err(error) = session
+                    .append_pending_partial_after_stop(
+                        chain,
+                        Some((&self.text_processor, vocabulary)),
+                        self.config.output.pre_output_command.as_deref(),
+                        self.config.output.post_output_command.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::warn!("Streaming output of the last partial failed: {error}");
+                }
+            }
             session.finalize_pending_partial();
         }
         let typed_chars = streaming_session
@@ -2890,9 +3006,9 @@ impl Daemon {
     /// run the capture's retained audio through batch transcription and
     /// the ordinary batch result path.
     ///
-    /// A cloud engine (Soniox) that just lost its connection is the least
-    /// likely thing to transcribe this audio, so it recovers with the
-    /// configured `[whisper]` backend first. A local engine recovers with
+    /// A cloud engine (Soniox, ElevenLabs) that just lost its connection is
+    /// the least likely thing to transcribe this audio, so it recovers with
+    /// the configured `[whisper]` backend first. A local engine recovers with
     /// its own batch path, which is already loaded. Either way the other
     /// one is the fallback, because any transcript beats losing it.
     async fn recover_streaming_audio(
@@ -2937,7 +3053,11 @@ impl Daemon {
             }
         }
 
-        let prefer_whisper = self.config.engine == crate::config::TranscriptionEngine::Soniox;
+        let prefer_whisper = matches!(
+            self.config.engine,
+            crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::ElevenLabs
+        );
         let fallback = if prefer_whisper { "Whisper" } else { "batch" };
         tracing::warn!(
             "Streaming session ended without text; recovering {:.1}s with {} transcription",
@@ -3163,6 +3283,9 @@ impl Daemon {
             let _ = capture.stop().await;
         }
         self.streaming_recovery_audio.clear();
+        // A cancel after the stop leaves typed text alone: the window with
+        // focus may no longer be the one dictated into.
+        self.hold_typed_text_after_stop(state, streaming_chain, streaming_session);
         self.streaming_stop_deadline = None;
         self.streaming_recovery_file_output_path = None;
 
@@ -6583,9 +6706,11 @@ impl Daemon {
         // (Hyprland, Sway, River) those synthetic key events clobber the held-
         // key state tracker, so the physical key release never fires bindrd and
         // the daemon gets stuck in streaming. Force toggle activation when
-        // streaming is enabled. The user's config file is left untouched; this
-        // override only applies to the running daemon.
-        if self.config.streaming_active()
+        // streaming is enabled, unless the backend is known to work with the
+        // built-in evdev listener (see `streaming_requires_toggle_activation`).
+        // The user's config file is left untouched; this override only applies
+        // to the running daemon.
+        if self.config.streaming_requires_toggle_activation()
             && self.config.hotkey.mode == crate::config::ActivationMode::PushToTalk
         {
             tracing::warn!(
@@ -7072,7 +7197,7 @@ impl Daemon {
                                 self.request_streaming_stop(
                                     &mut audio_capture,
                                     &mut streaming_chain,
-                                    true,
+                                    !types_in_place_after_stop(self.config.engine),
                                 )
                                 .await;
                             } else if let State::Recording { model_override, .. } = &state {
@@ -7705,8 +7830,10 @@ impl Daemon {
                         &state,
                         State::Streaming { file_output_path: Some(_), .. }
                     );
+                    self.hold_typed_text_after_stop(&state, &streaming_chain, &mut streaming_session);
                     match event {
                         Some(StreamingEvent::Partial { text, .. }) => {
+                            let mut partial_error = None;
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
                                     s.observe_partial_delta(&text);
@@ -7718,6 +7845,11 @@ impl Daemon {
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {
                                         tracing::warn!("Streaming partial delta type failed: {}", e);
+                                        partial_error = Some(e.to_string());
+                                    } else if !s.partial_at_cursor() {
+                                        partial_error = Some(
+                                            "the text went to the clipboard instead".to_string(),
+                                        );
                                     }
                                 } else {
                                     s.observe_partial_delta(&text);
@@ -7725,6 +7857,21 @@ impl Daemon {
                                 if let State::Streaming { typed_chars, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
                                 }
+                            }
+                            // ElevenLabs revises its partials against the text
+                            // it believes is at the cursor, so a partial that
+                            // was not typed there ends live partial typing.
+                            if let Some(e) = partial_error
+                                .filter(|_| revises_typed_partials(self.config.engine))
+                            {
+                                self.end_streaming_with_error(
+                                    live_partial_output_error(&e),
+                                    &mut state,
+                                    &mut audio_capture,
+                                    &mut streaming_handle,
+                                    &mut streaming_session,
+                                    &mut streaming_chain,
+                                ).await;
                             }
                         }
                         Some(StreamingEvent::Final { text, .. }) => {
@@ -7820,12 +7967,7 @@ impl Daemon {
                             // leave the visible text in place.
                             if let Some(e) = revise_error {
                                 self.end_streaming_with_error(
-                                    format!(
-                                        "Streaming output stopped because voxtype could not \
-                                         revise the live partial at the cursor: {e}. Check \
-                                         that wtype, dotool or ydotool can send BackSpace, \
-                                         or turn off live partial typing."
-                                    ),
+                                    live_partial_output_error(&e),
                                     &mut state,
                                     &mut audio_capture,
                                     &mut streaming_handle,
@@ -10697,6 +10839,233 @@ while True:
 
         assert!(daemon.transcription_task.is_none());
         assert!(state.is_idle());
+    }
+
+    /// A cancel while the stop drains the final leaves typed text in place:
+    /// the window with focus may no longer be the one dictated into. A
+    /// cancel while recording still rewinds it.
+    #[tokio::test]
+    async fn cancel_after_the_stop_does_not_rewind() {
+        for (stopped, rewound) in [(false, vec![5]), (true, vec![])] {
+            let mut config = Config {
+                engine: TranscriptionEngine::ElevenLabs,
+                ..Config::default()
+            };
+            config.audio.feedback.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let mut state = non_file_streaming_state();
+            let output: Box<dyn TextOutput> = Box::new(RecordingOutput {
+                got: Arc::new(std::sync::Mutex::new(None)),
+                succeed: true,
+            });
+            let mut chain = Some(vec![output]);
+            let mut session = StreamingSession::new();
+            session
+                .commit_segment(chain.as_deref().unwrap(), "hello", None, None, None)
+                .await
+                .unwrap();
+            let mut session = Some(session);
+            if stopped {
+                daemon
+                    .stop_active_recording(&mut state, &mut None, &mut chain, &mut None)
+                    .await;
+            }
+
+            daemon
+                .teardown_streaming_to_idle(
+                    &mut state,
+                    &mut None,
+                    &mut None,
+                    &mut session,
+                    &mut chain,
+                    osd::session::OutcomeKind::Cancelled,
+                )
+                .await;
+
+            assert_eq!(
+                StreamingSession::take_test_backspaces(),
+                rewound,
+                "{stopped}"
+            );
+        }
+    }
+
+    /// Only a stop that kept the typing surface holds typed text in place.
+    /// A stop that dropped it, and a file-output session, fold a buffered
+    /// partial into the final as they did before ElevenLabs existed.
+    #[tokio::test]
+    async fn a_stop_holds_typed_text_only_while_the_typing_surface_stays() {
+        for (engine, file_output) in [
+            (TranscriptionEngine::Soniox, false),
+            (TranscriptionEngine::Soniox, true),
+            (TranscriptionEngine::ElevenLabs, true),
+        ] {
+            let mut config = Config {
+                engine,
+                ..Config::default()
+            };
+            config.audio.feedback.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let mut state = non_file_streaming_state();
+            if let State::Streaming {
+                file_output_path, ..
+            } = &mut state
+            {
+                *file_output_path = file_output.then(|| PathBuf::from("/nonexistent/out.txt"));
+            }
+            let mut chain: Option<Vec<Box<dyn TextOutput>>> = Some(Vec::new());
+            let mut session = Some(StreamingSession::new());
+            session.as_mut().unwrap().observe_partial_delta("first");
+
+            daemon
+                .stop_active_recording(&mut state, &mut None, &mut chain, &mut None)
+                .await;
+            daemon.hold_typed_text_after_stop(&state, &chain, &mut session);
+            let session = session.as_mut().unwrap();
+            session.commit_segment_silent(" second");
+            session.finalize_pending_partial();
+
+            assert_eq!(
+                session.finalized_text(),
+                "first second",
+                "{engine} file_output={file_output}"
+            );
+        }
+    }
+
+    /// A toggle stop and a duration-cap stop keep the typing surface for every
+    /// backend: both call `request_streaming_stop` without disowning it. Only
+    /// an ElevenLabs session then holds its typed text in place. A Soniox
+    /// final that corrects the typed tail after either stop is applied as it
+    /// always was.
+    #[tokio::test]
+    async fn only_elevenlabs_holds_typed_text_after_a_toggle_or_duration_cap_stop() {
+        for (engine, backspaces, typed, finalized) in [
+            (TranscriptionEngine::Soniox, vec![4], "right", "turn right"),
+            (
+                TranscriptionEngine::ElevenLabs,
+                vec![],
+                "turn left",
+                "turn left",
+            ),
+        ] {
+            let mut config = Config {
+                engine,
+                ..Config::default()
+            };
+            config.audio.feedback.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let state = non_file_streaming_state();
+            let got = Arc::new(std::sync::Mutex::new(None));
+            let output: Box<dyn TextOutput> = Box::new(RecordingOutput {
+                got: got.clone(),
+                succeed: true,
+            });
+            let mut chain = Some(vec![output]);
+            let mut session = StreamingSession::new();
+            session
+                .type_partial_delta(chain.as_deref().unwrap(), "turn left".into(), None, None)
+                .await
+                .unwrap();
+            let mut session = Some(session);
+
+            daemon
+                .request_streaming_stop(&mut None, &mut chain, false)
+                .await;
+            daemon.hold_typed_text_after_stop(&state, &chain, &mut session);
+            let session = session.as_mut().unwrap();
+            session
+                .replace_and_commit(chain.as_deref().unwrap(), 4, "right", None, None, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                StreamingSession::take_test_backspaces(),
+                backspaces,
+                "{engine}"
+            );
+            assert_eq!(got.lock().unwrap().as_deref(), Some(typed), "{engine}");
+            assert_eq!(session.finalized_text(), finalized, "{engine}");
+        }
+    }
+
+    /// A partial the backend sends after a stop that kept the typing surface,
+    /// with no final after it, is typed when the session ends instead of
+    /// being dropped.
+    #[tokio::test]
+    async fn a_partial_after_a_kept_stop_is_typed_when_the_session_ends() {
+        let mut config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            ..Config::default()
+        };
+        config.audio.feedback.enabled = false;
+        let mut daemon = Daemon::new(config, None);
+        let mut state = non_file_streaming_state();
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let output: Box<dyn TextOutput> = Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: true,
+        });
+        let mut chain = Some(vec![output]);
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(chain.as_deref().unwrap(), "hello".into(), None, None)
+            .await
+            .unwrap();
+        let mut session = Some(session);
+
+        daemon
+            .stop_active_recording(&mut state, &mut None, &mut chain, &mut None)
+            .await;
+        daemon.hold_typed_text_after_stop(&state, &chain, &mut session);
+        session
+            .as_mut()
+            .unwrap()
+            .type_partial_delta(chain.as_deref().unwrap(), " world".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(got.lock().unwrap().as_deref(), Some("hello"));
+
+        daemon
+            .end_streaming(
+                &mut state,
+                &mut None,
+                &mut None,
+                &mut session,
+                &mut chain,
+                StreamingEndReason::Completed,
+            )
+            .await;
+
+        assert_eq!(got.lock().unwrap().as_deref(), Some(" world"));
+        assert!(StreamingSession::take_test_backspaces().is_empty());
+    }
+
+    /// ElevenLabs commits its last segment when the input stops, so a stop
+    /// keeps the typing surface attached for that final phrase. Other
+    /// streaming backends drop it.
+    #[tokio::test]
+    async fn signal_stop_keeps_the_typing_surface_only_for_elevenlabs() {
+        for (engine, keeps_surface) in [
+            (TranscriptionEngine::ElevenLabs, true),
+            (TranscriptionEngine::Soniox, false),
+        ] {
+            let mut config = Config {
+                engine,
+                ..Config::default()
+            };
+            config.audio.feedback.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let mut state = non_file_streaming_state();
+            let mut chain: Option<Vec<Box<dyn TextOutput>>> = Some(Vec::new());
+
+            daemon
+                .stop_active_recording(&mut state, &mut None, &mut chain, &mut None)
+                .await;
+
+            assert_eq!(chain.is_some(), keeps_surface, "{engine}");
+            assert!(daemon.streaming_stop_deadline.is_some(), "{engine}");
+        }
     }
 
     /// #1004: a start sent while the last dictation was being delivered is

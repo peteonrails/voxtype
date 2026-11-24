@@ -81,6 +81,11 @@ pub struct StreamingSession {
     history_raw_partial: String,
     output_error: Option<String>,
     last_delivery: Option<Delivered>,
+    /// Set once the recording stops while the typing surface stays attached
+    /// for the final, holding the provisional tail at the cursor then. The
+    /// user may have switched windows since, so from here on nothing at the
+    /// cursor is erased or revised: later text is only appended.
+    stopped_tail: Option<String>,
 }
 
 impl StreamingSession {
@@ -96,6 +101,17 @@ impl StreamingSession {
             history_raw_partial: String::new(),
             output_error: None,
             last_delivery: None,
+            stopped_tail: None,
+        }
+    }
+
+    /// Stop editing text at the cursor: the recording has stopped and the
+    /// window that has focus may no longer be the one dictated into. Partials
+    /// and revisions only update the buffered text, a final appends whatever
+    /// it adds to the text already typed, and a cancel leaves it in place.
+    pub fn stop_revising(&mut self) {
+        if self.stopped_tail.is_none() {
+            self.stopped_tail = Some(self.partial.clone());
         }
     }
 
@@ -197,6 +213,10 @@ impl StreamingSession {
         if new_partial.is_empty() {
             return Ok(());
         }
+        if self.stopped_tail.is_some() {
+            self.observe_partial_delta(&new_partial);
+            return Ok(());
+        }
         if self.history_context.is_some() {
             self.history_raw_partial.push_str(&new_partial);
         }
@@ -240,6 +260,10 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        if self.stopped_tail.is_some() {
+            self.revise_partial_silent(backspace, text);
+            return Ok(());
+        }
         let count = backspace.min(self.partial.chars().count());
         if count > 0 {
             let emitted = emit_backspaces(count).await;
@@ -368,6 +392,17 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        if self.stopped_tail.is_some() {
+            return self
+                .append_after_stop(
+                    chain,
+                    text,
+                    text_processing,
+                    pre_output_command,
+                    post_output_command,
+                )
+                .await;
+        }
         self.finalize_history_raw(text);
         // A backend can finalize text that was already typed as a provisional
         // partial without adding a new tail (Soniox does this commonly). Only
@@ -465,6 +500,90 @@ impl StreamingSession {
         Ok(())
     }
 
+    /// Commit a segment after the recording stopped: the backend's segment is
+    /// the buffered partial plus `text`. Nothing typed may be erased now, so
+    /// when the tail typed before the stop begins the segment only the rest
+    /// of the segment goes to the cursor. A segment that corrected the typed
+    /// tail would only garble it, so the typed text stays as it is and the
+    /// correction is dropped.
+    async fn append_after_stop(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        text: &str,
+        text_processing: Option<(&TextProcessor, Option<&Vocabulary>)>,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        self.finalize_history_raw(text);
+        let segment = format!("{}{}", self.partial, text);
+        self.clear_partial();
+        let typed_tail = self
+            .stopped_tail
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let remainder = match segment.strip_prefix(typed_tail.as_str()) {
+            Some(remainder) => remainder.to_string(),
+            None => {
+                tracing::info!(
+                    "Streaming final after the recording stopped corrects the {} chars typed \
+                     before it; leaving them in place and dropping the {}-char correction",
+                    typed_tail.chars().count(),
+                    segment.chars().count()
+                );
+                String::new()
+            }
+        };
+        let remainder = match text_processing {
+            Some((tp, vocabulary)) if !remainder.is_empty() => {
+                tp.process_with_vocabulary(&remainder, vocabulary)
+            }
+            _ => remainder,
+        };
+        self.finalized_text.push_str(&typed_tail);
+        if remainder.is_empty() {
+            return Ok(());
+        }
+
+        let history_context = self.history_context.clone();
+        let opts = OutputOptions {
+            history_context: history_context.as_ref(),
+            pre_output_command,
+            post_output_command,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::from_millis(0),
+        };
+        let result = deliver_with_fallback(chain, &remainder, opts).await;
+        if self.note_delivery(result)? {
+            self.typed_chars += remainder.chars().count();
+        }
+        self.finalized_text.push_str(&remainder);
+        Ok(())
+    }
+
+    /// Type a partial the backend sent after the stop and never finalized,
+    /// by the same append-only rule as a final after the stop. Without a
+    /// stop that kept the typing surface this does nothing.
+    pub async fn append_pending_partial_after_stop(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        text_processing: Option<(&TextProcessor, Option<&Vocabulary>)>,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        if self.stopped_tail.is_none() || self.partial.is_empty() {
+            return Ok(());
+        }
+        self.append_after_stop(
+            chain,
+            "",
+            text_processing,
+            pre_output_command,
+            post_output_command,
+        )
+        .await
+    }
+
     /// Fold any still-pending `partial` into `finalized_text` without a
     /// trailing Final segment. For file-output sessions, `commit_segment_silent`
     /// only runs when the engine happens to emit a `Final` event — but the
@@ -477,6 +596,12 @@ impl StreamingSession {
     /// this once, at stream end, before reading `finalized_text()`.
     pub fn finalize_pending_partial(&mut self) {
         self.finalize_history_raw("");
+        if let Some(tail) = self.stopped_tail.as_mut() {
+            // Only the tail typed before the stop is at the cursor.
+            self.finalized_text.push_str(&std::mem::take(tail));
+            self.clear_partial();
+            return;
+        }
         if !self.partial.is_empty() {
             self.finalized_text.push_str(&self.partial);
             self.clear_partial();
@@ -522,6 +647,18 @@ impl StreamingSession {
     ) -> Result<(), OutputError> {
         // Revisions may remove only provisional text, never a prior Final.
         self.revise_history_raw(backspace);
+        if self.stopped_tail.is_some() {
+            self.truncate_partial(backspace);
+            return self
+                .append_after_stop(
+                    chain,
+                    text,
+                    text_processing,
+                    pre_output_command,
+                    post_output_command,
+                )
+                .await;
+        }
         let at_cursor_chars = self.partial.chars().count() - self.partial_off_cursor_chars;
         let n = backspace
             .min(self.partial.chars().count())
@@ -601,6 +738,13 @@ impl StreamingSession {
     pub async fn rewind(&mut self) -> Result<(), OutputError> {
         let count = self.typed_chars;
         if count == 0 {
+            return Ok(());
+        }
+        if self.stopped_tail.is_some() {
+            tracing::info!(
+                "Streaming cancel after the recording stopped: leaving {} typed chars in place",
+                count
+            );
             return Ok(());
         }
 
@@ -1342,6 +1486,138 @@ mod tests {
         assert_eq!(rec.typed(), vec!["blue", "red"]);
         assert_eq!(session.typed_chars(), 3);
         BACKSPACES.with(|counts| assert_eq!(*counts.borrow(), vec![4]));
+    }
+
+    #[tokio::test]
+    async fn after_the_stop_text_is_only_appended() {
+        BACKSPACES.with(|counts| counts.borrow_mut().clear());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "done ", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, "please open".into(), None, None)
+            .await
+            .unwrap();
+
+        session.stop_revising();
+        session
+            .revise_partial(&chain, 3, "pen the", None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, " brow".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(&chain, 4, "browser", None, None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&chain, " Next", None, None, None)
+            .await
+            .unwrap();
+        session.rewind().await.unwrap();
+
+        assert_eq!(rec.typed().concat(), "done please open the browser Next");
+        assert_eq!(
+            session.finalized_text(),
+            "done please open the browser Next"
+        );
+        assert_eq!(
+            session.typed_chars(),
+            session.finalized_text().chars().count()
+        );
+        BACKSPACES.with(|counts| assert!(counts.borrow().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_final_after_the_stop_that_corrects_typed_text_leaves_it_alone() {
+        BACKSPACES.with(|counts| counts.borrow_mut().clear());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "please open browser".into(), None, None)
+            .await
+            .unwrap();
+
+        session.stop_revising();
+        session
+            .replace_and_commit(&chain, 12, "close browser", None, None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&chain, " Next", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(rec.typed().concat(), "please open browser Next");
+        assert_eq!(session.finalized_text(), "please open browser Next");
+        BACKSPACES.with(|counts| assert!(counts.borrow().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_partial_after_the_stop_with_no_final_is_appended() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "hello".into(), None, None)
+            .await
+            .unwrap();
+        session.stop_revising();
+        session
+            .type_partial_delta(&chain, " world".into(), None, None)
+            .await
+            .unwrap();
+
+        session
+            .append_pending_partial_after_stop(&chain, None, None, None)
+            .await
+            .unwrap();
+        session.finalize_pending_partial();
+
+        assert_eq!(rec.typed().concat(), "hello world");
+        assert_eq!(session.finalized_text(), "hello world");
+    }
+
+    #[test]
+    fn without_a_kept_surface_a_buffered_partial_folds_into_the_final() {
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("first");
+        session.commit_segment_silent(" second");
+        session.finalize_pending_partial();
+        assert_eq!(session.finalized_text(), "first second");
+
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("first");
+        session.observe_partial_delta(" second");
+        session.finalize_pending_partial();
+        assert_eq!(session.finalized_text(), "first second");
+    }
+
+    #[tokio::test]
+    async fn a_partial_typed_before_the_stop_is_kept_when_nothing_follows() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "hello".into(), None, None)
+            .await
+            .unwrap();
+        session.stop_revising();
+        session
+            .revise_partial(&chain, 5, "goodbye", None, None)
+            .await
+            .unwrap();
+        session.finalize_pending_partial();
+
+        assert_eq!(rec.typed().concat(), "hello");
+        assert_eq!(session.finalized_text(), "hello");
     }
 
     #[tokio::test]
