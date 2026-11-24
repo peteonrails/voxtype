@@ -321,6 +321,7 @@ mod imp {
                         .get("corked")
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
+                    && !is_internal_stream(stream)
             })
             .filter(|stream| {
                 let own = is_voxtype_stream(stream, clients, own_pid);
@@ -342,6 +343,28 @@ mod imp {
                 }
             })
             .collect()
+    }
+
+    /// Whether a sink-input is plumbing inside the audio graph rather than
+    /// an application's playback.
+    ///
+    /// Filter-chains, loopbacks and combine sinks expose their output side as
+    /// a sink-input too. Every application's audio flows through it, so
+    /// ducking it lowers the whole output instead of just the media, and
+    /// module-stream-restore persists whatever volume it was left at.
+    /// PipeWire marks these with `node.virtual` and/or `node.link-group`;
+    /// peak-meter monitors carry `stream.monitor`.
+    fn is_internal_stream(stream: &Value) -> bool {
+        let Some(props) = stream.get("properties").and_then(Value::as_object) else {
+            return false;
+        };
+        let flag = |key: &str| {
+            props
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| v == "true")
+        };
+        flag("node.virtual") || flag("stream.monitor") || props.contains_key("node.link-group")
     }
 
     /// Whether a sink input is played by voxtype itself.
@@ -616,6 +639,39 @@ mod imp {
                 .iter()
                 .map(|stream| stream.index)
                 .collect()
+        }
+
+        #[test]
+        fn skips_filter_chain_and_loopback_output_streams() {
+            let streams = serde_json::json!([
+                sink_input(
+                    83,
+                    "1",
+                    serde_json::json!({
+                        "media.class": "Stream/Output/Audio",
+                        "node.name": "speaker_eq_output",
+                        "node.link-group": "filter-chain-3480-8",
+                        "node.virtual": "true"
+                    })
+                ),
+                sink_input(
+                    84,
+                    "2",
+                    serde_json::json!({ "node.link-group": "loopback-1-2" })
+                ),
+                sink_input(85, "3", serde_json::json!({ "stream.monitor": "true" })),
+                sink_input(
+                    1026,
+                    "4",
+                    serde_json::json!({
+                        "application.name": "Spotify",
+                        "media.class": "Stream/Output/Audio",
+                        "node.virtual": "false"
+                    })
+                ),
+            ]);
+
+            assert_eq!(ducked_indexes(&streams, &Value::Null, 1), vec![1026]);
         }
 
         /// The stream the daemon plays its cues through, as `pactl` reported
