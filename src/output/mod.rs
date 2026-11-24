@@ -199,6 +199,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Gguf => "\u{2699}\u{FE0F}", // ⚙️
         crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
         crate::config::TranscriptionEngine::OpenVino => "\u{1F9E0}", // 🧠
+        crate::config::TranscriptionEngine::ElevenLabs => "\u{1F399}\u{FE0F}", // 🎙️
     }
 }
 
@@ -681,6 +682,14 @@ pub struct Delivered {
     /// The text the method was given: the caller's, after the changes this
     /// module makes for the keyboard tools.
     pub text: String,
+}
+
+impl Delivered {
+    /// Whether the text went in at the cursor. Clipboard drivers only copy it
+    /// for the user to paste, so no BackSpace can take it out again.
+    pub fn at_cursor(&self) -> bool {
+        !self.driver.starts_with("clipboard")
+    }
 }
 
 /// [`output_with_fallback`], also saying which method delivered the text.

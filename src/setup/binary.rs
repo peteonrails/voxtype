@@ -958,6 +958,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "openvino-whisper") {
         f.push("openvino");
     }
+    if cfg!(feature = "elevenlabs") {
+        f.push("elevenlabs");
+    }
     // Meeting-mode capability: ML-based speaker diarization (ECAPA-TDNN).
     // When absent, meeting mode falls back to source-based attribution.
     if cfg!(feature = "ml-diarization") {
@@ -1461,6 +1464,7 @@ mod tests {
         if cfg!(feature = "openvino-whisper") {
             assert!(f.contains(&"openvino"));
         }
+        require_feature_listed!("elevenlabs");
         require_feature_listed!("ml-diarization");
         require_feature_listed!("gpu-vulkan");
         require_feature_listed!("gpu-cuda");

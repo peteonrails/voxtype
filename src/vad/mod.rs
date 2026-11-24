@@ -65,6 +65,7 @@ pub fn preferred_backend(config: &Config) -> VadBackend {
             | TranscriptionEngine::Cohere
             | TranscriptionEngine::Gguf
             | TranscriptionEngine::Soniox
+            | TranscriptionEngine::ElevenLabs
             | TranscriptionEngine::OpenVino => VadBackend::Energy,
         },
         explicit => explicit,

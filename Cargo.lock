@@ -6231,6 +6231,7 @@ version = "1.3.2-rc3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bytemuck",
  "cachedir",
  "cairo-rs 0.22.0",

@@ -68,7 +68,7 @@ pub enum State {
         started_at: Instant,
         /// Optional model override for this session
         model_override: Option<String>,
-        /// Most recent partial text (for status / debug only; never typed)
+        /// Typed but not yet finalized text for the current segment.
         partial_buffer: String,
         /// Concatenated finalized segments committed so far
         finalized_text: String,

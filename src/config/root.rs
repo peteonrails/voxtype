@@ -1,9 +1,9 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
-    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
-    ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
-    StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine, VadConfig,
-    WhisperConfig,
+    AudioConfig, CohereConfig, DolphinConfig, ElevenLabsConfig, GgufConfig, HotkeyConfig,
+    MeetingConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig,
+    StatusConfig, StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine,
+    VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -94,6 +94,11 @@ pub struct Config {
     /// (optional, only used when engine = "soniox")
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
+
+    /// ElevenLabs Scribe cloud transcription configuration
+    /// (optional, only used when engine = "elevenlabs")
+    #[serde(default)]
+    pub elevenlabs: Option<ElevenLabsConfig>,
 
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
@@ -224,6 +229,7 @@ impl Default for Config {
             gguf: None,
             openvino: None,
             soniox: None,
+            elevenlabs: None,
             streaming: None,
             streaming_recovery: None,
             text: TextConfig::default(),
@@ -278,8 +284,23 @@ impl Config {
             TranscriptionEngine::OpenVino => {
                 self.openvino.as_ref().map(|o| o.streaming).unwrap_or(false)
             }
+            TranscriptionEngine::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .map(ElevenLabsConfig::uses_realtime_api)
+                .unwrap_or(false),
             _ => false,
         }
+    }
+
+    /// Returns true when startup must replace push-to-talk with toggle mode.
+    ///
+    /// ElevenLabs can keep push-to-talk when the built-in hotkey listener reads
+    /// raw evdev events. Synthetic output cannot hide the physical release from
+    /// that listener. Compositor-managed release bindings still require toggle.
+    pub fn streaming_requires_toggle_activation(&self) -> bool {
+        self.streaming_active()
+            && !(self.engine == TranscriptionEngine::ElevenLabs && self.hotkey.enabled)
     }
 
     /// Clone this config for meeting (long-form) transcription: the
@@ -607,7 +628,7 @@ impl Config {
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Soniox | TranscriptionEngine::ElevenLabs => false,
         }
     }
 
@@ -650,6 +671,10 @@ impl Config {
             // The OpenVINO engine runs Whisper checkpoints and passes this
             // language to them exactly as `whisper.language` is passed.
             TranscriptionEngine::OpenVino => self.openvino.as_ref().map(|o| o.language.as_str()),
+            TranscriptionEngine::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .and_then(|e| e.language_code.as_deref()),
             // Hints narrow what Soniox detects; they never pin one language.
             TranscriptionEngine::Soniox => {
                 let hints = self
@@ -690,6 +715,7 @@ impl Config {
             TranscriptionEngine::SenseVoice => "sensevoice.language",
             TranscriptionEngine::OpenVino => "openvino.language",
             TranscriptionEngine::Soniox => "soniox.language_hints",
+            TranscriptionEngine::ElevenLabs => "elevenlabs.language_code",
             TranscriptionEngine::Parakeet
             | TranscriptionEngine::Moonshine
             | TranscriptionEngine::Paraformer
@@ -884,6 +910,10 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::ElevenLabs => self.elevenlabs.as_ref().map_or(
+                super::engines::DEFAULT_ELEVENLABS_REALTIME_MODEL,
+                ElevenLabsConfig::active_model,
+            ),
         }
     }
 
@@ -970,6 +1000,10 @@ impl Config {
             TranscriptionEngine::Soniox => {
                 self.soniox.get_or_insert_with(Default::default).model = model
             }
+            TranscriptionEngine::ElevenLabs => self
+                .elevenlabs
+                .get_or_insert_with(Default::default)
+                .set_active_model(model),
         }
     }
 
@@ -988,7 +1022,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::super::hotkey::default_hotkey_key;
-    use super::super::{ActivationMode, OutputMode};
+    use super::super::{ActivationMode, ElevenLabsMode, OutputMode};
     use super::*;
 
     #[test]
@@ -1128,6 +1162,7 @@ mod tests {
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
         assert!(!config.output.auto_submit);
+        assert!(config.elevenlabs.is_none());
     }
 
     #[test]
@@ -1801,5 +1836,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn elevenlabs_streaming_active_follows_mode() {
+        let mut config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            ..Config::default()
+        };
+        assert!(!config.streaming_active());
+
+        config.elevenlabs = Some(ElevenLabsConfig::default());
+        assert!(config.streaming_active());
+
+        config.elevenlabs.as_mut().unwrap().mode = ElevenLabsMode::Partials;
+        assert!(config.streaming_active());
+
+        config.elevenlabs.as_mut().unwrap().mode = ElevenLabsMode::Batch;
+        assert!(!config.streaming_active());
+    }
+
+    #[test]
+    fn elevenlabs_streaming_ptt_requires_toggle_only_for_external_hotkeys() {
+        let mut config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            elevenlabs: Some(ElevenLabsConfig::default()),
+            ..Config::default()
+        };
+
+        assert!(config.streaming_active());
+        assert!(!config.streaming_requires_toggle_activation());
+
+        config.hotkey.enabled = false;
+        assert!(config.streaming_requires_toggle_activation());
+
+        config.elevenlabs.as_mut().unwrap().mode = ElevenLabsMode::Batch;
+        assert!(!config.streaming_requires_toggle_activation());
+    }
+
+    #[test]
+    fn elevenlabs_has_no_on_demand_model_loading() {
+        let config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            elevenlabs: Some(ElevenLabsConfig::default()),
+            ..Config::default()
+        };
+        assert!(!config.on_demand_loading());
+    }
+
+    #[test]
+    fn elevenlabs_names_the_model_of_its_mode() {
+        let mut config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            ..Config::default()
+        };
+        assert_eq!(config.model_name(), "scribe_v3_live");
+        config.set_model_for(TranscriptionEngine::ElevenLabs, "scribe_v9_live");
+        assert_eq!(config.model_name(), "scribe_v9_live");
+
+        config.elevenlabs.as_mut().unwrap().mode = ElevenLabsMode::Batch;
+        assert_eq!(config.model_name(), "scribe_v3");
+        config.set_model_for(TranscriptionEngine::ElevenLabs, "scribe_v9_future");
+        let elevenlabs = config.elevenlabs.as_ref().unwrap();
+        assert_eq!(
+            (
+                elevenlabs.model.as_str(),
+                elevenlabs.realtime_model.as_str()
+            ),
+            ("scribe_v9_future", "scribe_v9_live")
+        );
     }
 }

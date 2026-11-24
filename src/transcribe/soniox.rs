@@ -1639,6 +1639,9 @@ mod tests {
                 StreamingEvent::Replace {
                     backspace, text, ..
                 } => ("Replace", format!("-{}+{}", backspace, text)),
+                StreamingEvent::RevisePartial {
+                    backspace, text, ..
+                } => ("RevisePartial", format!("-{}+{}", backspace, text)),
                 StreamingEvent::Ended => ("Ended", String::new()),
                 StreamingEvent::Error(e) => ("Error", e.to_string()),
             })

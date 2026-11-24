@@ -5,6 +5,7 @@
 //! - Remote OpenAI-compatible Whisper API (whisper.cpp server, OpenAI, etc.)
 //! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
+//! - Optionally ElevenLabs Scribe cloud transcription (when `elevenlabs` feature is enabled)
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
 //!   or transcribe.cpp GGUF in voxtype-gguf-worker (when `parakeet-gguf` is enabled)
 //! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
@@ -15,6 +16,8 @@
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
 pub mod cli;
+#[cfg(feature = "elevenlabs")]
+mod elevenlabs;
 pub mod lines;
 mod metadata;
 pub use metadata::RuntimeMetadata;
@@ -444,6 +447,18 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "OpenVINO engine requested but voxtype was not compiled with --features openvino-whisper"
                 .to_string(),
         )),
+        #[cfg(feature = "elevenlabs")]
+        TranscriptionEngine::ElevenLabs => {
+            let provider_config = config.elevenlabs.clone().unwrap_or_default();
+            Ok(Box::new(elevenlabs::ElevenLabsTranscriber::new(
+                &provider_config,
+            )?))
+        }
+        #[cfg(not(feature = "elevenlabs"))]
+        TranscriptionEngine::ElevenLabs => Err(TranscribeError::InitFailed(
+            "ElevenLabs engine requested but voxtype was not compiled with --features elevenlabs"
+                .to_string(),
+        )),
     }
 }
 
@@ -452,6 +467,54 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
 /// it, so the same spelling selects the same runtime for either.
 fn is_gguf_model(model: &str) -> bool {
     model.to_ascii_lowercase().ends_with(".gguf")
+}
+
+/// Reject output settings that ElevenLabs realtime typing cannot honor.
+///
+/// Realtime mode types each provider update as its own output burst, so
+/// settings that wrap or rewrite a whole transcript (a non-typing output
+/// mode, auto-submit, appended text, output hooks, post-processing) would run
+/// once per burst or not at all. Batch mode still supports all of them.
+/// `profile` is the recording's profile. Its `output_mode` counts unless a
+/// CLI output flag (`cli_output_override`) takes precedence, as in batch.
+pub(crate) fn validate_elevenlabs_realtime_output(
+    output: &crate::config::OutputConfig,
+    profile: Option<&crate::config::Profile>,
+    cli_output_override: bool,
+) -> Result<(), TranscribeError> {
+    let profile_output_mode = profile
+        .and_then(|profile| profile.output_mode.as_ref())
+        .filter(|_| !cli_output_override);
+    let incompatible_setting = if output.mode != crate::config::OutputMode::Type {
+        Some("output.mode")
+    } else if profile_output_mode.is_some_and(|mode| *mode != crate::config::OutputMode::Type) {
+        Some("profile.output_mode")
+    } else if output.auto_submit {
+        Some("output.auto_submit")
+    } else if output.append_text.is_some() {
+        Some("output.append_text")
+    } else if output.pre_recording_command.is_some() {
+        Some("output.pre_recording_command")
+    } else if output.pre_output_command.is_some() {
+        Some("output.pre_output_command")
+    } else if output.post_output_command.is_some() {
+        Some("output.post_output_command")
+    } else if output.active_post_process().is_some() {
+        Some("output.post_process")
+    } else if profile.is_some_and(|profile| profile.post_process_command.is_some()) {
+        Some("profile.post_process_command")
+    } else {
+        None
+    };
+
+    if let Some(setting) = incompatible_setting {
+        return Err(TranscribeError::ConfigError(format!(
+            "ElevenLabs realtime transcription does not support {setting}; \
+             set [elevenlabs] mode = \"batch\" to use batch transcription"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Factory function to create Whisper transcriber (local or remote)
@@ -789,5 +852,236 @@ mod tests {
         // StreamingConfig::default(), not from [whisper]'s legacy fields.
         assert_eq!(resolved.interval_s, 1.5_f32 as f64);
         assert_eq!(resolved.partial_min_words, 1); // shared default, not legacy
+    }
+
+    fn factory_error(config: &Config) -> TranscribeError {
+        match create_transcriber(config) {
+            Ok(_) => panic!("expected transcriber construction to fail"),
+            Err(error) => error,
+        }
+    }
+
+    #[cfg(not(feature = "elevenlabs"))]
+    #[test]
+    fn elevenlabs_factory_reports_feature_disabled_remediation() {
+        let config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            ..Config::default()
+        };
+
+        let error = factory_error(&config).to_string();
+
+        assert!(error.contains("--features elevenlabs"));
+    }
+
+    #[cfg(feature = "elevenlabs")]
+    mod elevenlabs {
+        use super::*;
+        use crate::config::{ElevenLabsConfig, ElevenLabsMode, OutputMode, PostProcessConfig};
+
+        const API_KEY: &str = "test-elevenlabs-key";
+
+        fn config(mode: ElevenLabsMode) -> Config {
+            Config {
+                engine: TranscriptionEngine::ElevenLabs,
+                elevenlabs: Some(ElevenLabsConfig {
+                    api_key: Some(API_KEY.to_string()),
+                    mode,
+                    ..ElevenLabsConfig::default()
+                }),
+                ..Config::default()
+            }
+        }
+
+        #[test]
+        fn factory_materializes_defaults_before_reporting_missing_api_key() {
+            let config = Config {
+                engine: TranscriptionEngine::ElevenLabs,
+                elevenlabs: None,
+                ..Config::default()
+            };
+
+            let error = factory_error(&config).to_string();
+
+            assert!(error.contains(
+                "ElevenLabs API key required: set [elevenlabs] api_key or ELEVENLABS_API_KEY"
+            ));
+            assert!(!error.contains("config section is missing"));
+        }
+
+        #[test]
+        fn factory_rejects_api_keys_that_are_invalid_http_headers() {
+            let invalid_key = "secret\nheader";
+            let mut config = config(ElevenLabsMode::Realtime);
+            config.elevenlabs.as_mut().unwrap().api_key = Some(invalid_key.to_string());
+
+            let error = factory_error(&config).to_string();
+
+            assert!(error.contains("cannot be used in an HTTP header"));
+            assert!(!error.contains(invalid_key));
+        }
+
+        #[test]
+        fn factory_exposes_streaming_for_realtime_and_partials_modes() {
+            let realtime = create_transcriber(&config(ElevenLabsMode::Realtime))
+                .expect("realtime factory construction");
+            let partials = create_transcriber(&config(ElevenLabsMode::Partials))
+                .expect("partials factory construction");
+            let batch = create_transcriber(&config(ElevenLabsMode::Batch))
+                .expect("batch factory construction");
+
+            assert!(realtime.as_streaming().is_some());
+            assert!(partials.as_streaming().is_some());
+            assert!(batch.as_streaming().is_none());
+        }
+
+        #[test]
+        fn factory_rejects_invalid_vad_silence_threshold() {
+            let mut config = config(ElevenLabsMode::Realtime);
+            config
+                .elevenlabs
+                .as_mut()
+                .unwrap()
+                .vad_silence_threshold_secs = f32::NAN;
+
+            let error = factory_error(&config).to_string();
+
+            assert!(error.contains("vad_silence_threshold_secs"));
+            assert!(error.contains("positive finite number"));
+        }
+
+        #[test]
+        fn realtime_preflight_rejects_unsafe_incremental_output_settings() {
+            fn clipboard(output: &mut crate::config::OutputConfig) {
+                output.mode = OutputMode::Clipboard;
+            }
+            fn auto_submit(output: &mut crate::config::OutputConfig) {
+                output.auto_submit = true;
+            }
+            fn append_text(output: &mut crate::config::OutputConfig) {
+                output.append_text = Some(" ".to_string());
+            }
+            fn pre_recording_hook(output: &mut crate::config::OutputConfig) {
+                output.pre_recording_command = Some("prepare-output".to_string());
+            }
+            fn pre_output_hook(output: &mut crate::config::OutputConfig) {
+                output.pre_output_command = Some("prepare-output".to_string());
+            }
+            fn post_output_hook(output: &mut crate::config::OutputConfig) {
+                output.post_output_command = Some("restore-output".to_string());
+            }
+            fn post_process(output: &mut crate::config::OutputConfig) {
+                output.post_process = Some(PostProcessConfig {
+                    command: "clean-transcript".to_string(),
+                    ..PostProcessConfig::default()
+                });
+            }
+
+            type UnsafeSetting = (&'static str, fn(&mut crate::config::OutputConfig));
+            let cases: [UnsafeSetting; 7] = [
+                ("output.mode", clipboard),
+                ("auto_submit", auto_submit),
+                ("append_text", append_text),
+                ("pre_recording_command", pre_recording_hook),
+                ("pre_output_command", pre_output_hook),
+                ("post_output_command", post_output_hook),
+                ("post_process", post_process),
+            ];
+
+            for (setting, make_unsafe) in cases {
+                let mut output = crate::config::OutputConfig::default();
+                make_unsafe(&mut output);
+
+                let error = validate_elevenlabs_realtime_output(&output, None, false)
+                    .expect_err("unsafe realtime output must be rejected")
+                    .to_string();
+
+                assert!(
+                    error.contains(setting),
+                    "error for {setting} did not name the unsafe setting: {error}"
+                );
+                assert!(
+                    error.contains("mode = \"batch\""),
+                    "error for {setting} omitted the batch-mode remedy: {error}"
+                );
+            }
+
+            let default_output = crate::config::OutputConfig::default();
+            let post_process_profile = crate::config::Profile {
+                post_process_command: Some("clean-transcript".to_string()),
+                ..Default::default()
+            };
+            let error = validate_elevenlabs_realtime_output(
+                &default_output,
+                Some(&post_process_profile),
+                false,
+            )
+            .expect_err("profile post-processing must be rejected")
+            .to_string();
+            assert!(error.contains("profile.post_process_command"));
+            assert!(error.contains("mode = \"batch\""));
+
+            for mode in [OutputMode::Clipboard, OutputMode::File] {
+                let profile = crate::config::Profile {
+                    output_mode: Some(mode),
+                    ..Default::default()
+                };
+                let error =
+                    validate_elevenlabs_realtime_output(&default_output, Some(&profile), false)
+                        .expect_err("a non-typing profile output mode must be rejected")
+                        .to_string();
+                assert!(error.contains("profile.output_mode"), "{error}");
+                assert!(error.contains("mode = \"batch\""), "{error}");
+
+                // A CLI output flag takes precedence over the profile's mode,
+                // as it does for batch output.
+                assert!(
+                    validate_elevenlabs_realtime_output(&default_output, Some(&profile), true)
+                        .is_ok()
+                );
+            }
+
+            // A table that only holds options leaves post-processing off.
+            let output = crate::config::OutputConfig {
+                post_process: Some(PostProcessConfig::default()),
+                ..Default::default()
+            };
+            assert!(validate_elevenlabs_realtime_output(&output, None, false).is_ok());
+        }
+
+        #[test]
+        fn factory_leaves_realtime_output_validation_to_daemon_batch_context() {
+            let mut config = config(ElevenLabsMode::Realtime);
+            config.output.mode = OutputMode::Clipboard;
+            config.output.auto_submit = true;
+            config.output.post_process = Some(PostProcessConfig {
+                command: "clean-transcript".to_string(),
+                ..PostProcessConfig::default()
+            });
+
+            let transcriber =
+                create_transcriber(&config).expect("batch-only callers can construct the provider");
+
+            assert!(transcriber.as_streaming().is_some());
+        }
+
+        #[test]
+        fn batch_factory_allows_settings_rejected_for_realtime() {
+            let mut config = config(ElevenLabsMode::Batch);
+            config.output.mode = OutputMode::Clipboard;
+            config.output.auto_submit = true;
+            config.output.append_text = Some(" ".to_string());
+            config.output.pre_recording_command = Some("prepare-output".to_string());
+            config.output.pre_output_command = Some("prepare-output".to_string());
+            config.output.post_output_command = Some("restore-output".to_string());
+            config.output.post_process = Some(PostProcessConfig {
+                command: "clean-transcript".to_string(),
+                ..PostProcessConfig::default()
+            });
+
+            let transcriber = create_transcriber(&config).expect("batch factory construction");
+
+            assert!(transcriber.as_streaming().is_none());
+        }
     }
 }

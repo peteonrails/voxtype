@@ -146,9 +146,10 @@ pub fn path_check(id: &'static str, label: &str, path: &Path, exists: bool) -> C
 
 /// Is the configured transcription model on disk and intact?
 ///
-/// `soniox_env_key` says whether `SONIOX_API_KEY` is set, the alternative to
-/// `[soniox] api_key`.
-pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bool) -> Check {
+/// `api_key_env` says whether the cloud engine's API key variable
+/// (`SONIOX_API_KEY` or `ELEVENLABS_API_KEY`) is set, the alternative to the
+/// engine's `api_key` setting.
+pub fn engine_model_check(config: &Config, models_dir: &Path, api_key_env: bool) -> Check {
     const ID: &str = "transcription.model";
     let engine = config.engine;
     let name = engine.name();
@@ -165,6 +166,9 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bo
         TranscriptionEngine::Gguf => config.gguf.is_none(),
         TranscriptionEngine::OpenVino => config.openvino.is_none(),
         TranscriptionEngine::Soniox => config.soniox.is_none(),
+        // Every ElevenLabs setting has a default; the key can come from the
+        // environment.
+        TranscriptionEngine::ElevenLabs => false,
     };
     if section_missing {
         return Check::error(
@@ -179,13 +183,29 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bo
 
     if engine == TranscriptionEngine::Soniox {
         let has_key = config.soniox.as_ref().is_some_and(|s| s.api_key.is_some());
-        return if has_key || soniox_env_key {
+        return if has_key || api_key_env {
             Check::ok(ID, "Soniox cloud engine: API key configured")
         } else {
             Check::error(
                 ID,
                 "Soniox engine selected but no API key is configured",
                 "Set [soniox] api_key in config.toml or export SONIOX_API_KEY",
+            )
+        };
+    }
+
+    if engine == TranscriptionEngine::ElevenLabs {
+        let has_key = config
+            .elevenlabs
+            .as_ref()
+            .is_some_and(|e| e.api_key.is_some());
+        return if has_key || api_key_env {
+            Check::ok(ID, "ElevenLabs cloud engine: API key configured")
+        } else {
+            Check::error(
+                ID,
+                "ElevenLabs engine selected but no API key is configured",
+                "Set [elevenlabs] api_key in config.toml or export ELEVENLABS_API_KEY",
             )
         };
     }
@@ -1073,10 +1093,14 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
         }
     }
 
+    let api_key_env = match config.engine {
+        TranscriptionEngine::ElevenLabs => "ELEVENLABS_API_KEY",
+        _ => "SONIOX_API_KEY",
+    };
     checks.push(engine_model_check(
         config,
         &models_dir,
-        env_set("SONIOX_API_KEY"),
+        env_set(api_key_env),
     ));
     checks.extend(secondary_model_check(config, &models_dir));
     checks.extend(vad_check(config, &models_dir));

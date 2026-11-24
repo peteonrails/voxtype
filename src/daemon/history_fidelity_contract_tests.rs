@@ -196,6 +196,7 @@ async fn real_stream_fidelity(name: &str, partials: bool) {
                 if !stopped { daemon.stop_active_recording(&mut state, &mut capture, &mut chain, &mut None).await; stopped = true; }
             }
             StreamingEvent::Replace { backspace, text, .. } => { observed.push(serde_json::json!({"backspace":backspace,"replacement":text})); session.as_mut().unwrap().replace_and_commit_silent(backspace, &text); }
+            StreamingEvent::RevisePartial { backspace, text, .. } => { observed.push(serde_json::json!({"backspace":backspace,"revision":text})); session.as_mut().unwrap().revise_partial_silent(backspace, &text); }
             StreamingEvent::Ended => break,
             StreamingEvent::Error(error) => panic!("Actual streaming backend error: {error}"),
         }
