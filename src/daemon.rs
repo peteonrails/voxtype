@@ -2595,7 +2595,7 @@ impl Daemon {
     // branch. Keep it separate from capture startup, which opens real devices.
     async fn end_streaming_with_error(
         &mut self,
-        error: crate::error::TranscribeError,
+        error: impl std::fmt::Display,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         streaming_handle: &mut Option<StreamHandle>,
@@ -7784,6 +7784,50 @@ impl Daemon {
                                     finalized_text.clear();
                                     finalized_text.push_str(s.finalized_text());
                                 }
+                            }
+                        }
+                        Some(StreamingEvent::RevisePartial { backspace, text, .. }) => {
+                            let mut revise_error = None;
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.revise_partial_silent(backspace, &text);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    if let Err(e) = s.revise_partial(
+                                        chain,
+                                        backspace,
+                                        &text,
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        revise_error = Some(e);
+                                    }
+                                } else {
+                                    s.revise_partial_silent(backspace, &text);
+                                }
+                                if let State::Streaming { typed_chars, partial_buffer, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                    partial_buffer.clear();
+                                    partial_buffer.push_str(s.partial());
+                                }
+                            }
+                            // A failed revision leaves the cursor out of step
+                            // with the backend's transcript, so later revisions
+                            // would edit the wrong characters. Stop here and
+                            // leave the visible text in place.
+                            if let Some(e) = revise_error {
+                                self.end_streaming_with_error(
+                                    format!(
+                                        "Streaming output stopped because voxtype could not \
+                                         revise the live partial at the cursor: {e}. Check \
+                                         that wtype, dotool or ydotool can send BackSpace, \
+                                         or turn off live partial typing."
+                                    ),
+                                    &mut state,
+                                    &mut audio_capture,
+                                    &mut streaming_handle,
+                                    &mut streaming_session,
+                                    &mut streaming_chain,
+                                ).await;
                             }
                         }
                         Some(StreamingEvent::Error(err)) => {

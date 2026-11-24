@@ -21,8 +21,9 @@
 //!
 //! We default to typing only finalized segments so the user never sees
 //! wrong text. Revision-style providers will appear less responsive but
-//! will not surprise the user. A future option could enable partial
-//! typing for users on stable-token backends.
+//! will not surprise the user. Backends that opt into partial typing emit
+//! append-only `Partial` deltas, and may revise the still-provisional tail
+//! with `RevisePartial` (see [`StreamingSession::revise_partial`]).
 //!
 //! ## Cancel-rewind
 //!
@@ -63,13 +64,18 @@ use tokio::process::Command;
 pub struct StreamingSession {
     /// Concatenated finalized segments committed so far.
     finalized_text: String,
-    /// Total Unicode scalar values typed to the output. Counts what was
+    /// Total Unicode scalar values typed at the cursor. Counts what was
     /// actually sent to `output_with_fallback`, not what the
     /// post-processor returned (since the post-processor is allowed to
-    /// reformat). For accurate rewinding we count *typed* output.
+    /// reformat), and leaves out text a clipboard driver took instead. For
+    /// accurate rewinding we count *typed* output.
     typed_chars: usize,
     /// Most recent partial text (for status only; never typed).
     partial: String,
+    /// The first chars of `partial`, through the last part that went to the
+    /// clipboard instead of the cursor. The cursor may not show them, so no
+    /// BackSpace may reach them.
+    partial_off_cursor_chars: usize,
     history_context: Option<crate::history::recorder::DeliveryContext>,
     history_raw_finalized: String,
     history_raw_partial: String,
@@ -84,6 +90,7 @@ impl StreamingSession {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+            partial_off_cursor_chars: 0,
             history_context: None,
             history_raw_finalized: String::new(),
             history_raw_partial: String::new(),
@@ -114,15 +121,20 @@ impl StreamingSession {
         self.last_delivery.as_ref()
     }
 
-    fn note_delivery(&mut self, result: Result<Delivered, OutputError>) -> Result<(), OutputError> {
+    /// Record a delivery and say whether its text is at the cursor.
+    fn note_delivery(
+        &mut self,
+        result: Result<Delivered, OutputError>,
+    ) -> Result<bool, OutputError> {
         match result {
             Ok(mut delivery) => {
                 delivery.fell_back |= self
                     .last_delivery
                     .as_ref()
                     .is_some_and(|last| last.fell_back);
+                let at_cursor = delivery.at_cursor();
                 self.last_delivery = Some(delivery);
-                Ok(())
+                Ok(at_cursor)
             }
             Err(error) => {
                 if self.output_error.is_none() {
@@ -201,16 +213,90 @@ impl StreamingSession {
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
         let result = deliver_with_fallback(chain, &new_partial, opts).await;
-        self.note_delivery(result)?;
-
-        self.typed_chars += new_partial.chars().count();
+        if self.note_delivery(result)? {
+            self.typed_chars += new_partial.chars().count();
+        } else {
+            self.partial_off_cursor_chars =
+                self.partial.chars().count() + new_partial.chars().count();
+        }
         self.partial.push_str(&new_partial);
         Ok(())
+    }
+
+    /// Revise the provisional tail without finalizing it: backspace
+    /// `backspace` scalars of the current partial, then type `text`.
+    ///
+    /// The backspace count is capped at the partial, so a revision can never
+    /// erase finalized text. Unlike a final replacement, a failed revision is
+    /// an error: the backend's next revision is relative to the text it
+    /// believes is at the cursor, so continuing would edit the wrong
+    /// characters. If the BackSpaces ran but typing failed, bookkeeping
+    /// reflects the deletion.
+    pub async fn revise_partial(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        backspace: usize,
+        text: &str,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        let count = backspace.min(self.partial.chars().count());
+        if count > 0 {
+            let emitted = emit_backspaces(count).await;
+            if emitted == 0 {
+                return Err(OutputError::AllMethodsFailed);
+            }
+            self.revise_history_raw(emitted);
+            self.truncate_partial(emitted);
+            self.typed_chars = self.typed_chars.saturating_sub(emitted);
+        }
+
+        if text.is_empty() {
+            return Ok(());
+        }
+        if self.history_context.is_some() {
+            self.history_raw_partial.push_str(text);
+        }
+        let history_context = self.history_context.clone();
+        let opts = OutputOptions {
+            history_context: history_context.as_ref(),
+            pre_output_command,
+            post_output_command,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::from_millis(0),
+        };
+        let result = deliver_with_fallback(chain, text, opts).await;
+        if !self.note_delivery(result)? {
+            return Err(provisional_text_not_at_cursor());
+        }
+
+        self.typed_chars += text.chars().count();
+        self.partial.push_str(text);
+        Ok(())
+    }
+
+    /// File-output counterpart to `revise_partial`: the same edit applied
+    /// to the accumulated partial string, with nothing typed.
+    pub fn revise_partial_silent(&mut self, backspace: usize, text: &str) {
+        let count = backspace.min(self.partial.chars().count());
+        self.revise_history_raw(count);
+        self.truncate_partial(count);
+        if self.history_context.is_some() {
+            self.history_raw_partial.push_str(text);
+        }
+        self.partial.push_str(text);
+    }
+
+    fn truncate_partial(&mut self, chars: usize) {
+        let retained = self.partial.chars().count().saturating_sub(chars);
+        self.partial = self.partial.chars().take(retained).collect();
+        self.partial_off_cursor_chars = self.partial_off_cursor_chars.min(retained);
     }
 
     /// Clear the partial buffer (e.g., when a Final supersedes it).
     pub fn clear_partial(&mut self) {
         self.partial.clear();
+        self.partial_off_cursor_chars = 0;
     }
 
     /// File-output counterpart to `type_partial_delta`: accumulate the
@@ -225,6 +311,13 @@ impl StreamingSession {
             self.history_raw_partial.push_str(new_partial);
         }
         self.partial.push_str(new_partial);
+    }
+
+    /// Whether the cursor ends with the whole partial buffer. A partial a
+    /// clipboard driver took stays in the transcript but is not at the
+    /// cursor.
+    pub fn partial_at_cursor(&self) -> bool {
+        self.partial_off_cursor_chars == 0
     }
 
     /// Current partial buffer.
@@ -288,8 +381,9 @@ impl StreamingSession {
                 let processed = tp.process_with_vocabulary(&raw, vocabulary);
                 if processed != raw {
                     let provisional_chars = self.partial.chars().count();
-                    let emitted = emit_backspaces(provisional_chars).await;
-                    if emitted == provisional_chars {
+                    if self.partial_at_cursor()
+                        && emit_backspaces(provisional_chars).await == provisional_chars
+                    {
                         let history_context = self.history_context.clone();
                         let opts = OutputOptions {
                             history_context: history_context.as_ref(),
@@ -300,12 +394,13 @@ impl StreamingSession {
                         };
                         // Deletion is already visible even if output fails.
                         // Account for it before attempting the replacement.
-                        self.typed_chars = self.typed_chars.saturating_sub(emitted);
+                        self.typed_chars = self.typed_chars.saturating_sub(provisional_chars);
                         self.clear_partial();
                         let result = deliver_with_fallback(chain, &processed, opts).await;
-                        self.note_delivery(result)?;
-                        self.typed_chars =
-                            self.typed_chars.saturating_add(processed.chars().count());
+                        if self.note_delivery(result)? {
+                            self.typed_chars =
+                                self.typed_chars.saturating_add(processed.chars().count());
+                        }
                         self.finalized_text.push_str(&processed);
                         return Ok(());
                     }
@@ -359,9 +454,9 @@ impl StreamingSession {
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
         let result = deliver_with_fallback(chain, text, opts).await;
-        self.note_delivery(result)?;
-
-        self.typed_chars += text.chars().count();
+        if self.note_delivery(result)? {
+            self.typed_chars += text.chars().count();
+        }
         // Treat the partial-stream-so-far plus this final tail as the
         // committed text for cancel-rewind context.
         let finalized_tail = format!("{}{}", self.partial, text);
@@ -384,7 +479,7 @@ impl StreamingSession {
         self.finalize_history_raw("");
         if !self.partial.is_empty() {
             self.finalized_text.push_str(&self.partial);
-            self.partial.clear();
+            self.clear_partial();
         }
     }
 
@@ -427,10 +522,15 @@ impl StreamingSession {
     ) -> Result<(), OutputError> {
         // Revisions may remove only provisional text, never a prior Final.
         self.revise_history_raw(backspace);
+        let at_cursor_chars = self.partial.chars().count() - self.partial_off_cursor_chars;
         let n = backspace
             .min(self.partial.chars().count())
             .min(self.typed_chars);
-        if n > 0 {
+        if self.partial_off_cursor_chars > 0 && backspace > at_cursor_chars {
+            // The corrected tail reaches text the cursor may not show:
+            // correct the transcript and only append at the cursor.
+            self.truncate_partial(backspace);
+        } else if n > 0 {
             let emitted = emit_backspaces(n).await;
             if emitted == 0 {
                 // No backspace-capable backend ran. The cursor still
@@ -519,6 +619,15 @@ impl StreamingSession {
     }
 }
 
+/// A revised tail that landed on the clipboard is not at the cursor, so the
+/// backend's next revision would edit the wrong characters. It is refused like
+/// any other failed delivery.
+fn provisional_text_not_at_cursor() -> OutputError {
+    OutputError::InjectionFailed(
+        "provisional text went to the clipboard instead of the cursor".to_string(),
+    )
+}
+
 impl Default for StreamingSession {
     fn default() -> Self {
         Self::new()
@@ -528,9 +637,13 @@ impl Default for StreamingSession {
 /// Backspace `count` chars using the first available method.
 /// Returns the actual number of backspaces emitted.
 // Unit tests exercise bookkeeping with an in-memory output, never the real
-// focused application. Treat backspaces as successful in that test surface.
+// focused application. Treat backspaces as successful in that test surface,
+// unless a test asks for them to fail.
 #[cfg(test)]
 async fn emit_backspaces(count: usize) -> usize {
+    if tests::FAIL_BACKSPACES.with(std::cell::Cell::get) {
+        return 0;
+    }
     tests::BACKSPACES.with(|counts| counts.borrow_mut().push(count));
     count
 }
@@ -621,6 +734,7 @@ mod tests {
 
     thread_local! {
         pub(super) static BACKSPACES: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+        pub(super) static FAIL_BACKSPACES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// In-memory output that records every typed string. Used to
@@ -1110,11 +1224,255 @@ mod tests {
         assert_eq!(session.finalized_text(), "helloworld");
     }
 
+    /// Copies text the way wl-copy does: nothing lands at the cursor.
+    struct ClipboardOutput;
+
+    #[async_trait]
+    impl TextOutput for ClipboardOutput {
+        async fn output(&self, _text: &str) -> Result<(), OutputError> {
+            Ok(())
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "clipboard (wl-copy)"
+        }
+    }
+
+    #[tokio::test]
+    async fn text_that_fell_back_to_the_clipboard_is_never_backspaced() {
+        BACKSPACES.with(|counts| counts.borrow_mut().clear());
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(ClipboardOutput)];
+        let mut session = StreamingSession::new();
+
+        session
+            .commit_segment(&chain, "done ", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, "hello".into(), None, None)
+            .await
+            .unwrap();
+        assert!(session
+            .revise_partial(&chain, 0, " world", None, None)
+            .await
+            .is_err());
+        session.rewind().await.unwrap();
+
+        assert_eq!(
+            (session.typed_chars(), session.partial_at_cursor()),
+            (0, false)
+        );
+        BACKSPACES.with(|counts| assert!(counts.borrow().is_empty()));
+    }
+
+    /// Parakeet and Whisper partials are deltas. One a clipboard driver took
+    /// instead of the cursor is still part of the transcript, in order, but
+    /// cleanup and a final correction leave it alone: no BackSpace can reach
+    /// it.
+    #[tokio::test]
+    async fn a_partial_that_fell_back_to_the_clipboard_stays_in_the_transcript() {
+        BACKSPACES.with(|counts| counts.borrow_mut().clear());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let typing = chain_with(rec.clone());
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(ClipboardOutput)];
+        let tp = TextProcessor::new(&crate::config::TextConfig {
+            replacements: [("teh".to_string(), "the".to_string())].into(),
+            ..Default::default()
+        });
+        let mut session = StreamingSession::new();
+
+        session
+            .type_partial_delta(&typing, "fix ".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&clipboard, "teh ".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&typing, "bug".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&typing, " now", Some((&tp, None)), None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&clipboard, "then ship".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(&typing, 4, "test", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(session.finalized_text(), "fix teh bug nowthen test");
+        assert_eq!(rec.typed(), vec!["fix ", "bug", " now", "test"]);
+        assert_eq!(session.typed_chars(), 15);
+        BACKSPACES.with(|counts| assert!(counts.borrow().is_empty()));
+    }
+
+    /// Soniox corrects the tail of its partials in the final. A correction
+    /// of text typed at the cursor after an earlier partial went to the
+    /// clipboard still BackSpaces that text, and only that text.
+    #[tokio::test]
+    async fn a_correction_after_a_clipboard_fallback_still_backspaces_typed_text() {
+        BACKSPACES.with(|counts| counts.borrow_mut().clear());
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let typing = chain_with(rec.clone());
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(ClipboardOutput)];
+        let mut session = StreamingSession::new();
+
+        session
+            .type_partial_delta(&clipboard, "pick ".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&typing, "blue".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(&typing, 4, "red", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(session.finalized_text(), "pick red");
+        assert_eq!(rec.typed(), vec!["blue", "red"]);
+        assert_eq!(session.typed_chars(), 3);
+        BACKSPACES.with(|counts| assert_eq!(*counts.borrow(), vec![4]));
+    }
+
     #[tokio::test]
     async fn rewind_with_zero_chars_is_ok() {
         let mut session = StreamingSession::new();
         // Should succeed without spawning anything.
         session.rewind().await.unwrap();
         assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[tokio::test]
+    async fn partial_revision_changes_only_the_provisional_tail() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "done ", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, "hello wurld".into(), None, None)
+            .await
+            .unwrap();
+
+        session
+            .revise_partial(&chain, 4, "orld", None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(StreamingSession::take_test_backspaces(), vec![4]);
+        assert_eq!(session.partial(), "hello world");
+        assert_eq!(session.finalized_text(), "done ");
+        assert_eq!(session.typed_chars(), 16);
+        assert_eq!(rec.typed(), vec!["done ", "hello wurld", "orld"]);
+    }
+
+    #[tokio::test]
+    async fn empty_final_commits_a_revised_partial_without_retyping_it() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "This is difficult.".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .revise_partial(&chain, 1, " because", None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&chain, "", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(session.partial(), "");
+        assert_eq!(session.finalized_text(), "This is difficult because");
+        assert_eq!(session.typed_chars(), 25);
+        assert_eq!(rec.typed(), vec!["This is difficult.", " because"]);
+    }
+
+    #[tokio::test]
+    async fn partial_revision_cannot_backspace_finalized_text() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec);
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "done ", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, "hello".into(), None, None)
+            .await
+            .unwrap();
+
+        session
+            .revise_partial(&chain, 99, "hullo", None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(StreamingSession::take_test_backspaces(), vec![5]);
+        assert_eq!(session.partial(), "hullo");
+        assert_eq!(session.finalized_text(), "done ");
+        assert_eq!(session.typed_chars(), 10);
+    }
+
+    #[tokio::test]
+    async fn partial_revision_without_backspace_fails_and_keeps_state() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "hello wurld".into(), None, None)
+            .await
+            .unwrap();
+
+        FAIL_BACKSPACES.with(|fail| fail.set(true));
+        let result = session.revise_partial(&chain, 4, "orld", None, None).await;
+        FAIL_BACKSPACES.with(|fail| fail.set(false));
+
+        assert!(matches!(result, Err(OutputError::AllMethodsFailed)));
+        assert_eq!(session.partial(), "hello wurld");
+        assert_eq!(session.typed_chars(), 11);
+        assert_eq!(rec.typed(), vec!["hello wurld"]);
+    }
+
+    #[tokio::test]
+    async fn failed_revision_output_accounts_for_the_deleted_tail() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec);
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "hello wurld".into(), None, None)
+            .await
+            .unwrap();
+
+        assert!(session
+            .revise_partial(&[], 4, "orld", None, None)
+            .await
+            .is_err());
+
+        assert_eq!(session.partial(), "hello w");
+        assert_eq!(session.typed_chars(), 7);
+    }
+
+    #[test]
+    fn silent_partial_revision_edits_the_accumulated_tail() {
+        let mut session = StreamingSession::new();
+        session.commit_segment_silent("done ");
+        session.observe_partial_delta("hello wurld");
+        session.revise_partial_silent(99, "hello world");
+        session.finalize_pending_partial();
+        assert_eq!(session.finalized_text(), "done hello world");
     }
 }
