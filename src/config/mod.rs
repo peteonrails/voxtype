@@ -32,7 +32,8 @@ pub use default_config::{
     default_config_content, generated_config_content, new_config_content, DEFAULT_CONFIG,
 };
 pub use engines::{
-    openvino_driver_packages, CohereConfig, DolphinConfig, GgufConfig, MoonshineConfig,
+    openvino_driver_packages, CohereConfig, DolphinConfig, ElevenLabsCommitStrategy,
+    ElevenLabsConfig, ElevenLabsMode, ElevenLabsRegion, GgufConfig, MoonshineConfig,
     OmnilingualConfig, OpenVinoConfig, ParaformerConfig, ParakeetConfig, ParakeetModelType,
     SenseVoiceConfig, SonioxConfig, TranscriptionEngine, SONIOX_REGIONS,
 };

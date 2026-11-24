@@ -2021,7 +2021,7 @@ pub fn whisper_model_english_only(name: &str) -> Option<bool> {
 ///   one place a name is taken apart; distil exports are not Whisper
 ///   registry checkpoints and stay unclassified.
 ///
-/// Cohere and Soniox have no single-language model.
+/// Cohere, Soniox and ElevenLabs have no single-language model.
 pub fn model_only_language(engine: TranscriptionEngine, model: &str) -> Option<&'static str> {
     let named = |name: &str, dir_name: &str| name == model || dir_name == model;
     match engine {
@@ -2069,7 +2069,9 @@ pub fn model_only_language(engine: TranscriptionEngine, model: &str) -> Option<&
                 .unwrap_or(model);
             whisper_model_english_only(checkpoint)?.then_some("en")
         }
-        TranscriptionEngine::Cohere | TranscriptionEngine::Soniox => None,
+        TranscriptionEngine::Cohere
+        | TranscriptionEngine::Soniox
+        | TranscriptionEngine::ElevenLabs => None,
     }
 }
 

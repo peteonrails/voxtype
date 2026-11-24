@@ -1,6 +1,7 @@
 use super::parse::parse_config_salvaging;
 use super::{
-    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
+    Config, ElevenLabsCommitStrategy, ElevenLabsConfig, ElevenLabsMode, ElevenLabsRegion,
+    LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
 };
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
@@ -441,6 +442,73 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             .soniox
             .get_or_insert_with(SonioxConfig::default)
             .region = region;
+    }
+
+    // ElevenLabs. Any provider-specific environment value materializes the
+    // optional section so environment-only source-build configurations work.
+    const ELEVENLABS_ENV_VARS: [&str; 8] = [
+        "ELEVENLABS_API_KEY",
+        "VOXTYPE_ELEVENLABS_REGION",
+        "VOXTYPE_ELEVENLABS_LANGUAGE",
+        "VOXTYPE_ELEVENLABS_MODE",
+        "VOXTYPE_ELEVENLABS_MODEL",
+        "VOXTYPE_ELEVENLABS_COMMIT_STRATEGY",
+        "VOXTYPE_ELEVENLABS_NO_VERBATIM",
+        "VOXTYPE_ELEVENLABS_VAD_SILENCE_THRESHOLD_SECS",
+    ];
+    if ELEVENLABS_ENV_VARS
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        let elevenlabs = config
+            .elevenlabs
+            .get_or_insert_with(ElevenLabsConfig::default);
+        if let Ok(key) = std::env::var("ELEVENLABS_API_KEY") {
+            elevenlabs.api_key = Some(key);
+        }
+        if let Ok(region) = std::env::var("VOXTYPE_ELEVENLABS_REGION") {
+            match region.parse::<ElevenLabsRegion>() {
+                Ok(region) => elevenlabs.region = region,
+                Err(_) => tracing::warn!("Unknown VOXTYPE_ELEVENLABS_REGION value: {}", region),
+            }
+        }
+        if let Ok(language) = std::env::var("VOXTYPE_ELEVENLABS_LANGUAGE") {
+            elevenlabs.set_language_code(&language);
+        }
+        if let Ok(mode) = std::env::var("VOXTYPE_ELEVENLABS_MODE") {
+            match mode.parse::<ElevenLabsMode>() {
+                Ok(mode) => elevenlabs.mode = mode,
+                Err(_) => tracing::warn!("Unknown VOXTYPE_ELEVENLABS_MODE value: {}", mode),
+            }
+        }
+        if let Ok(model) = std::env::var("VOXTYPE_ELEVENLABS_MODEL") {
+            elevenlabs.model = model;
+        }
+        if let Ok(strategy) = std::env::var("VOXTYPE_ELEVENLABS_COMMIT_STRATEGY") {
+            match strategy.parse::<ElevenLabsCommitStrategy>() {
+                Ok(strategy) => elevenlabs.commit_strategy = strategy,
+                Err(_) => tracing::warn!(
+                    "Unknown VOXTYPE_ELEVENLABS_COMMIT_STRATEGY value: {}",
+                    strategy
+                ),
+            }
+        }
+        if let Ok(value) = std::env::var("VOXTYPE_ELEVENLABS_NO_VERBATIM") {
+            elevenlabs.no_verbatim = parse_bool_env(&value);
+        }
+        if let Ok(value) = std::env::var("VOXTYPE_ELEVENLABS_VAD_SILENCE_THRESHOLD_SECS") {
+            match value.parse::<f32>() {
+                Ok(value) => {
+                    if let Err(error) = elevenlabs.set_vad_silence_threshold_secs(value) {
+                        tracing::warn!("{error}");
+                    }
+                }
+                Err(_) => tracing::warn!(
+                    "Invalid VOXTYPE_ELEVENLABS_VAD_SILENCE_THRESHOLD_SECS value: {}",
+                    value
+                ),
+            }
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);

@@ -1,9 +1,9 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
-    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
-    ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
-    StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine, VadConfig,
-    WhisperConfig,
+    AudioConfig, CohereConfig, DolphinConfig, ElevenLabsConfig, GgufConfig, HotkeyConfig,
+    MeetingConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig,
+    StatusConfig, StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine,
+    VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -94,6 +94,11 @@ pub struct Config {
     /// (optional, only used when engine = "soniox")
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
+
+    /// ElevenLabs Scribe cloud transcription configuration
+    /// (optional, only used when engine = "elevenlabs")
+    #[serde(default)]
+    pub elevenlabs: Option<ElevenLabsConfig>,
 
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
@@ -224,6 +229,7 @@ impl Default for Config {
             gguf: None,
             openvino: None,
             soniox: None,
+            elevenlabs: None,
             streaming: None,
             streaming_recovery: None,
             text: TextConfig::default(),
@@ -607,7 +613,7 @@ impl Config {
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Soniox | TranscriptionEngine::ElevenLabs => false,
         }
     }
 
@@ -650,6 +656,10 @@ impl Config {
             // The OpenVINO engine runs Whisper checkpoints and passes this
             // language to them exactly as `whisper.language` is passed.
             TranscriptionEngine::OpenVino => self.openvino.as_ref().map(|o| o.language.as_str()),
+            TranscriptionEngine::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .and_then(|e| e.language_code.as_deref()),
             // Hints narrow what Soniox detects; they never pin one language.
             TranscriptionEngine::Soniox => {
                 let hints = self
@@ -690,6 +700,7 @@ impl Config {
             TranscriptionEngine::SenseVoice => "sensevoice.language",
             TranscriptionEngine::OpenVino => "openvino.language",
             TranscriptionEngine::Soniox => "soniox.language_hints",
+            TranscriptionEngine::ElevenLabs => "elevenlabs.language_code",
             TranscriptionEngine::Parakeet
             | TranscriptionEngine::Moonshine
             | TranscriptionEngine::Paraformer
@@ -884,6 +895,12 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .map_or(super::engines::DEFAULT_ELEVENLABS_MODEL, |e| {
+                    e.model.as_str()
+                }),
         }
     }
 
@@ -969,6 +986,9 @@ impl Config {
             }
             TranscriptionEngine::Soniox => {
                 self.soniox.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::ElevenLabs => {
+                self.elevenlabs.get_or_insert_with(Default::default).model = model
             }
         }
     }
@@ -1128,6 +1148,7 @@ mod tests {
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
         assert!(!config.output.auto_submit);
+        assert!(config.elevenlabs.is_none());
     }
 
     #[test]
@@ -1801,5 +1822,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn elevenlabs_has_no_on_demand_model_loading() {
+        let config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            elevenlabs: Some(ElevenLabsConfig::default()),
+            ..Config::default()
+        };
+        assert!(!config.on_demand_loading());
+    }
+
+    #[test]
+    fn elevenlabs_names_its_configured_model() {
+        let mut config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            ..Config::default()
+        };
+        assert_eq!(config.model_name(), "scribe_v3");
+        config.set_model_for(TranscriptionEngine::ElevenLabs, "scribe_v9_future");
+        assert_eq!(config.model_name(), "scribe_v9_future");
+        assert_eq!(
+            config.elevenlabs.as_ref().map(|e| e.model.as_str()),
+            Some("scribe_v9_future")
+        );
     }
 }

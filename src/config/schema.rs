@@ -202,6 +202,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
         "gguf" => cfg!(feature = "gguf"),
         "openvino" => cfg!(feature = "openvino-whisper"),
+        "elevenlabs" => cfg!(feature = "elevenlabs"),
         _ => false,
     }
 }
@@ -929,6 +930,95 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Enable live transcription through the shared sliding-window engine.",
     )
     .for_onnx_engine("openvino"),
+    // elevenlabs
+    spec(
+        "elevenlabs.api_key",
+        "elevenlabs",
+        "api_key",
+        KeyType::String,
+        "Engine",
+        "API key",
+        "ElevenLabs API key; unset falls back to ELEVENLABS_API_KEY.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.region",
+        "elevenlabs",
+        "region",
+        closed(&["global", "us", "eu", "india", "singapore"]),
+        "Engine",
+        "Region",
+        "ElevenLabs API endpoint region.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.language_code",
+        "elevenlabs",
+        "language_code",
+        KeyType::String,
+        "Engine",
+        "Language hint",
+        "Optional ISO language hint; empty means automatic detection.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.mode",
+        "elevenlabs",
+        "mode",
+        closed(&["batch", "realtime", "partials"]),
+        "Engine",
+        "Mode",
+        "Batch upload, committed realtime segments, or revisable live partials.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.model",
+        "elevenlabs",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "ElevenLabs speech-to-text model for batch transcription, such as scribe_v3.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.commit_strategy",
+        "elevenlabs",
+        "commit_strategy",
+        closed(&["vad", "manual"]),
+        "Engine",
+        "Commit strategy",
+        "Commit on provider-detected silence or explicitly when recording stops.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.no_verbatim",
+        "elevenlabs",
+        "no_verbatim",
+        KeyType::Bool,
+        "Engine",
+        "Remove disfluencies",
+        "Ask the provider to remove fillers and disfluencies.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
+    spec(
+        "elevenlabs.vad_silence_threshold_secs",
+        "elevenlabs",
+        "vad_silence_threshold_secs",
+        KeyType::Float { min: f32::MIN_POSITIVE as f64, max: f32::MAX as f64 },
+        "Engine",
+        "VAD silence threshold",
+        "Positive finite seconds of silence before the provider commits a segment.",
+    )
+    .for_engine("elevenlabs")
+    .gated("elevenlabs"),
     // soniox
     spec(
         "soniox.api_key",
@@ -3344,6 +3434,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
     let so = || cfg.soniox.clone().unwrap_or_default();
+    let el = || cfg.elevenlabs.clone().unwrap_or_default();
     // Without a table, post-processing is off; report the values a new
     // table would start with.
     let pp = || cfg.output.post_process.clone().unwrap_or_default();
@@ -3464,6 +3555,15 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "openvino.on_demand_loading" => json!(ov().on_demand_loading),
         "openvino.openvino_dir" => opt_str(ov().openvino_dir.as_ref()),
         "openvino.streaming" => json!(ov().streaming),
+
+        "elevenlabs.api_key" => opt_str(el().api_key.as_ref()),
+        "elevenlabs.region" => json!(el().region),
+        "elevenlabs.language_code" => opt_str(el().language_code.as_ref()),
+        "elevenlabs.mode" => json!(el().mode),
+        "elevenlabs.model" => json!(el().model),
+        "elevenlabs.commit_strategy" => json!(el().commit_strategy),
+        "elevenlabs.no_verbatim" => json!(el().no_verbatim),
+        "elevenlabs.vad_silence_threshold_secs" => json!(el().vad_silence_threshold_secs),
 
         "soniox.api_key" => opt_str(so().api_key.as_ref()),
         "soniox.region" => json!(so().region),
@@ -4739,7 +4839,7 @@ mod tests {
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
         .collect();
         src.push_str(
-            "[streaming]\n[streaming_recovery]\n[output.post_process]\ncommand = \"cat\"\n",
+            "[elevenlabs]\n[streaming]\n[streaming_recovery]\n[output.post_process]\ncommand = \"cat\"\n",
         );
         let cfg: Config = toml::from_str(&src).expect("materialized config parses");
 

@@ -295,6 +295,7 @@ mod tests {
             TranscriptionEngine::Dolphin,
             TranscriptionEngine::Omnilingual,
             TranscriptionEngine::Cohere,
+            TranscriptionEngine::ElevenLabs,
         ];
         for e in engines {
             assert!(

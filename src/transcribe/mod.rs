@@ -5,6 +5,7 @@
 //! - Remote OpenAI-compatible Whisper API (whisper.cpp server, OpenAI, etc.)
 //! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
+//! - Optionally ElevenLabs Scribe cloud transcription (when `elevenlabs` feature is enabled)
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
 //!   or transcribe.cpp GGUF in voxtype-gguf-worker (when `parakeet-gguf` is enabled)
 //! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
@@ -15,6 +16,8 @@
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
 pub mod cli;
+#[cfg(feature = "elevenlabs")]
+mod elevenlabs;
 pub mod lines;
 mod metadata;
 pub use metadata::RuntimeMetadata;
@@ -444,6 +447,18 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "OpenVINO engine requested but voxtype was not compiled with --features openvino-whisper"
                 .to_string(),
         )),
+        #[cfg(feature = "elevenlabs")]
+        TranscriptionEngine::ElevenLabs => {
+            let provider_config = config.elevenlabs.clone().unwrap_or_default();
+            Ok(Box::new(elevenlabs::ElevenLabsTranscriber::new(
+                &provider_config,
+            )?))
+        }
+        #[cfg(not(feature = "elevenlabs"))]
+        TranscriptionEngine::ElevenLabs => Err(TranscribeError::InitFailed(
+            "ElevenLabs engine requested but voxtype was not compiled with --features elevenlabs"
+                .to_string(),
+        )),
     }
 }
 
@@ -789,5 +804,88 @@ mod tests {
         // StreamingConfig::default(), not from [whisper]'s legacy fields.
         assert_eq!(resolved.interval_s, 1.5_f32 as f64);
         assert_eq!(resolved.partial_min_words, 1); // shared default, not legacy
+    }
+
+    fn factory_error(config: &Config) -> TranscribeError {
+        match create_transcriber(config) {
+            Ok(_) => panic!("expected transcriber construction to fail"),
+            Err(error) => error,
+        }
+    }
+
+    #[cfg(not(feature = "elevenlabs"))]
+    #[test]
+    fn elevenlabs_factory_reports_feature_disabled_remediation() {
+        let config = Config {
+            engine: TranscriptionEngine::ElevenLabs,
+            ..Config::default()
+        };
+
+        let error = factory_error(&config).to_string();
+
+        assert!(error.contains("--features elevenlabs"));
+    }
+
+    #[cfg(feature = "elevenlabs")]
+    mod elevenlabs {
+        use super::*;
+        use crate::config::{ElevenLabsConfig, ElevenLabsMode};
+
+        const API_KEY: &str = "test-elevenlabs-key";
+
+        fn config(mode: ElevenLabsMode) -> Config {
+            Config {
+                engine: TranscriptionEngine::ElevenLabs,
+                elevenlabs: Some(ElevenLabsConfig {
+                    api_key: Some(API_KEY.to_string()),
+                    mode,
+                    ..ElevenLabsConfig::default()
+                }),
+                ..Config::default()
+            }
+        }
+
+        #[test]
+        fn factory_materializes_defaults_before_reporting_missing_api_key() {
+            let config = Config {
+                engine: TranscriptionEngine::ElevenLabs,
+                elevenlabs: None,
+                ..Config::default()
+            };
+
+            let error = factory_error(&config).to_string();
+
+            assert!(error.contains(
+                "ElevenLabs API key required: set [elevenlabs] api_key or ELEVENLABS_API_KEY"
+            ));
+            assert!(!error.contains("config section is missing"));
+        }
+
+        #[test]
+        fn factory_rejects_api_keys_that_are_invalid_http_headers() {
+            let invalid_key = "secret\nheader";
+            let mut config = config(ElevenLabsMode::Realtime);
+            config.elevenlabs.as_mut().unwrap().api_key = Some(invalid_key.to_string());
+
+            let error = factory_error(&config).to_string();
+
+            assert!(error.contains("cannot be used in an HTTP header"));
+            assert!(!error.contains(invalid_key));
+        }
+
+        #[test]
+        fn factory_rejects_invalid_vad_silence_threshold() {
+            let mut config = config(ElevenLabsMode::Realtime);
+            config
+                .elevenlabs
+                .as_mut()
+                .unwrap()
+                .vad_silence_threshold_secs = f32::NAN;
+
+            let error = factory_error(&config).to_string();
+
+            assert!(error.contains("vad_silence_threshold_secs"));
+            assert!(error.contains("positive finite number"));
+        }
     }
 }

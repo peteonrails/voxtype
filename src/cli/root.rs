@@ -10,6 +10,17 @@ use clap::Parser;
 use super::Commands;
 use super::ENGINE_NAMES_CSV;
 
+fn parse_positive_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("'{value}' is not a number"))?;
+    if parsed.is_finite() && parsed > 0.0 {
+        Ok(parsed)
+    } else {
+        Err("value must be a positive finite number".to_string())
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "voxtype")]
 #[command(author, version = super::VERSION, about = "Push-to-talk voice-to-text for Linux")]
@@ -283,6 +294,92 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub soniox_region: Option<String>,
+
+    // -- ElevenLabs --
+    /// API key for ElevenLabs (or use ELEVENLABS_API_KEY env var)
+    #[arg(
+        long,
+        value_name = "KEY",
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_api_key: Option<String>,
+
+    /// ElevenLabs API region
+    #[arg(
+        long,
+        value_name = "REGION",
+        value_parser = ["global", "us", "eu", "india", "singapore"],
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_region: Option<String>,
+
+    /// Language hint for ElevenLabs (ISO 639-1 or ISO 639-3)
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_language: Option<String>,
+
+    /// ElevenLabs dictation mode: batch, realtime, or partials
+    #[arg(
+        long,
+        value_name = "MODE",
+        value_parser = ["batch", "realtime", "partials"],
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_mode: Option<String>,
+
+    /// ElevenLabs model for batch transcription (e.g., scribe_v3)
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_model: Option<String>,
+
+    /// When ElevenLabs commits realtime segments: vad or manual
+    #[arg(
+        long,
+        value_name = "STRATEGY",
+        value_parser = ["vad", "manual"],
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_commit_strategy: Option<String>,
+
+    /// Remove provider-detected filler words, false starts, and disfluencies
+    #[arg(
+        long,
+        help_heading = "ElevenLabs",
+        hide_short_help = true,
+        conflicts_with = "elevenlabs_verbatim"
+    )]
+    pub elevenlabs_no_verbatim: bool,
+
+    /// Preserve filler words, false starts, and disfluencies
+    #[arg(
+        long,
+        help_heading = "ElevenLabs",
+        hide_short_help = true,
+        conflicts_with = "elevenlabs_no_verbatim"
+    )]
+    pub elevenlabs_verbatim: bool,
+
+    /// Seconds of silence before ElevenLabs commits a realtime segment
+    #[arg(
+        long,
+        value_name = "SECS",
+        value_parser = parse_positive_f32,
+        help_heading = "ElevenLabs",
+        hide_short_help = true
+    )]
+    pub elevenlabs_vad_silence_threshold_secs: Option<f32>,
 
     // -- Hotkey --
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)

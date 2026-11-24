@@ -199,6 +199,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Gguf => "\u{2699}\u{FE0F}", // ⚙️
         crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
         crate::config::TranscriptionEngine::OpenVino => "\u{1F9E0}", // 🧠
+        crate::config::TranscriptionEngine::ElevenLabs => "\u{1F399}\u{FE0F}", // 🎙️
     }
 }
 

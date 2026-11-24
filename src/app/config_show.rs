@@ -134,6 +134,47 @@ pub(crate) fn format_meeting_config_section(meeting: &config::MeetingConfig) -> 
     s
 }
 
+/// Format the resolved `[elevenlabs]` section without exposing credentials.
+fn format_elevenlabs_config_section(elevenlabs: Option<&config::ElevenLabsConfig>) -> String {
+    use std::fmt::Write;
+
+    let mut section = String::from("\n[elevenlabs]\n");
+    let Some(elevenlabs) = elevenlabs else {
+        section.push_str("  (not configured)\n");
+        return section;
+    };
+
+    let _ = writeln!(
+        section,
+        "  api_key = {}",
+        if elevenlabs.api_key.is_some() {
+            "(set)"
+        } else {
+            "(not set)"
+        }
+    );
+    let _ = writeln!(section, "  region = {:?}", elevenlabs.region);
+    if let Some(language_code) = elevenlabs.language_code.as_deref() {
+        let _ = writeln!(section, "  language_code = {language_code:?}");
+    } else {
+        section.push_str("  language_code = (not set)\n");
+    }
+    let _ = writeln!(section, "  mode = {:?}", elevenlabs.mode);
+    let _ = writeln!(section, "  model = {:?}", elevenlabs.model);
+    let _ = writeln!(
+        section,
+        "  commit_strategy = {:?}",
+        elevenlabs.commit_strategy
+    );
+    let _ = writeln!(section, "  no_verbatim = {}", elevenlabs.no_verbatim);
+    let _ = writeln!(
+        section,
+        "  vad_silence_threshold_secs = {}",
+        elevenlabs.vad_silence_threshold_secs
+    );
+    section
+}
+
 pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("Current Configuration\n");
     println!("=====================\n");
@@ -175,6 +216,11 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     if let Some(gpu_device) = config.whisper.gpu_device {
         println!("  gpu_device = {}", gpu_device);
     }
+
+    print!(
+        "{}",
+        format_elevenlabs_config_section(config.elevenlabs.as_ref())
+    );
 
     // Show Parakeet status
     println!("\n[parakeet]");
@@ -369,5 +415,34 @@ mod tests {
         assert!(rendered.contains("enabled = false"));
         assert!(rendered.contains("backend = "));
         assert!(rendered.contains("ollama_url = "));
+    }
+
+    #[test]
+    fn config_displays_resolved_elevenlabs_settings_without_the_api_key() {
+        let elevenlabs = config::ElevenLabsConfig {
+            api_key: Some("elevenlabs-secret-key".to_string()),
+            region: config::ElevenLabsRegion::Eu,
+            language_code: Some("de".to_string()),
+            mode: config::ElevenLabsMode::Partials,
+            model: "scribe_v3".to_string(),
+            commit_strategy: config::ElevenLabsCommitStrategy::Manual,
+            no_verbatim: true,
+            vad_silence_threshold_secs: 0.75,
+        };
+
+        assert_eq!(
+            format_elevenlabs_config_section(Some(&elevenlabs)),
+            concat!(
+                "\n[elevenlabs]\n",
+                "  api_key = (set)\n",
+                "  region = Eu\n",
+                "  language_code = \"de\"\n",
+                "  mode = Partials\n",
+                "  model = \"scribe_v3\"\n",
+                "  commit_strategy = Manual\n",
+                "  no_verbatim = true\n",
+                "  vad_silence_threshold_secs = 0.75\n",
+            )
+        );
     }
 }

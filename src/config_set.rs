@@ -114,6 +114,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "cohere",
     "gguf",
     "openvino",
+    "elevenlabs",
 ];
 
 /// Is the engine name one we recognize at all?
@@ -158,6 +159,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Cohere => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
         TranscriptionEngine::Gguf => cfg!(feature = "gguf"),
         TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
+        TranscriptionEngine::ElevenLabs => cfg!(feature = "elevenlabs"),
     }
 }
 
