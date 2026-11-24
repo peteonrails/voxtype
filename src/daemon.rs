@@ -535,6 +535,24 @@ fn read_output_mode_override() -> Option<OutputOverride> {
     }
 }
 
+/// The settings a profile's `post_process_command` runs with: the profile's
+/// command and timeout, and the main `[output.post_process]` whitespace and
+/// edit-list settings.
+fn profile_post_process_config(
+    base: Option<&crate::config::PostProcessConfig>,
+    command: &str,
+    timeout_ms: u64,
+) -> crate::config::PostProcessConfig {
+    crate::config::PostProcessConfig {
+        command: command.to_string(),
+        timeout_ms,
+        trim: base.is_none_or(|config| config.trim),
+        fallback_on_empty: true,
+        edit_list: base.is_some_and(|config| config.edit_list),
+        ..Default::default()
+    }
+}
+
 /// Fold a per-recording output override into the configuration used to build
 /// a streaming session's output chain.
 fn apply_output_override(
@@ -5973,19 +5991,11 @@ impl Daemon {
                     let final_text = if let Some(profile) = active_profile {
                         if let Some(ref cmd) = profile.post_process_command {
                             let timeout_ms = profile.post_process_timeout_ms.unwrap_or(30000);
-                            let profile_config = crate::config::PostProcessConfig {
-                                command: cmd.clone(),
+                            let profile_config = profile_post_process_config(
+                                self.config.output.post_process.as_ref(),
+                                cmd,
                                 timeout_ms,
-                                trim: true,
-                                fallback_on_empty: true,
-                                edit_list: self
-                                    .config
-                                    .output
-                                    .post_process
-                                    .as_ref()
-                                    .is_some_and(|config| config.edit_list),
-                                ..Default::default()
-                            };
+                            );
                             let profile_name = profile_override.as_deref().unwrap_or_default();
                             let profile_processor =
                                 PostProcessor::new(&profile_config).for_profile(profile_name);
@@ -8250,6 +8260,27 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_post_process_uses_the_main_trim_and_edit_list() {
+        let base = crate::config::PostProcessConfig {
+            command: "main".into(),
+            trim: false,
+            edit_list: true,
+            ..Default::default()
+        };
+        let cfg = profile_post_process_config(Some(&base), "profile-cmd", 1234);
+        assert_eq!(cfg.command, "profile-cmd");
+        assert_eq!(cfg.timeout_ms, 1234);
+        assert!(
+            !cfg.trim,
+            "trim = false in [output.post_process] applies to profiles"
+        );
+        assert!(cfg.edit_list);
+        let cfg = profile_post_process_config(None, "profile-cmd", 1234);
+        assert!(cfg.trim, "no main section: the default (trim) stays");
+        assert!(!cfg.edit_list);
+    }
+
     mod history_contracts {
         include!("daemon/history_contract_tests.rs");
     }
