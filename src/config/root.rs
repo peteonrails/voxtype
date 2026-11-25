@@ -364,10 +364,11 @@ impl Config {
         if matches!(cfg.engine, TranscriptionEngine::Soniox) {
             if let Some(ref mut sx) = cfg.soniox {
                 if !sx.async_api {
-                    tracing::info!(
-                        "Soniox meeting mode: routing to async API (stt-async-v6); dictation path unchanged"
-                    );
                     sx.async_api = true;
+                    tracing::info!(
+                        "Soniox meeting mode: routing to async API ({}); dictation path unchanged",
+                        sx.resolved_model()
+                    );
                 }
             }
         }
@@ -882,7 +883,7 @@ impl Config {
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()
-                .map(|s| s.model.as_str())
+                .map(|s| s.resolved_model())
                 .unwrap_or("soniox (not configured)"),
         }
     }
@@ -968,7 +969,7 @@ impl Config {
                 self.openvino.get_or_insert_with(Default::default).model = model
             }
             TranscriptionEngine::Soniox => {
-                self.soniox.get_or_insert_with(Default::default).model = model
+                self.soniox.get_or_insert_with(Default::default).model = Some(model)
             }
         }
     }
