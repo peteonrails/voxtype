@@ -277,6 +277,29 @@ pub fn backend_display_for_variant(v: setup::binary::Variant) -> &'static str {
 /// `meeting_status`, and (when a meeting is active) `meeting_id` after the
 /// existing keys, and only when `extended` is also `Some` — passing `None`
 /// leaves the output byte-identical to before meeting fields existed.
+/// Runtime-dir file the daemon keeps while it runs without the model it
+/// failed to load at startup. Status still reports `idle` (the state
+/// contract is unchanged) but stops calling it ready.
+pub const MODEL_UNAVAILABLE_FILE: &str = "model_unavailable";
+
+const IDLE_TOOLTIP: &str = "Voxtype ready - hold hotkey to record";
+const IDLE_MODEL_UNAVAILABLE_TOOLTIP: &str =
+    "Voxtype is running, but the model failed to load. Run: voxtype doctor";
+
+fn idle_tooltip(model_unavailable: bool) -> &'static str {
+    if model_unavailable {
+        IDLE_MODEL_UNAVAILABLE_TOOLTIP
+    } else {
+        IDLE_TOOLTIP
+    }
+}
+
+fn model_unavailable() -> bool {
+    config::Config::runtime_dir()
+        .join(MODEL_UNAVAILABLE_FILE)
+        .exists()
+}
+
 pub fn format_state_json(
     state: &str,
     icons: &config::ResolvedIcons,
@@ -287,7 +310,7 @@ pub fn format_state_json(
         "recording" => (&icons.recording, "Recording..."),
         "streaming" => (&icons.streaming, "Streaming live..."),
         "transcribing" => (&icons.transcribing, "Transcribing..."),
-        "idle" => (&icons.idle, "Voxtype ready - hold hotkey to record"),
+        "idle" => (&icons.idle, idle_tooltip(model_unavailable())),
         "stopped" => (&icons.stopped, "Voxtype not running"),
         _ => (&icons.idle, "Unknown state"),
     };
@@ -444,6 +467,14 @@ mod tests {
     /// (NOT a real newline), and the space-after-colon style are part of the
     /// contract. If you switch the implementation (e.g. to serde_json), this
     /// test must still pass byte-for-byte.
+    #[test]
+    fn idle_tooltip_stops_saying_ready_when_the_model_is_unavailable() {
+        assert_eq!(idle_tooltip(false), "Voxtype ready - hold hotkey to record");
+        let broken = idle_tooltip(true);
+        assert!(!broken.contains("ready"), "{broken}");
+        assert!(broken.contains("voxtype doctor"), "{broken}");
+    }
+
     #[test]
     fn format_state_json_pins_byte_exact_output() {
         // Deterministic icons so the test doesn't depend on which theme is

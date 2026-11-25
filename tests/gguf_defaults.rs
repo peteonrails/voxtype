@@ -20,7 +20,13 @@ const CASES: [(&str, &str, &str); 2] = [
 ];
 
 fn invoke(dir: &Path, args: &[&str]) -> std::process::Output {
-    let worker = dir.join("worker-fixture");
+    invoke_with_worker(dir, "worker-fixture", args)
+}
+
+/// `worker` names the fixture as a packaged worker would be named, so the
+/// worker's backends are read from its name as for an installed one.
+fn invoke_with_worker(dir: &Path, worker: &str, args: &[&str]) -> std::process::Output {
+    let worker = dir.join(worker);
     common::write_script(&worker, "#!/bin/sh\nexit 99\n");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_voxtype"));
     for (key, _) in std::env::vars_os() {
@@ -136,6 +142,54 @@ fn validate_selection_rejects_streaming_gguf_even_without_restart_flag() {
     );
     assert!(String::from_utf8_lossy(&result.stderr).contains("streaming"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+}
+
+/// voxtype-bin-rc left /usr/bin/voxtype on voxtype-avx512, whose worker has
+/// no Vulkan, and validate-selection called cohere.gguf_backend = "vulkan"
+/// compatible while the daemon could not load the model.
+#[test]
+fn validate_selection_rejects_a_gguf_backend_the_worker_lacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("custom.gguf");
+    std::fs::write(&model, b"GGUFfixture for selection, never inference").unwrap();
+    let config = |backend: &str| {
+        format!(
+            "engine = \"cohere\"\n[cohere]\nmodel = {:?}\ngguf_backend = \"{backend}\"\n",
+            model.to_str().unwrap()
+        )
+    };
+    let path = dir.path().join("config.toml");
+    let args = ["config", "validate-selection"];
+
+    std::fs::write(&path, config("vulkan")).unwrap();
+    let result = invoke_with_worker(dir.path(), "voxtype-gguf-worker-avx512", &args);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "accepted: {stderr}");
+    assert!(
+        stderr.contains("cohere.gguf_backend is \"vulkan\", but the GGUF worker of voxtype-avx512"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("voxtype config set cohere.gguf_backend auto"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), config("vulkan"));
+
+    let result = invoke_with_worker(dir.path(), "voxtype-gguf-worker-vulkan", &args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    std::fs::write(&path, config("auto")).unwrap();
+    let result = invoke_with_worker(dir.path(), "voxtype-gguf-worker-avx512", &args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("compatible and installed"));
 }
 
 #[test]
