@@ -1446,6 +1446,8 @@ Any valid evdev key name works. Common choices:
 
 Voxtype supports seven speech-to-text engines. Whisper uses whisper.cpp and works with any binary variant. The other six engines run via ONNX Runtime and require an ONNX binary variant (`voxtype-*-onnx-*`).
 
+**macOS:** the macOS build includes only the Whisper and Soniox engines. The other engines are Linux-only for now, and `voxtype setup onnx` does not apply there. See [INSTALL_MACOS.md](INSTALL_MACOS.md#available-engines).
+
 | Engine | Best For | GPU Required | Languages |
 |--------|----------|--------------|-----------|
 | **Whisper** (default) | Most users, multilingual | Optional (faster with GPU) | 99+ languages |

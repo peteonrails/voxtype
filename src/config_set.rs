@@ -184,7 +184,8 @@ fn set_engine_with_models(
         return Err(ConfigSetError::UnknownEngine(name.to_string()));
     }
     if !engine_feature_compiled(name) {
-        return Err(ConfigSetError::FeatureNotCompiled(name.to_string()));
+        return Err(macos_engine_missing(name)
+            .unwrap_or_else(|| ConfigSetError::FeatureNotCompiled(name.to_string())));
     }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
@@ -417,6 +418,16 @@ fn write_warning(
     }
 }
 
+/// On macOS, the refusal for an engine this binary lacks. The macOS release
+/// has no variant that has it and no supported rebuild, so it names the
+/// engines it has instead (#632). `None` elsewhere.
+fn macos_engine_missing(engine: &str) -> Option<ConfigSetError> {
+    cfg!(target_os = "macos").then(|| ConfigSetError::EngineNotCompiled {
+        engine: engine.to_string(),
+        hint: crate::setup::install_hint::Hint::MacosLinuxOnly.to_string(),
+    })
+}
+
 /// The LARD problem of the config an editor holds, before it is edited.
 fn lard_problem(editor: &ConfigEditor) -> Option<crate::setup::lard::Problem> {
     crate::setup::lard::problem(&editor.candidate_config().ok()?)
@@ -429,10 +440,12 @@ fn lookup(key: &str) -> Result<Found, ConfigSetError> {
     let spec = found.spec();
     if let Some(feature) = spec.requires_feature {
         if !schema::feature_compiled(feature) {
-            return Err(ConfigSetError::KeyFeatureNotCompiled {
-                key: spec.key,
-                feature,
-            });
+            return Err(macos_engine_missing(feature).unwrap_or(
+                ConfigSetError::KeyFeatureNotCompiled {
+                    key: spec.key,
+                    feature,
+                },
+            ));
         }
     }
     Ok(found)
@@ -893,9 +906,30 @@ gguf_backend = "cpu"
         let (_dir, path) = temp_config("");
         let err = set_engine(path, name).unwrap_err();
         match err {
-            ConfigSetError::FeatureNotCompiled(n) => assert_eq!(n, name),
-            other => panic!("expected FeatureNotCompiled, got {:?}", other),
+            ConfigSetError::FeatureNotCompiled(n) if !cfg!(target_os = "macos") => {
+                assert_eq!(n, name)
+            }
+            ConfigSetError::EngineNotCompiled { engine, .. } if cfg!(target_os = "macos") => {
+                assert_eq!(engine, name)
+            }
+            other => panic!("unexpected error for {name}: {:?}", other),
         }
+    }
+
+    /// #632: the macOS release refuses an engine it lacks by naming the
+    /// engines it has, not with a Cargo rebuild or a Linux variant switch.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_refusal_names_the_macos_engines() {
+        let (_dir, path) = temp_config("");
+        let message = set_engine(path, "parakeet").unwrap_err().to_string();
+        assert!(
+            message.contains("only the Whisper and Soniox engines"),
+            "{message}"
+        );
+        assert!(message.contains("Linux-only for now"), "{message}");
+        assert!(!message.contains("--features"), "{message}");
+        assert!(!message.contains("voxtype info variants"), "{message}");
     }
 
     // ---------------------------------------------------------------------
@@ -1069,11 +1103,14 @@ gguf_backend = "cpu"
         let (_dir, path) = full_config();
         let key = format!("{}.on_demand_loading", engine);
         let err = set_key(path, &key, "true").unwrap_err();
-        match err {
-            ConfigSetError::KeyFeatureNotCompiled { feature, .. } => {
-                assert_eq!(feature, *engine)
+        match &err {
+            ConfigSetError::KeyFeatureNotCompiled { feature, .. } if !cfg!(target_os = "macos") => {
+                assert_eq!(feature, engine)
             }
-            other => panic!("expected KeyFeatureNotCompiled, got {:?}", other),
+            ConfigSetError::EngineNotCompiled { engine: e, .. } if cfg!(target_os = "macos") => {
+                assert_eq!(e, engine)
+            }
+            other => panic!("unexpected error for {engine}: {:?}", other),
         }
         assert_eq!(err.exit_code(), 2);
     }

@@ -55,6 +55,10 @@ impl VariantMismatch {
             .as_deref()
             .unwrap_or("the running binary");
         match (&self.remediation, hint) {
+            (_, Hint::MacosLinuxOnly) => format!(
+                "voxtype for macOS does not include the {} engine. To use it, {}.",
+                self.configured_engine, hint,
+            ),
             (Remediation::SwitchToVariant { target: None }, _) => format!(
                 "{} was built without --features {}, and the builds that have it need a CPU \
                  with AVX2, which this one lacks. Choose an engine the running build supports.",
@@ -390,6 +394,49 @@ mod tests {
             "This source build was compiled without --features cohere. \
              To enable the cohere engine, rebuild with --features cohere."
         );
+    }
+
+    /// #632: on macOS the explanation names the macOS engines whatever the
+    /// remediation, Nix and source included, and never suggests a rebuild.
+    #[test]
+    fn macos_hint_wins_over_every_remediation() {
+        let cfg = config_with_engine(TranscriptionEngine::Parakeet);
+        let mut source = fake_inventory(
+            InstallKind::Source,
+            vec![],
+            Variant::WhisperNative,
+            Variant::OnnxNative,
+        );
+        let package = fake_inventory(
+            InstallKind::Package,
+            vec![],
+            Variant::WhisperAvx2,
+            Variant::OnnxAvx2,
+        );
+        let from_source = detect_mismatch(&cfg, &source).expect("source");
+        source.binary_path = "/nix/store/abc-voxtype-1.3.1/bin/voxtype".into();
+        source.package_lib_dir = None;
+        let from_nix = detect_mismatch(&cfg, &source).expect("nix");
+        assert!(matches!(
+            from_nix.remediation,
+            Remediation::NixPackage { .. }
+        ));
+        let from_package = detect_mismatch(&cfg, &package).expect("package");
+        let no_avx2 = VariantMismatch {
+            remediation: Remediation::SwitchToVariant { target: None },
+            ..from_package.clone()
+        };
+
+        for m in [from_source, from_nix, from_package, no_avx2] {
+            let text = m.explanation_with(&crate::setup::install_hint::Hint::MacosLinuxOnly);
+            assert!(
+                text.starts_with("voxtype for macOS does not include the parakeet engine."),
+                "{text}"
+            );
+            assert!(text.contains("Linux-only for now"), "{text}");
+            assert!(!text.contains("--features"), "{text}");
+            assert!(!text.contains("flake"), "{text}");
+        }
     }
 
     #[test]

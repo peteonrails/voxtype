@@ -211,7 +211,7 @@ Yes! Voxtype supports optional GPU acceleration:
 
 - **Vulkan** - Works on AMD, NVIDIA, and Intel GPUs (included in packages)
 - **CUDA** - NVIDIA GPUs (build from source)
-- **Metal** - Apple Silicon (build from source)
+- **Metal** - Apple Silicon (included in the macOS release)
 - **HIP/ROCm** - AMD GPUs (build from source)
 
 **Vulkan (easiest):** Packages include a pre-built Vulkan binary. Install the runtime and enable:

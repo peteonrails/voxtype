@@ -107,6 +107,17 @@ pub fn model_load_failed(
     // The running binary lacks the engine. No model download fixes that;
     // the fix is the one `warn_on_variant_mismatch` gives at startup.
     if err.to_string().contains("not compiled with --features") {
+        // The macOS release has no variant to switch to (#632).
+        if cfg!(target_os = "macos") {
+            return Notice {
+                title: format!("Voxtype: {label} engine unavailable"),
+                body: format!(
+                    "{}. {consequence} {}. Pick a Whisper model with `voxtype setup model`.",
+                    detail(&err.to_string()),
+                    crate::setup::install_hint::MACOS_ENGINES,
+                ),
+            };
+        }
         return Notice {
             title: format!("Voxtype: {label} engine unavailable"),
             body: format!(
@@ -316,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn engine_missing_from_build_points_at_variant_switch() {
         let config = Config {
             engine: TranscriptionEngine::Parakeet,
@@ -329,6 +341,30 @@ mod tests {
         assert_eq!(n.title, "Voxtype: Parakeet engine unavailable");
         assert!(n.body.contains("voxtype setup onnx --enable"));
         assert!(!n.body.contains("--download"));
+    }
+
+    /// #632: the macOS release has no ONNX variant, so the notice names the
+    /// engines it has instead of a Linux variant switch.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn engine_missing_from_macos_build_names_its_engines() {
+        let config = Config {
+            engine: TranscriptionEngine::Parakeet,
+            ..Default::default()
+        };
+        let err = TranscribeError::InitFailed(
+            "Parakeet engine requested but voxtype was not compiled with --features parakeet"
+                .into(),
+        );
+        let n = model_load_failed(&config, "parakeet-tdt-0.6b-v3", &err, true);
+        assert_eq!(n.title, "Voxtype: Parakeet engine unavailable");
+        assert!(
+            n.body.contains("only the Whisper and Soniox engines"),
+            "{}",
+            n.body
+        );
+        assert!(n.body.contains("Linux-only for now"), "{}", n.body);
+        assert!(!n.body.contains("setup onnx --enable"), "{}", n.body);
     }
 
     #[test]

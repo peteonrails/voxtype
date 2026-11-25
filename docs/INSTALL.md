@@ -224,7 +224,7 @@ Fedora's ydotool ships as a system service that needs extra setup. See [TROUBLES
 
 ### macOS
 
-Universal binary: Apple Silicon and Intel. Uses Microsoft ONNX Runtime so every engine is available, including Parakeet on the Neural Engine path.
+Universal binary: Apple Silicon and Intel. The macOS build includes two engines: Whisper, which runs locally with Metal acceleration or against a remote Whisper server, and Soniox, a cloud engine. Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, the GGUF engine and OpenVINO are Linux-only for now.
 
 ```bash
 brew install --cask peteonrails/voxtype/voxtype
