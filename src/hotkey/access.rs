@@ -116,7 +116,16 @@ pub fn startup_failure_notification(err: &HotkeyError) -> Option<(&'static str, 
             "No keyboard found in /dev/input. Plug one in and restart voxtype. {}",
             ALTERNATIVE
         ),
-        HotkeyError::UnknownKey(_) | HotkeyError::Evdev(_) => return None,
+        HotkeyError::UnknownKey(_)
+        | HotkeyError::Evdev(_)
+        | HotkeyError::PortalUnavailable(_)
+        | HotkeyError::PortalRegistration(_)
+        | HotkeyError::PortalBinding(_)
+        | HotkeyError::PortalSessionEnded
+        | HotkeyError::PortalProtocol(_)
+        | HotkeyError::PortalCancelled
+        | HotkeyError::PortalResponse(_)
+        | HotkeyError::PortalMissingRequired(_) => return None,
     };
     Some(("Voxtype: built-in hotkey unavailable", body))
 }
@@ -137,7 +146,7 @@ fn failure_key(err: &HotkeyError) -> &'static str {
         HotkeyError::InputGroupInactive(_) => "input-group-inactive",
         HotkeyError::DeviceDenied(_) => "device-denied",
         HotkeyError::NoKeyboard => "no-keyboard",
-        HotkeyError::UnknownKey(_) | HotkeyError::Evdev(_) => "other",
+        _ => "other",
     }
 }
 
