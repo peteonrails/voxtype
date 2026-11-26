@@ -938,6 +938,7 @@ mod tests {
             mode: Mode::PushToTalk,
             enabled: true,
             cancel_key: None,
+            paste_last_key: None,
             modifier: None,
             feedback: None,
             dirty_since_load: false,
