@@ -2955,12 +2955,16 @@ Controls desktop notifications at various stages.
 **Default:** `false`
 **Required:** No
 
-When `true`, shows a notification when recording starts (hotkey pressed).
+When `true`, shows a notification when recording starts (hotkey pressed). It
+is posted once the microphone is open, so a slow notification server does not
+delay the recording, and it is not posted when the microphone cannot be opened.
 
-This notification has no timeout: it stays on screen for as long as the
-recording runs, and is replaced or dismissed when the recording ends. A banner
-that expired after a couple of seconds would leave the microphone live with
-nothing on screen to say so.
+When a recording does not stream live, this notification has no timeout: it
+stays on screen for as long as the recording runs, and is replaced or dismissed
+when the recording ends. A banner that expired after a couple of seconds would
+leave the microphone live with nothing on screen to say so. When a recording
+streams live, the notification is "Streaming Active", posted once the stream is
+open, and it closes after 2 seconds.
 
 ### on_recording_stop
 

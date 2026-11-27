@@ -1342,6 +1342,9 @@ pub struct Daemon {
     history_test_next_capture: Option<Box<dyn AudioCapture>>,
     #[cfg(test)]
     history_test_completion_observer: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Hotkey events for `run()` in place of a keyboard listener.
+    #[cfg(test)]
+    test_hotkey_events: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>>,
     // Engine serving the current recording, after any `--model` override,
     // for the "Transcribed" log line.
     recording_engine: String,
@@ -1651,6 +1654,8 @@ impl Daemon {
             history_test_next_capture: None,
             #[cfg(test)]
             history_test_completion_observer: None,
+            #[cfg(test)]
+            test_hotkey_events: None,
             recording_engine,
             transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
@@ -6963,6 +6968,10 @@ impl Daemon {
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mut hotkey_rx: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>> = None;
+        #[cfg(test)]
+        if let Some(events) = self.test_hotkey_events.take() {
+            hotkey_rx = Some(events);
+        }
 
         // Current state
         let mut state = State::Idle;
@@ -7088,11 +7097,6 @@ impl Daemon {
 
                                 tracing::info!("Recording started");
 
-                                // Send notification if enabled
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
                                 // Prepare model for transcription
                                 self.prepare_for_recording(model_override.as_deref());
 
@@ -7140,6 +7144,12 @@ impl Daemon {
                                             self.update_state("recording");
                                             self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
+
+                                            // After capture has started, so the notification
+                                            // round trip does not delay the microphone.
+                                            if self.config.output.notification.on_recording_start {
+                                                send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                            }
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                             if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -7245,10 +7255,6 @@ impl Daemon {
                                 // Start recording
                                 tracing::info!("Recording started (toggle mode)");
 
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
                                 // Prepare model for transcription
                                 self.prepare_for_recording(model_override.as_deref());
 
@@ -7289,6 +7295,12 @@ impl Daemon {
                                             self.update_state("recording");
                                             self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
+
+                                            // After capture has started, so the notification
+                                            // round trip does not delay the microphone.
+                                            if self.config.output.notification.on_recording_start {
+                                                send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                            }
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                             if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -7667,10 +7679,6 @@ impl Daemon {
                         }
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
-                        if self.config.output.notification.on_recording_start {
-                            send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                        }
-
                         // Prepare model for transcription
                         self.prepare_for_recording(model_override.as_deref());
 
@@ -7714,6 +7722,12 @@ impl Daemon {
                                     self.update_state("recording");
                                     self.begin_osd_session(&state);
                                     self.play_feedback(SoundEvent::RecordingStart);
+
+                                    // After capture has started, so the notification
+                                    // round trip does not delay the microphone.
+                                    if self.config.output.notification.on_recording_start {
+                                        send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                    }
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                     if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -8904,6 +8918,248 @@ while True:
                 fs::read_to_string(&target).unwrap(),
                 "DEFAULT:hello there\n"
             );
+        }
+    }
+
+    /// `[output.notification] on_recording_start` posts its banner once the
+    /// microphone is open, so a slow notifier does not cut the start of the
+    /// recording, and posts none when the microphone fails to open. Each
+    /// test runs the daemon's event loop in a process of its own, with a
+    /// notify-send on PATH that logs what it is asked to show. That route is
+    /// Linux's; macOS posts through terminal-notifier instead.
+    #[cfg(target_os = "linux")]
+    mod recording_start_notice {
+        use super::*;
+
+        #[derive(Clone, Copy)]
+        enum Start {
+            PushToTalk,
+            Toggle,
+            External,
+        }
+
+        /// Notes what notify-send had been asked to show when it was opened.
+        struct ProbeCapture {
+            notified: PathBuf,
+            at_open: Arc<std::sync::Mutex<Option<String>>>,
+            opens: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl AudioCapture for ProbeCapture {
+            async fn start(
+                &mut self,
+            ) -> std::result::Result<tokio::sync::mpsc::Receiver<Vec<f32>>, crate::error::AudioError>
+            {
+                let notified = fs::read_to_string(&self.notified).unwrap_or_default();
+                *self.at_open.lock().unwrap() = Some(notified);
+                if !self.opens {
+                    return Err(crate::error::AudioError::Connection(
+                        "synthetic".to_string(),
+                    ));
+                }
+                let (_tx, rx) = tokio::sync::mpsc::channel(1);
+                Ok(rx)
+            }
+            async fn stop(&mut self) -> std::result::Result<Vec<f32>, crate::error::AudioError> {
+                Ok(Vec::new())
+            }
+            async fn get_samples(&mut self) -> Vec<f32> {
+                Vec::new()
+            }
+        }
+
+        async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !done() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+        }
+
+        async fn check(test: &str, start: Start, opens: bool) {
+            let scratch = TempDir::new().unwrap();
+            if !crate::test_support::own_process(
+                &format!("daemon::tests::recording_start_notice::{test}"),
+                |child| {
+                    let bin = scratch.path().join("bin");
+                    fs::create_dir_all(&bin).unwrap();
+                    let sh = which::which("sh").unwrap();
+                    crate::test_support::write_script(
+                        &bin.join("notify-send"),
+                        &format!(
+                            "#!{}\nprintf '%s\\n' \"$*\" >> \"$HOME/notified\"\necho 1\n",
+                            sh.display()
+                        ),
+                    );
+                    child
+                        .env("HOME", scratch.path())
+                        .env("PATH", &bin)
+                        .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
+                        .env("XDG_STATE_HOME", scratch.path().join("state"))
+                        .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+                        .env("XDG_DATA_HOME", scratch.path().join("data"))
+                        .env_remove("WAYLAND_DISPLAY")
+                        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                        .env_remove("DISPLAY");
+                },
+            ) {
+                return;
+            }
+
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let notified = home.join("notified");
+            let banner = match start {
+                Start::PushToTalk => "Push to Talk Active Recording...",
+                Start::Toggle => "Recording Started Press hotkey again to stop",
+                Start::External => "Recording Started External trigger",
+            };
+            let mut config = Config::default();
+            config.audio.feedback.enabled = false;
+            // Nothing to preload: there is no model here.
+            config.whisper.on_demand_loading = true;
+            config.hotkey.enabled = false;
+            config.hotkey.mode = match start {
+                Start::Toggle => ActivationMode::Toggle,
+                Start::PushToTalk | Start::External => ActivationMode::PushToTalk,
+            };
+            config.tray.enabled = false;
+            config.osd.enabled = false;
+            config.output.notification.on_recording_start = true;
+            // File output with a path skips the startup display and output
+            // checks, which would otherwise post notices to the shim's log.
+            config.output.mode = OutputMode::File;
+            config.output.file_path = Some(home.join("dictation.txt"));
+            let at_open = Arc::new(std::sync::Mutex::new(None));
+            let mut daemon = Daemon::new(config, None);
+            daemon.history_test_capture = Some(Box::new(ProbeCapture {
+                notified: notified.clone(),
+                at_open: at_open.clone(),
+                opens,
+            }));
+            let (events, rx) = tokio::sync::mpsc::channel(1);
+            daemon.test_hotkey_events = Some(rx);
+            let state_file = daemon.state_file_path.clone().unwrap();
+
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let task = tokio::task::spawn_local(async move { daemon.run().await });
+                    // The signal handlers are installed before the first state is written.
+                    wait_for("the daemon to start", || {
+                        fs::read_to_string(&state_file).is_ok_and(|state| state.trim() == "idle")
+                    })
+                    .await;
+                    match start {
+                        Start::PushToTalk | Start::Toggle => events
+                            .send(HotkeyEvent::Pressed {
+                                model_override: None,
+                                profile_override: None,
+                            })
+                            .await
+                            .unwrap(),
+                        Start::External => {
+                            assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0)
+                        }
+                    }
+                    wait_for("the microphone to be opened", || {
+                        at_open.lock().unwrap().is_some()
+                    })
+                    .await;
+                    // The event loop handles one event at a time, so once it
+                    // has taken this cancel, the start handler has returned
+                    // and everything it posted is in the log.
+                    events.send(HotkeyEvent::Cancel).await.unwrap();
+                    wait_for("the start handler to return", || {
+                        events.capacity() == events.max_capacity()
+                    })
+                    .await;
+                    task.abort();
+                    assert!(
+                        matches!(task.await, Err(e) if e.is_cancelled()),
+                        "the daemon task ended before it was aborted"
+                    );
+                })
+                .await;
+
+            let log = fs::read_to_string(&notified).unwrap_or_default();
+            let at_open = at_open.lock().unwrap().clone().unwrap();
+            assert!(
+                !at_open.contains(banner),
+                "the banner was posted before the microphone opened:\n{at_open}"
+            );
+            if opens {
+                assert_eq!(
+                    log.matches(banner).count(),
+                    1,
+                    "the banner was not posted once:\n{log}"
+                );
+            } else {
+                assert!(
+                    log.contains("could not open the microphone"),
+                    "no capture failure notice:\n{log}"
+                );
+                assert!(
+                    !log.contains(banner),
+                    "a banner was posted for a microphone that did not open:\n{log}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn push_to_talk_banner_follows_the_microphone() {
+            check(
+                "push_to_talk_banner_follows_the_microphone",
+                Start::PushToTalk,
+                true,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn toggle_banner_follows_the_microphone() {
+            check("toggle_banner_follows_the_microphone", Start::Toggle, true).await;
+        }
+
+        #[tokio::test]
+        async fn external_trigger_banner_follows_the_microphone() {
+            check(
+                "external_trigger_banner_follows_the_microphone",
+                Start::External,
+                true,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn push_to_talk_without_a_microphone_posts_no_banner() {
+            check(
+                "push_to_talk_without_a_microphone_posts_no_banner",
+                Start::PushToTalk,
+                false,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn toggle_without_a_microphone_posts_no_banner() {
+            check(
+                "toggle_without_a_microphone_posts_no_banner",
+                Start::Toggle,
+                false,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn external_trigger_without_a_microphone_posts_no_banner() {
+            check(
+                "external_trigger_without_a_microphone_posts_no_banner",
+                Start::External,
+                false,
+            )
+            .await;
         }
     }
 
