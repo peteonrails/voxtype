@@ -24,6 +24,7 @@ pub struct AudioState {
     pub device: String,
     pub max_duration_secs: u32,
     pub keep_failed_recordings: bool,
+    pub stop_tail_ms: u32,
     pub pause_media: bool,
     pub duck_media: bool,
     pub duck_media_volume_percent: u8,
@@ -78,6 +79,7 @@ pub enum Field {
     Device,
     MaxDuration,
     KeepFailedRecordings,
+    StopTail,
     PauseMedia,
     DuckMedia,
     DuckMediaVolume,
@@ -95,6 +97,7 @@ impl Field {
         Field::Device,
         Field::MaxDuration,
         Field::KeepFailedRecordings,
+        Field::StopTail,
         Field::PauseMedia,
         Field::DuckMedia,
         Field::DuckMediaVolume,
@@ -113,6 +116,8 @@ const THEME_CHOICES: &[&str] = &["default", "subtle", "mechanical"];
 const DURATION_STEP: u32 = 30;
 const DURATION_MIN: u32 = 30;
 const DURATION_MAX: u32 = 1800;
+const STOP_TAIL_STEP: i32 = 100;
+const STOP_TAIL_MAX: u32 = 2000;
 const VOLUME_STEP: f32 = 0.1;
 const DUCK_VOLUME_STEP: i32 = 5;
 /// Step for the duck-fade cycler. A multiple of the 20 ms ramp interval in
@@ -140,6 +145,10 @@ impl AudioState {
             keep_failed_recordings: ed
                 .get_bool("audio", "keep_failed_recordings")
                 .unwrap_or(true),
+            stop_tail_ms: ed
+                .get_int("audio", "stop_tail_ms")
+                .map(|n| n.clamp(0, STOP_TAIL_MAX as i64) as u32)
+                .unwrap_or_else(|| AudioConfig::default().stop_tail_ms),
             pause_media: ed.get_bool("audio", "pause_media").unwrap_or(false),
             duck_media: ed.get_bool("audio", "duck_media").unwrap_or(false),
             duck_media_volume_percent: ed
@@ -251,6 +260,7 @@ impl AudioState {
             "keep_failed_recordings",
             self.keep_failed_recordings,
         );
+        ed.set_int("audio", "stop_tail_ms", self.stop_tail_ms as i64);
         ed.set_bool("audio", "pause_media", self.pause_media);
         ed.set_bool("audio", "duck_media", self.duck_media);
         ed.set_int(
@@ -355,6 +365,10 @@ impl AudioState {
             }
             Field::KeepFailedRecordings => {
                 self.keep_failed_recordings = !self.keep_failed_recordings;
+            }
+            Field::StopTail => {
+                let next = self.stop_tail_ms as i32 + delta * STOP_TAIL_STEP;
+                self.stop_tail_ms = next.clamp(0, STOP_TAIL_MAX as i32) as u32;
             }
             Field::PauseMedia => {
                 self.pause_media = !self.pause_media;
@@ -492,6 +506,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             state.field == Field::KeepFailedRecordings,
             "Keep failed recordings",
             yesno(state.keep_failed_recordings),
+        ),
+        FormRowSpec::new(
+            state.field == Field::StopTail,
+            "Keep recording after release",
+            if state.stop_tail_ms == 0 {
+                "off".to_string()
+            } else {
+                format!("up to {} ms", state.stop_tail_ms)
+            },
         ),
         FormRowSpec::new(
             state.field == Field::PauseMedia,
@@ -659,6 +682,22 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
                 "Turn this off to write no audio to disk. A dictation whose \
                  transcription fails is then lost.",
             ),
+        ],
+        Field::StopTail => vec![
+            heading("Keep recording after release"),
+            Line::from(""),
+            Line::from(
+                "If you let go of the hotkey a moment before your last word \
+                 ends, voxtype keeps recording until the mic goes quiet, for \
+                 at most this long, so the word isn't cut off.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "When you'd already stopped speaking, recording stops at \
+                 once, so a clean release costs nothing. 600 ms covers most \
+                 trailing words.",
+                Style::default().fg(Color::Gray),
+            )),
         ],
         Field::PauseMedia => vec![
             heading("Pause MPRIS media on record"),
@@ -912,6 +951,7 @@ mod tests {
                 Field::Device => "audio.device",
                 Field::MaxDuration => "audio.max_duration_secs",
                 Field::KeepFailedRecordings => "audio.keep_failed_recordings",
+                Field::StopTail => "audio.stop_tail_ms",
                 Field::PauseMedia => "audio.pause_media",
                 Field::DuckMedia => "audio.duck_media",
                 Field::DuckMediaVolume => "audio.duck_media_volume_percent",

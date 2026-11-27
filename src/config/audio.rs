@@ -25,6 +25,12 @@ pub struct AudioConfig {
     #[serde(default = "default_keep_failed_recordings")]
     pub keep_failed_recordings: bool,
 
+    /// After the recording stops, keep capturing until the microphone goes
+    /// quiet, for at most this many milliseconds, so a word still being
+    /// spoken isn't cut off. 0 (default) stops at once
+    #[serde(default)]
+    pub stop_tail_ms: u32,
+
     /// Pause MPRIS media players during recording and resume on stop
     #[serde(default)]
     pub pause_media: bool,
@@ -105,6 +111,7 @@ impl Default for AudioConfig {
             sample_rate: default_audio_sample_rate(),
             max_duration_secs: default_audio_max_duration_secs(),
             keep_failed_recordings: default_keep_failed_recordings(),
+            stop_tail_ms: 0,
             pause_media: false,
             pause_media_ignored_players: Vec::new(),
             duck_media: false,
