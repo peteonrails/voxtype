@@ -317,7 +317,8 @@ What to tell the user about it:
   `output.post_process.timeout_ms` for an LLM (30000 to 60000).
 - If the command fails, times out or prints nothing, the original
   transcription is typed instead, so a broken command never loses dictation.
-- It does not run when streaming is enabled.
+- It does not run when streaming is enabled, unless
+  `[output] streaming_buffer_output = true`.
 - Use instruct or chat models, not reasoning models, which print their
   thinking into the output.
 - A failing command is no longer silent: a notification names the failure

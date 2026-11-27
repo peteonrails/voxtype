@@ -31,6 +31,15 @@ pub struct OutputConfig {
     #[serde(default = "default_true")]
     pub keep_undelivered_text: bool,
 
+    /// For streaming engines: transcribe live while recording but type
+    /// nothing until the recording stops, then process the whole transcript
+    /// once, like a batch dictation (text processing with the recording's
+    /// profile vocabulary, the post-process command, the output mode).
+    /// Off types each segment as it is transcribed and skips
+    /// post-processing.
+    #[serde(default)]
+    pub streaming_buffer_output: bool,
+
     /// Custom driver order for type mode (overrides default: wtype -> dotool -> ydotool -> clipboard)
     /// Specify which drivers to try and in what order.
     /// Example: ["ydotool", "wtype"] to prefer ydotool over wtype
@@ -210,6 +219,7 @@ impl Default for OutputConfig {
             mode: OutputMode::default(),
             fallback_to_clipboard: true,
             keep_undelivered_text: true,
+            streaming_buffer_output: false,
             driver_order: None,
             notification: NotificationConfig::default(),
             type_delay_ms: 0,

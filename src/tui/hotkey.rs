@@ -533,27 +533,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         lines.push(Line::from(""));
     }
 
-    // Streaming dictation requires toggle activation; if the user has it
-    // enabled, suppress PTT-pair suggestions in favor of a toggle binding.
-    // Covers all streaming-capable backends (Parakeet, Soniox, future).
-    let streaming = {
-        let ed = ConfigEditor::load().ok();
-        let engine = ed
-            .as_ref()
-            .and_then(|e| e.get_string("", "engine"))
-            .unwrap_or_else(|| "whisper".to_string());
-        match engine.as_str() {
-            "parakeet" => ed
-                .as_ref()
-                .and_then(|e| e.get_bool("parakeet", "streaming"))
-                .unwrap_or(false),
-            "soniox" => ed
-                .as_ref()
-                .and_then(|e| e.get_bool("soniox", "streaming"))
-                .unwrap_or(true),
-            _ => false,
-        }
-    };
+    let streaming = streaming_requires_toggle(ConfigEditor::load().ok().as_ref());
     let suggestions = compositor_bindings::suggest_missing(&bindings, streaming);
     if !suggestions.is_empty() {
         let comp = compositor_bindings::dominant_compositor(&bindings);
@@ -800,5 +780,65 @@ fn handle_edit_key(state: &mut HotkeyState, key: KeyEvent) -> Action {
             state.editing = None;
             Action::None
         }
+    }
+}
+
+/// Whether the configured engine streams output that types while recording,
+/// so only a toggle binding works: suggest that instead of a press/release
+/// pair. The answer is the daemon's [`Config::streaming_active`], the check
+/// that promotes push-to-talk to toggle at startup, asked of the config the
+/// daemon would build from the file ([`ConfigEditor::daemon_config`]), so
+/// buffered streaming output and engines that record in batch keep the
+/// press/release pair.
+///
+/// [`Config::streaming_active`]: crate::config::Config::streaming_active
+fn streaming_requires_toggle(ed: Option<&ConfigEditor>) -> bool {
+    ed.and_then(ConfigEditor::daemon_config)
+        .is_some_and(|config| config.streaming_active())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn requires_toggle(source: &str) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, source).unwrap();
+        let ed = ConfigEditor::load_from_path(path).unwrap();
+        streaming_requires_toggle(Some(&ed))
+    }
+
+    /// Streaming that types while the key is held needs a toggle binding.
+    /// Buffered streaming output types nothing until the stop, so the
+    /// press/release pair works. The answer is the daemon's
+    /// (`Config::streaming_active`): local Whisper streams, remote Whisper
+    /// and the Soniox async API record in batch.
+    #[test]
+    fn only_typing_streaming_needs_a_toggle_binding() {
+        let soniox = "engine = \"soniox\"\n[soniox]\nstreaming = true\n";
+        let cases = [
+            (String::new(), false),
+            (soniox.to_string(), true),
+            (
+                format!("{soniox}\n[output]\nstreaming_buffer_output = true\n"),
+                false,
+            ),
+            ("[whisper]\nstreaming = true\n".to_string(), true),
+            (
+                "[whisper]\nstreaming = true\nmode = \"remote\"\n".to_string(),
+                false,
+            ),
+            (
+                "engine = \"soniox\"\n[soniox]\nasync_api = true\n".to_string(),
+                false,
+            ),
+            // The daemon fills a missing [soniox] table with its defaults
+            // (streaming on), as every Soniox daemon that starts has one.
+            ("engine = \"soniox\"\n".to_string(), true),
+        ];
+        let got: Vec<bool> = cases.iter().map(|(src, _)| requires_toggle(src)).collect();
+        let want: Vec<bool> = cases.iter().map(|(_, want)| *want).collect();
+        assert_eq!(got, want);
     }
 }

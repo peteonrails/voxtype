@@ -1238,6 +1238,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Save a transcription to a file when no output method can deliver it. The 200 most recent are kept, readable only by you.",
     ),
     spec(
+        "output.streaming_buffer_output",
+        "output",
+        "streaming_buffer_output",
+        KeyType::Bool,
+        "Output",
+        "Buffer streaming output",
+        "Streaming engines transcribe live but type nothing until you stop, then post-process and output the whole transcript once.",
+    ),
+    spec(
         "output.auto_submit",
         "output",
         "auto_submit",
@@ -1967,7 +1976,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Advanced",
         "Streaming transcription",
-        "Emit text while you speak instead of after you release the key. Forces toggle activation.",
+        "Emit text while you speak instead of after you release the key. Forces toggle activation (with on_demand_loading off) unless output.streaming_buffer_output is on.",
     )
     .for_engine("parakeet")
     .gated("parakeet"),
@@ -3506,6 +3515,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.mode" => serde_json::to_value(cfg.output.mode.clone()).ok()?,
         "output.fallback_to_clipboard" => json!(cfg.output.fallback_to_clipboard),
         "output.keep_undelivered_text" => json!(cfg.output.keep_undelivered_text),
+        "output.streaming_buffer_output" => json!(cfg.output.streaming_buffer_output),
         "output.auto_submit" => json!(cfg.output.auto_submit),
         "output.shift_enter_newlines" => json!(cfg.output.shift_enter_newlines),
         "output.pre_type_delay_ms" => json!(cfg.output.pre_type_delay_ms),

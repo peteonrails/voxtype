@@ -1228,9 +1228,11 @@ No longer used. Earlier versions overlapped adjacent chunks by this much and rem
 
 Enables live streaming transcription via the sliding-window engine: text lands at the cursor incrementally as you speak instead of only after the hotkey is released. Only applies to `mode = "local"`.
 
+Streaming needs `on_demand_loading = false` for the active engine; with on-demand loading every dictation is transcribed after it ends, and the daemon says so at startup.
+
 Tuning (re-transcription interval, buffer size, etc.) lives in the shared `[streaming]` section below, since `[openvino] streaming` wraps the same engine. `[whisper]` also still accepts its own `streaming_interval_secs` / `streaming_max_buffer_secs` / `streaming_min_speech_rms` / `streaming_min_audio_secs` / `streaming_partial_min_words` / `streaming_type_partials` / `streaming_revision_mode` fields for backward compatibility — they're used only when config.toml has no `[streaming]` section.
 
-**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled.
+**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled in local mode with `on_demand_loading` off. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 
 **Example:**
 ```toml
@@ -1725,11 +1727,18 @@ streaming pipeline and a TDT v3 family model with `tokenizer.model` — a
 different mechanism from the shared `[streaming]` section used by
 `[whisper] streaming` and `[openvino] streaming`, and not configured by it.
 
-**Disables `post_process`.** The `post_process` command operates on a
-finished transcript, which streaming never produces, so it is inactive while
-streaming and the daemon warns at startup if it is configured. `[text]`
-processing (replacements, spoken punctuation, filler filtering) IS applied:
-each streaming segment is processed as it is committed.
+Streaming needs `on_demand_loading = false` for the active engine; with
+on-demand loading every dictation is transcribed after it ends, and the
+daemon says so at startup.
+
+**Skips `post_process` unless output is buffered.** The `post_process`
+command operates on a finished transcript, which streaming that types as you
+speak never produces, so it is inactive and the daemon warns at startup if it
+is configured. `[text]` processing (replacements, spoken punctuation, filler
+filtering) IS applied: each streaming segment is processed as it is
+committed. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output),
+nothing is typed until you stop, and the whole transcript goes through
+`[text]` processing and then `post_process` once.
 
 **Requires toggle activation.** Streaming output types characters at the
 cursor while you dictate. On Wayland compositors backed by libinput
@@ -1738,8 +1747,10 @@ cursor while you dictate. On Wayland compositors backed by libinput
 key never fires `bindrd` and the daemon gets stuck in streaming. Use
 `[hotkey] mode = "toggle"`, or bind your compositor to `voxtype record
 toggle` rather than a press/release pair. The daemon auto-promotes
-`push_to_talk` to `toggle` at startup when streaming is enabled and emits
-a warning to the log.
+`push_to_talk` to `toggle` at startup when streaming is enabled, with
+`on_demand_loading` off, and emits a warning to the log. With
+[`[output] streaming_buffer_output = true`](#streaming_buffer_output)
+nothing is typed until you stop, so push-to-talk works and is kept.
 
 **Example:**
 ```toml
@@ -2121,11 +2132,13 @@ language_hints_strict = false   # allow occasional third-language tokens
 
 > While streaming, `[output.post_process]` does not run, because it operates
 > on a completed transcript. Set `async_api = true` or `streaming = false` if
-> you rely on it. `[text]` processing is applied to each committed segment.
+> you rely on it, or set `[output] streaming_buffer_output = true` to keep
+> live transcription and post-process the whole transcript on stop. `[text]`
+> processing is applied to each committed segment.
 
 Activation mode for the Soniox backend:
 
-- `true` — Live WebSocket session. Tokens stream back during recording and are typed at the cursor as they arrive (or only on finalization if `type_partials = false`). **Requires `[hotkey] mode = "toggle"`.** Push-to-talk is auto-promoted to toggle for the running session with a warning, because typing characters while the PTT key is still held clobbers libinput's held-key state on Hyprland/Sway/River.
+- `true` — Live WebSocket session. Tokens stream back during recording and are typed at the cursor as they arrive (or only on finalization if `type_partials = false`). **Requires `[hotkey] mode = "toggle"`.** Push-to-talk is auto-promoted to toggle for the running session with a warning, because typing characters while the PTT key is still held clobbers libinput's held-key state on Hyprland/Sway/River. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 - `false` — Batch mode. Audio buffered while the hotkey is held; on release one WebSocket session opens, the entire buffer is sent + finalized, and the resulting transcript is typed in one shot. Push-to-talk compatible. Loses live partials but keeps Soniox's accuracy.
 
 ### type_partials
@@ -2292,7 +2305,7 @@ When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype set
 **Default:** `false`
 **Required:** No
 
-Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River.
+Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set with `on_demand_loading` off (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River. With [`[output] streaming_buffer_output = true`](#streaming_buffer_output) nothing is typed until you stop, so push-to-talk stays.
 
 ```toml
 [hotkey]
@@ -2301,6 +2314,8 @@ mode = "toggle"
 [openvino]
 streaming = true
 ```
+
+Streaming needs `on_demand_loading = false` for the active engine; with on-demand loading every dictation is transcribed after it ends, and the daemon says so at startup.
 
 ### openvino.streaming_revision_mode
 
@@ -2566,6 +2581,30 @@ keep_undelivered_text = false
 ```
 
 Also available as `--no-keep-undelivered-text` (and `--keep-undelivered-text` to override a config that turns it off) or `VOXTYPE_KEEP_UNDELIVERED_TEXT=false`.
+
+### streaming_buffer_output
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+**Applies to:** Streaming engines (`[parakeet] streaming`, Soniox realtime, `[whisper] streaming` (local mode), `[openvino] streaming`)
+
+By default a streaming engine types each segment at the cursor as soon as it is transcribed. `[text]` processing runs on each segment by itself, and `[output.post_process]` does not run.
+
+When `true`, the audio is still transcribed live while you record, but nothing is typed until you stop. The session keeps the raw transcript, including words the engine sent as partials and never confirmed, and corrections the engine made to them. On stop, Voxtype handles the whole transcript once, the same way as a batch dictation: `[text]` processing with the recording's profile vocabulary (so a replacement that spans two segments still matches), then the post-processing command, then the output mode (`type`, `clipboard`, `paste` or `file`, a profile's `output_mode`, or a `--clipboard`/`--paste`/`--file` override). A file is written once and nothing is typed. When the engine keeps up with live audio, the text arrives soon after you stop. If the streaming backend fails, [streaming recovery](#streaming_recovery) (on by default) transcribes the recording again with the batch backend, and the held transcript is not used.
+
+Cancelling the recording discards the transcript. Nothing was typed, so nothing is erased.
+
+Push-to-talk works with this option. A streaming engine that types as you speak needs toggle activation, so the daemon switches push-to-talk to toggle at startup: typing while the key is held makes libinput compositors (Hyprland, Sway, River) lose the key's release. With `streaming_buffer_output = true` nothing is typed until you stop, so the daemon keeps push-to-talk.
+
+```toml
+[output]
+streaming_buffer_output = true
+```
+
+Also available as `--streaming-buffer-output` (and `--streaming-buffer-output=false` to override a config that turns it on) or `VOXTYPE_STREAMING_BUFFER_OUTPUT=true`.
+
+The hotkey advice in `voxtype configure`, and the Advanced section's switch from push-to-talk to toggle on a save with Streaming on, read the config file only, so buffering turned on with `--streaming-buffer-output` or `VOXTYPE_STREAMING_BUFFER_OUTPUT` is not seen there.
 
 ### driver_order
 
@@ -3829,7 +3868,10 @@ Batch output and finalized streaming segments use the same processor.
 Provisional streaming text stays raw until finalization. Revising already typed
 provisional text requires a backspace-capable output backend; if unavailable,
 that segment stays unchanged. File-mode streaming processes the whole transcript
-once at completion. LLM post-processing remains unsupported during streaming.
+once at completion. LLM post-processing does not run on text that streaming types
+as you speak or writes to a file. With `[output] streaming_buffer_output = true`,
+the whole transcript goes through this processor and then post-processing once,
+on stop.
 
 ### punctuation_casing
 
@@ -5443,6 +5485,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
 | `VOXTYPE_KEEP_UNDELIVERED_TEXT` | bool | `output.keep_undelivered_text` |
+| `VOXTYPE_STREAMING_BUFFER_OUTPUT` | bool | `output.streaming_buffer_output` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
 | `VOXTYPE_PASTE_KEYS_TERMINAL` | string | `output.paste_keys_terminal` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |

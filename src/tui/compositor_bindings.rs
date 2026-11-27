@@ -86,11 +86,12 @@ pub fn dominant_compositor(detected: &[Binding]) -> Compositor {
 /// keys come from a small candidate list, skipping any combo already bound to
 /// another action in the user's compositor configs.
 ///
-/// `streaming` indicates whether Parakeet streaming dictation is enabled. When
-/// it is, this function only suggests toggle bindings: typing at the cursor
-/// while a PTT key is held breaks libinput's held-key tracker on Hyprland,
-/// Sway, and River, so streaming requires a toggle binding rather than the
-/// usual press/release pair.
+/// `streaming` says whether the configured engine streams output that types
+/// while recording (`Config::streaming_active`). When it does, this function
+/// only suggests toggle bindings: typing at the cursor while a PTT key is
+/// held breaks libinput's held-key tracker on Hyprland, Sway, and River, so
+/// such streaming requires a toggle binding rather than the usual
+/// press/release pair.
 pub fn suggest_missing(detected: &[Binding], streaming: bool) -> Vec<Suggestion> {
     let comp = dominant_compositor(detected);
     let occupied = enumerate_occupied_keys(comp);

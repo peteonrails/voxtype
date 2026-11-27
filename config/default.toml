@@ -185,6 +185,11 @@ fallback_to_clipboard = true
 # out of the notification; an undelivered dictation is then lost.
 # keep_undelivered_text = true
 
+# Streaming engines only: transcribe while you speak but type nothing until
+# you stop, then process the whole transcript once, like a batch dictation
+# (text cleanup, the post-process command, the output mode).
+# streaming_buffer_output = false
+
 # Per-language XKB layout variants for multilingual dictation.
 # Use this with language arrays such as `language = ["en", "ru"]` when a
 # language needs a variant that should not apply to other languages.

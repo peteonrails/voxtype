@@ -245,19 +245,19 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
     match config.engine {
         TranscriptionEngine::Whisper => {
             let transcriber = create_whisper_transcriber(&config.whisper)?;
-            if config.whisper.streaming {
-                if config.whisper.effective_mode() != WhisperMode::Local {
+            if config.streaming_enabled() {
+                Ok(Box::new(SlidingWindowStreamingTranscriber::new(
+                    Arc::from(transcriber),
+                    sliding_window_config_from_whisper(config),
+                )))
+            } else {
+                // With on-demand loading streaming is off too, but nothing is
+                // wrong with the mode, so only a non-local mode is reported.
+                if config.whisper.streaming && !config.streaming_requested() {
                     tracing::warn!(
                         "[whisper] streaming requires mode = \"local\"; ignoring streaming"
                     );
-                    Ok(transcriber)
-                } else {
-                    Ok(Box::new(SlidingWindowStreamingTranscriber::new(
-                        Arc::from(transcriber),
-                        sliding_window_config_from_whisper(config),
-                    )))
                 }
-            } else {
                 Ok(transcriber)
             }
         }

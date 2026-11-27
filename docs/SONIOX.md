@@ -61,7 +61,7 @@ WebSocket-based. Tokens stream back as you speak.
 
 - **Latency:** partials appear within ~100ms of speech, finals at utterance boundaries.
 - **Model:** `stt-rt-v6`.
-- **Activation:** **toggle only.** Push-to-talk is auto-promoted to toggle for the running session, because typing characters at the cursor while the PTT key is still held breaks libinput's held-key state on Hyprland/Sway/River.
+- **Activation:** **toggle only** while text is typed live. Push-to-talk is auto-promoted to toggle for the running session, because typing characters at the cursor while the PTT key is still held breaks libinput's held-key state on Hyprland/Sway/River. With `[output] streaming_buffer_output = true` nothing is typed until you stop, so push-to-talk stays.
 - **Live typing:** non-final tokens are typed at the cursor as they arrive (`type_partials = true`). Soniox occasionally revises the tail when finalizing; voxtype emits a backspace+retype primitive (`StreamingEvent::Replace`) to patch up the cursor.
 
 ```toml

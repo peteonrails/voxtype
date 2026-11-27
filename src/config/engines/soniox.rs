@@ -44,7 +44,8 @@ pub struct SonioxConfig {
     pub language_hints_strict: bool,
 
     /// Streaming mode. true = WebSocket session with live partials
-    /// (requires [hotkey] mode = "toggle"; PTT auto-promoted to toggle).
+    /// (requires [hotkey] mode = "toggle"; PTT auto-promoted to toggle,
+    /// unless [output] streaming_buffer_output is on).
     /// false = batch mode: buffer audio while held, send one-shot on release
     /// (PTT-compatible).
     #[serde(default = "default_true")]

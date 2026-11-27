@@ -101,6 +101,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             .get_or_insert_with(Default::default)
             .stop_timeout_secs = timeout_secs;
     }
+    if let Some(enabled) = cli.streaming_buffer_output {
+        config.output.streaming_buffer_output = enabled;
+    }
 
     let history = config::HistoryOverrides {
         enabled: cli.history,

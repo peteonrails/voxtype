@@ -2093,9 +2093,10 @@ active desktop layout to the same language/variant before dictating.
 
 ### PTT auto-promoted to toggle every time you start the daemon
 
-Expected when `[soniox] streaming = true` (the default for the realtime backend). Live cursor typing while the PTT key is still held breaks libinput's held-key state tracking on Hyprland/Sway/River. Voxtype auto-promotes to toggle for the running session and warns.
+Expected when `[soniox] streaming = true` (the default for the realtime backend) types text live. Live cursor typing while the PTT key is still held breaks libinput's held-key state tracking on Hyprland/Sway/River. Voxtype auto-promotes to toggle for the running session and warns.
 
 To use Soniox with **real** push-to-talk, choose one of:
+- `[output] streaming_buffer_output = true` — keep live transcription, type nothing until you stop, then deliver the whole transcript once
 - `[soniox] streaming = false` — one-shot WebSocket on key release, no live partials
 - `[soniox] async_api = true` — async REST API, slower but higher accuracy
 - `[hotkey] mode = "toggle"` — accept toggle activation (silences the warning)
@@ -2736,7 +2737,9 @@ journalctl --user -u pulseaudio -n 20
   this stage; startup never tries a download.
 - Streaming partials stay raw. Cleanup runs only at finalization and can revise
   already typed partials only when backspace output succeeds. For cross-segment
-  cleanup, use batch or file output. LLM post-processing is still batch-only.
+  cleanup, use batch or file output, or keep streaming and set
+  `[output] streaming_buffer_output = true`, which also runs LLM
+  post-processing on the whole transcript when you stop.
 
 ### Profile vocabulary does not correct a term
 

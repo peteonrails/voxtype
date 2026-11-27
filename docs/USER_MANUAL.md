@@ -1092,6 +1092,21 @@ language_hints = ["en"]
 
 See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, performance tips with dotoold, privacy considerations).
 
+### Buffered Streaming Output
+
+A streaming engine normally types each segment at the cursor as soon as it is transcribed. Text cleanup sees one segment at a time, and the `[output.post_process]` command does not run.
+
+With `streaming_buffer_output = true`, the engine still transcribes while you speak, but nothing is typed until you stop. Voxtype then takes the whole transcript, including words the engine had not yet confirmed, and handles it once, like a batch dictation: text cleanup with the recording's profile vocabulary, the post-processing command, then your output mode (or a `--clipboard`, `--paste` or `--file` override). When the engine keeps up with live audio, the text arrives soon after you stop. If the streaming backend fails, [streaming recovery](#streaming-recovery) (on by default) transcribes the recording again with the batch backend, and the held transcript is not used. Cancelling discards the transcript; nothing was typed, so nothing is erased.
+
+Push-to-talk keeps working with this option. Streaming that types as you speak needs toggle activation, so the daemon normally switches push-to-talk to toggle; with buffered output nothing is typed while the key is held, so it does not.
+
+```toml
+[output]
+streaming_buffer_output = true
+```
+
+Also available as `--streaming-buffer-output` or `VOXTYPE_STREAMING_BUFFER_OUTPUT=true`.
+
 ### Streaming Recovery
 
 Voxtype retains the capture while streaming. If a backend errors before delivering the dictation or does not finish after stop, it transcribes the retained audio with the configured batch backend and sends a **Dictation Recovered** notification. The default stop deadline is 30 seconds: well above Soniox's five-second drain timeout, and long enough for a slow CPU to finish the last window of local streaming transcription.
@@ -1569,7 +1584,7 @@ engine = "parakeet"
 model = "parakeet-tdt-0.6b-v3"  # or "parakeet-tdt-0.6b-v3-int8"
 # model_type = "tdt"            # "tdt" (recommended) or "ctc", auto-detected if omitted
 # on_demand_loading = false
-# streaming = true              # type text as you speak; requires toggle activation
+# streaming = true              # type text as you speak; requires toggle activation unless output is buffered
 ```
 
 **Streaming dictation (experimental):** set `[parakeet] streaming = true` and
@@ -1578,8 +1593,15 @@ voxtype types text incrementally while you speak. Streaming requires
 `voxtype record toggle`). Synthetic key events from streaming output
 disrupt libinput's tracking of held physical keys on Wayland compositors,
 so a held PTT key never fires its release event. The daemon auto-promotes
-push-to-talk to toggle at startup when streaming is enabled and logs a
-warning.
+push-to-talk to toggle at startup when streaming is enabled, with
+`on_demand_loading` off, and logs a warning. With
+`[output] streaming_buffer_output = true` (see
+[Buffered Streaming Output](#buffered-streaming-output)) nothing is typed
+until you stop, so push-to-talk stays.
+
+Streaming needs `on_demand_loading = false` for the active engine; with
+on-demand loading every dictation is transcribed after it ends, and the
+daemon says so at startup.
 
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 
