@@ -27,6 +27,18 @@ pub fn escape_markup(text: &str) -> String {
     out
 }
 
+/// One transcript line as plain text, for the clipboard: its time, speaker
+/// and text on two lines, as `meeting export --format text --timestamps
+/// --speakers` writes each line.
+pub fn line_text(segment: &TranscriptSegment) -> String {
+    format!(
+        "[{}] {}:\n{}",
+        clock(Duration::from_millis(segment.start_ms)),
+        segment.speaker_display(),
+        segment.text.trim()
+    )
+}
+
 /// One transcript line as Pango markup: dimmed time, the speaker's name in
 /// their color, the text, and the annotation on a second line. A moved line
 /// names the speaker the diarizer gave it, an edited one says so, a
@@ -185,6 +197,16 @@ mod tests {
             m,
             "<span alpha=\"60%\">[01:01]</span> <b><span foreground=\"#1c71d8\">Dana &lt;PM&gt;</span></b>: a &lt; b &amp; c\n<i><span foreground=\"#c64600\">✎ Note: check</span></i>"
         );
+    }
+
+    #[test]
+    fn a_line_copies_as_plain_text_without_marks() {
+        let v = view_with(serde_json::json!(
+            {"id": 0, "start_ms": 61000, "end_ms": 62000, "text": " a < b & c ", "source": "loopback",
+             "speaker_id": "Remote", "speaker_label": "Dana", "original_speaker": "Remote 2",
+             "chunk_id": 0, "annotation": {"text": "check", "highlight": true}}
+        ));
+        assert_eq!(line_text(&v.lines()[0]), "[01:01] Dana:\na < b & c");
     }
 
     #[test]

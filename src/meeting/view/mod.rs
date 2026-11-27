@@ -14,7 +14,7 @@ pub mod commands;
 pub mod frontend;
 pub mod markup;
 
-pub use markup::{escape_markup, line_markup, summary_markup, SPEAKER_COLORS};
+pub use markup::{escape_markup, line_markup, line_text, summary_markup, SPEAKER_COLORS};
 
 use crate::meeting::data::{MeetingData, MeetingSummary, TranscriptSegment};
 use chrono::{DateTime, Utc};

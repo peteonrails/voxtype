@@ -162,6 +162,11 @@ fn the_window_shows_a_live_meeting() {
         report["delete_visible"], false,
         "a meeting being recorded is not deleted: {report}"
     );
+    assert_eq!(report["copy_visible"], true, "{report}");
+    assert_eq!(
+        report["audio_visible"], false,
+        "the audio is handed out once the meeting is over: {report}"
+    );
 }
 
 #[test]
@@ -207,6 +212,10 @@ fn a_past_meeting_opens_read_only_with_its_summary() {
         "# Retro\n\n## Decisions\n- Keep **Friday** releases\n",
     )
     .unwrap();
+    // Kept audio, as `retain_audio` leaves it.
+    for track in ["mic", "loopback", "mixed"] {
+        std::fs::write(folder.join(format!("{track}.opus")), b"").unwrap();
+    }
 
     // No daemon: the window opens the stored meeting it was asked for.
     let report = run_window_with(runtime, 43, &["--meeting", &meta.id.to_string()]);
@@ -231,6 +240,12 @@ fn a_past_meeting_opens_read_only_with_its_summary() {
         "read-only, but the title still renames: {report}"
     );
     assert_eq!(report["delete_visible"], true, "{report}");
+    assert_eq!(
+        report["copy_visible"], true,
+        "a read-only transcript still copies: {report}"
+    );
+    assert_eq!(report["audio_visible"], true, "{report}");
+    assert_eq!(report["audio_file"], "mixed.opus", "both sides: {report}");
     let shown = report["summary"].as_str().unwrap();
     assert!(
         shown.starts_with("Retro\n\nDecisions\n• Keep Friday releases"),
@@ -256,6 +271,8 @@ fn without_a_daemon_the_window_lists_meetings() {
         "the list has no title: {report}"
     );
     assert_eq!(report["delete_visible"], false, "{report}");
+    assert_eq!(report["copy_visible"], false, "{report}");
+    assert_eq!(report["audio_visible"], false, "{report}");
 }
 
 #[test]
