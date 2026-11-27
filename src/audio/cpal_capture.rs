@@ -76,62 +76,20 @@ fn find_audio_device(host: &cpal::Host, device_name: &str) -> Result<cpal::Devic
         .map_err(|e| AudioError::Connection(e.to_string()))?
         .collect();
 
-    // Collect device names for error message
-    let device_names: Vec<String> = devices.iter().filter_map(|d| d.name().ok()).collect();
-
-    let search_lower = device_name.to_lowercase();
-
-    // 1. Try exact match (case-sensitive)
-    for device in &devices {
-        if let Ok(name) = device.name() {
-            if name == device_name {
-                tracing::debug!("Found audio device by exact match: {}", name);
-                return host
-                    .input_devices()
-                    .map_err(|e| AudioError::Connection(e.to_string()))?
-                    .find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
-                    .ok_or_else(|| AudioError::DeviceNotFound(device_name.to_string()));
-            }
-        }
+    let names: Vec<Option<String>> = devices.iter().map(|d| d.name().ok()).collect();
+    if let Some(index) = matching_device_index(&names, device_name) {
+        tracing::debug!(
+            "Found audio device: {} (searched for: {})",
+            names[index].as_deref().unwrap_or("unknown"),
+            device_name
+        );
+        // Keep the matched device: enumerating again can produce a different list.
+        return Ok(devices
+            .into_iter()
+            .nth(index)
+            .expect("matched device index"));
     }
-
-    // 2. Try exact match (case-insensitive)
-    for device in &devices {
-        if let Ok(name) = device.name() {
-            if name.to_lowercase() == search_lower {
-                tracing::debug!(
-                    "Found audio device by case-insensitive match: {} (searched for: {})",
-                    name,
-                    device_name
-                );
-                let matched_name = name.clone();
-                return host
-                    .input_devices()
-                    .map_err(|e| AudioError::Connection(e.to_string()))?
-                    .find(|d| d.name().map(|n| n == matched_name).unwrap_or(false))
-                    .ok_or_else(|| AudioError::DeviceNotFound(device_name.to_string()));
-            }
-        }
-    }
-
-    // 3. Try substring match (case-insensitive)
-    for device in &devices {
-        if let Ok(name) = device.name() {
-            if name.to_lowercase().contains(&search_lower) {
-                tracing::debug!(
-                    "Found audio device by substring match: {} (searched for: {})",
-                    name,
-                    device_name
-                );
-                let matched_name = name.clone();
-                return host
-                    .input_devices()
-                    .map_err(|e| AudioError::Connection(e.to_string()))?
-                    .find(|d| d.name().map(|n| n == matched_name).unwrap_or(false))
-                    .ok_or_else(|| AudioError::DeviceNotFound(device_name.to_string()));
-            }
-        }
-    }
+    let device_names: Vec<String> = names.into_iter().flatten().collect();
 
     // No match found - provide helpful error with available devices
     let available = if device_names.is_empty() {
@@ -151,6 +109,39 @@ fn find_audio_device(host: &cpal::Host, device_name: &str) -> Result<cpal::Devic
         requested: device_name.to_string(),
         available,
     })
+}
+
+fn matching_device_index(names: &[Option<String>], requested: &str) -> Option<usize> {
+    let requested_lower = requested.to_lowercase();
+    names
+        .iter()
+        .position(|name| name.as_deref() == Some(requested))
+        .or_else(|| {
+            names.iter().position(|name| {
+                name.as_ref()
+                    .is_some_and(|name| name.to_lowercase() == requested_lower)
+            })
+        })
+        .or_else(|| {
+            names.iter().position(|name| {
+                name.as_ref()
+                    .is_some_and(|name| name.to_lowercase().contains(&requested_lower))
+            })
+        })
+}
+
+#[cfg(test)]
+mod device_matching_tests {
+    use super::matching_device_index;
+
+    #[test]
+    fn selects_exact_then_case_insensitive_then_substring() {
+        let names = vec![Some("USB Mic Pro".into()), None, Some("usb mic".into())];
+        assert_eq!(matching_device_index(&names, "usb mic"), Some(2));
+        assert_eq!(matching_device_index(&names, "USB MIC"), Some(2));
+        assert_eq!(matching_device_index(&names, "mic pro"), Some(0));
+        assert_eq!(matching_device_index(&names, "missing"), None);
+    }
 }
 
 #[async_trait::async_trait]
