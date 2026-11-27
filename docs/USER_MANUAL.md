@@ -158,6 +158,26 @@ its next safe boundary. Generic `config set` edits do not imply a full hot reloa
 If the file's engine/model no longer matches the daemon, the tray rejects the
 change rather than changing the wrong checkpoint.
 
+### Language from the command line
+
+`--language` and `VOXTYPE_LANGUAGE` set the language of whichever engine is
+active, with the flag winning over the variable and both winning over the
+config file:
+
+```bash
+voxtype --engine cohere --language de daemon     # sets cohere.language
+VOXTYPE_LANGUAGE=fr voxtype daemon               # sets the active engine's language
+voxtype --language en,fr daemon                  # Whisper: detect between the two
+```
+
+Whisper takes a code, `auto` or a set; Cohere one of its 14 codes; GGUF,
+SenseVoice and OpenVINO one code or `auto`; Soniox reads the value as its
+language hints. Parakeet, Moonshine, Paraformer, Dolphin and Omnilingual have no
+language setting, because their model decides, so for them the value is ignored
+with a warning, as is a value the engine cannot take (such as `auto` for
+Cohere). See [Overriding the language for any
+engine](CONFIGURATION.md#overriding-the-language-for-any-engine).
+
 For this native `ItemIsMenu=true` route, repeated-click menu toggling belongs to
 the tray host. The current Omarchy host always reopens the same menu; the local
 candidate includes a separately tested minimal host patch, not an automatic shell
@@ -1705,14 +1725,14 @@ engine = "cohere"
 
 [cohere]
 model = "cohere-transcribe-int8"  # Default model
-language = "en"                    # One of: ar, de, en, es, fr, hi, it, ja, ko, nl, pt, ru, tr, zh
+language = "en"                    # One of: ar, de, el, en, es, fr, it, ja, ko, nl, pl, pt, vi, zh
 # threads = 4
 # on_demand_loading = false
 ```
 
 **Supported languages:**
 
-Arabic (`ar`), German (`de`), English (`en`, default), Spanish (`es`), French (`fr`), Hindi (`hi`), Italian (`it`), Japanese (`ja`), Korean (`ko`), Dutch (`nl`), Portuguese (`pt`), Russian (`ru`), Turkish (`tr`), Mandarin Chinese (`zh`).
+Arabic (`ar`), German (`de`), Greek (`el`), English (`en`, default), Spanish (`es`), French (`fr`), Italian (`it`), Japanese (`ja`), Korean (`ko`), Dutch (`nl`), Polish (`pl`), Portuguese (`pt`), Vietnamese (`vi`), Mandarin Chinese (`zh`).
 
 **Installing:**
 

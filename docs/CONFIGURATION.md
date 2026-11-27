@@ -230,7 +230,9 @@ Every setting is also available as `VOXTYPE_GGUF_MODEL`,
 `VOXTYPE_GGUF_ON_DEMAND_LOADING`, or `VOXTYPE_GGUF_STREAMING`, and through the
 `--gguf-model`, `--gguf-architecture`, `--gguf-language`, `--gguf-backend`,
 `--threads`, `--on-demand-loading`, and `--gguf-streaming` CLI flags
-respectively. Disable on-demand loading through `gguf.on_demand_loading = false`
+respectively. The general `--language` and `VOXTYPE_LANGUAGE` also set
+`gguf.language` when GGUF is the active engine; the GGUF-specific flag and
+variable win over them. Disable on-demand loading through `gguf.on_demand_loading = false`
 or `VOXTYPE_GGUF_ON_DEMAND_LOADING=false`.
 
 ---
@@ -924,6 +926,28 @@ language = ["en", "fr", "de", "es"]
 - You want faster detection than full auto-detect
 
 **Note:** Remote backends (OpenAI API) don't support language arrays. When using remote backend with an array, the first language is used.
+
+#### Overriding the language for any engine
+
+`--language` and `VOXTYPE_LANGUAGE` set the language of the **active** engine, not only `whisper.language`. The flag wins over the variable, and both win over the config file:
+
+| Engine | Key they set | Accepts |
+|--------|--------------|---------|
+| `whisper` | `whisper.language` | a code, `auto`, or a set such as `en,fr,de` |
+| `cohere` | `cohere.language` | one of the 14 Cohere codes (no `auto`) |
+| `gguf` | `gguf.language` | one code or `auto` (`--gguf-language` and `VOXTYPE_GGUF_LANGUAGE` are more specific and win) |
+| `sensevoice` | `sensevoice.language` | `auto`, `zh`, `en`, `ja`, `ko`, `yue` |
+| `openvino` | `openvino.language` | one code or `auto` |
+| `soniox` | `soniox.language_hints` | a code or a set; `auto` clears the hints |
+
+Parakeet, Moonshine, Paraformer, Dolphin and Omnilingual have no language setting: their model decides. For them, and for a value the engine cannot take (`auto` for Cohere, a set for a one-language engine), voxtype logs a warning once and keeps the configured language.
+
+```bash
+voxtype --engine cohere --language de daemon
+VOXTYPE_ENGINE=cohere VOXTYPE_LANGUAGE=de voxtype config get cohere.language   # de
+```
+
+Earlier releases set only `whisper.language` (and `gguf.language` for GGUF), so with another engine these did nothing.
 
 ### translate
 
@@ -1890,7 +1914,7 @@ model = "cohere-transcribe-int8"
 
 Two-letter ISO 639-1 language code. Cohere officially supports 14 languages.
 
-**Supported values:** `ar`, `de`, `en`, `es`, `fr`, `hi`, `it`, `ja`, `ko`, `nl`, `pt`, `ru`, `tr`, `zh`.
+**Supported values:** `ar`, `de`, `el`, `en`, `es`, `fr`, `it`, `ja`, `ko`, `nl`, `pl`, `pt`, `vi`, `zh`.
 
 **Example:**
 ```toml
@@ -1898,7 +1922,7 @@ Two-letter ISO 639-1 language code. Cohere officially supports 14 languages.
 language = "fr"
 ```
 
-The daemon resolves the language to its decoder prefix at startup. Unsupported codes are rejected with a clear error.
+The daemon resolves the language to its decoder prefix at startup. Unsupported codes are rejected with a clear error. `--language` and `VOXTYPE_LANGUAGE` set this key when Cohere is the active engine; a code Cohere cannot take there is ignored with a warning instead.
 
 ### max_chunk_secs and boundary_search_secs
 
@@ -2181,7 +2205,7 @@ Maximum total wait time (seconds) for an async API job to complete. If exceeded,
 | `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
 | `region` | `--soniox-region` | `VOXTYPE_SONIOX_REGION` | `"us"` | Data-residency region of the key's project (`us`, `eu`, `jp`, `in`) |
 | `model` | - | - | `"stt-rt-v6"` | Soniox model (`stt-async-v6` when `async_api = true`) |
-| `language_hints` | - | - | `["hu", "en"]` | Language preference |
+| `language_hints` | `--language` | `VOXTYPE_LANGUAGE` | `["hu", "en"]` | Language preference (`en,de` sets two hints, `auto` clears them) |
 | `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |
 | `streaming` | - | - | `true` | Live WebSocket vs batch-on-release (realtime only) |
 | `type_partials` | - | - | `true` | Type non-final tokens at cursor (realtime only) |
@@ -2243,7 +2267,7 @@ Configuration for the OpenVINO Whisper speech-to-text engine. This section is on
 | `device` | String | `"NPU"` | OpenVINO device: `"NPU"`, `"CPU"`, `"GPU"`, or `"AUTO"`. On a genuine device error (missing driver, unsupported op, no NPU on this chip) voxtype falls back automatically: configured device → GPU → CPU, skipping a device already tried. This is for actual errors only — see the note below on large models, which don't error on NPU, just compile slowly the first time. When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype setup` also compiles a newly downloaded or activated model for the NPU before it finishes, so the first recording does not absorb that wait (see Compiled model caching below). |
 | `quantized` | Boolean | `true` | Prefer int8 quantized model variants |
 | `threads` | Integer | system-detected | CPU inference threads |
-| `language` | String | `"en"` | Whisper language code, or `"auto"` to detect it (multilingual models only) |
+| `language` | String | `"en"` | Whisper language code, or `"auto"` to detect it (multilingual models only). Also set by `--language` and `VOXTYPE_LANGUAGE` |
 | `translate` | Boolean | `false` | Translate non-English speech to English |
 | `on_demand_loading` | Boolean | `false` | Load the model when recording begins |
 | `streaming` | Boolean | `false` | Live streaming transcription via the shared sliding-window engine — see `[streaming]` for tuning |
@@ -5375,7 +5399,7 @@ Any config file setting can be overridden via environment variable. These are ap
 |----------|------|-------------------|
 | `VOXTYPE_MODEL` | string | `whisper.model` |
 | `VOXTYPE_ENGINE` | string | `engine` |
-| `VOXTYPE_LANGUAGE` | string | `whisper.language` |
+| `VOXTYPE_LANGUAGE` | string | the active engine's language (`whisper.language`, `cohere.language`, `gguf.language`, `sensevoice.language`, `openvino.language` or `soniox.language_hints`) |
 | `VOXTYPE_TRANSLATE` | bool | `whisper.translate` |
 | `VOXTYPE_THREADS` | integer | `whisper.threads` |
 | `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |

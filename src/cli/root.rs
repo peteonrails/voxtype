@@ -165,8 +165,27 @@ pub struct Cli {
     #[arg(long, help_heading = "GGUF", hide_short_help = true)]
     pub gguf_streaming: bool,
 
-    /// Language for transcription (e.g., en, fr, auto, or comma-separated: en,fr,de)
-    #[arg(long, value_name = "LANG", help_heading = "Transcription")]
+    /// Language for the active engine (e.g., en, fr, auto, or for Whisper: en,fr,de)
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "Transcription",
+        long_help = "Language for the active transcription engine. Sets that engine's own\n\
+        language setting, overriding VOXTYPE_LANGUAGE and the config file:\n\
+        \n  whisper     whisper.language: a code, auto, or a set such as en,fr,de\n  \
+        cohere      cohere.language: one of ar de el en es fr it ja ko nl pl pt vi zh\n  \
+        gguf        gguf.language (--gguf-language is more specific and wins)\n  \
+        sensevoice  sensevoice.language: auto, zh, en, ja, ko or yue\n  \
+        openvino    openvino.language: a code or auto\n  \
+        soniox      soniox.language_hints: a code or a set; auto clears the hints\n\
+        \n\
+        Parakeet, Moonshine, Paraformer, Dolphin and Omnilingual have no language\n\
+        setting: their model decides, and the flag is ignored with a warning. A value\n\
+        the engine cannot take (auto for Cohere, a set for a one-language engine) is\n\
+        also ignored with a warning, keeping the configured language.\n\
+        \n\
+        Example: voxtype --engine cohere --language de daemon"
+    )]
     pub language: Option<String>,
 
     /// Translate non-English speech to English
