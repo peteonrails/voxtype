@@ -1,4 +1,4 @@
-//! Profile and post-process configuration.
+//! Profile, vocabulary and post-process configuration.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -6,16 +6,25 @@ use std::path::PathBuf;
 use super::default_true;
 use super::OutputMode;
 
-/// Terms that should keep their configured spelling in this profile.
+/// Terms that keep their configured spelling: the top-level `[vocabulary]`
+/// for every recording, or a profile's own.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct VocabularyConfig {
-    /// Product names, people, acronyms, and other terms used by this profile.
+    /// Product names, people, acronyms, and other terms.
     #[serde(default)]
     pub terms: Vec<String>,
 
-    /// JSON file containing an array of additional terms.
+    /// JSON file containing an array of additional terms. A leading `~/`
+    /// means the home directory.
     #[serde(default)]
     pub terms_file: Option<PathBuf>,
+}
+
+impl VocabularyConfig {
+    /// Whether any terms or a terms file are configured.
+    pub fn is_configured(&self) -> bool {
+        !self.terms.is_empty() || self.terms_file.is_some()
+    }
 }
 
 /// Post-processing command configuration

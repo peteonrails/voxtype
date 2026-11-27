@@ -36,7 +36,7 @@ pub struct RemoteTranscriber {
     api_key: Option<String>,
     /// Optional initial prompt for transcription context
     initial_prompt: Option<String>,
-    /// Profile vocabulary selected for the current recording.
+    /// Vocabulary selected for the current recording.
     active_vocabulary: Mutex<Vec<String>>,
     /// Send an explicit `language=auto` field instead of omitting it
     send_auto_language: bool,
@@ -235,7 +235,7 @@ impl RemoteTranscriber {
             body.extend_from_slice(b"\r\n");
         }
 
-        // Preserve the configured prompt and append active profile terms.
+        // Preserve the configured prompt and append the recording's terms.
         let vocabulary = self
             .active_vocabulary
             .lock()

@@ -23,11 +23,10 @@ use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
-use crate::text::vocabulary::Vocabulary;
+use crate::text::vocabulary::Vocabularies;
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1244,8 +1243,8 @@ pub struct Daemon {
     /// that is not known to be English, so English-only cleanup is skipped
     /// for it. See `override_text_is_english`.
     session_text_is_english: bool,
-    /// Vocabulary matchers prepared once at startup, keyed by profile name.
-    profile_vocabularies: HashMap<String, Vocabulary>,
+    /// The top-level and profile vocabularies, prepared once at startup.
+    vocabularies: Vocabularies,
     /// The `--profile` of the current recording, kept from its override
     /// file for every stage of the dictation. See `recording_profile`.
     recording_profile: Option<String>,
@@ -1507,22 +1506,7 @@ impl Daemon {
         // and English-only cleanup runs only on English (#696).
         let text_processor =
             TextProcessor::new_for_config(&config.text, config.text_language(), &config);
-        let profile_vocabularies = config
-            .profiles
-            .iter()
-            .filter(|(_, profile)| {
-                !profile.vocabulary.terms.is_empty() || profile.vocabulary.terms_file.is_some()
-            })
-            .filter_map(
-                |(name, profile)| match Vocabulary::load(&profile.vocabulary) {
-                    Ok(vocabulary) => Some((name.clone(), vocabulary)),
-                    Err(error) => {
-                        tracing::warn!(profile = %name, %error, "Profile vocabulary disabled");
-                        None
-                    }
-                },
-            )
-            .collect();
+        let vocabularies = Vocabularies::load(&config);
         if config.text.spoken_punctuation {
             tracing::info!("Spoken punctuation enabled");
         }
@@ -1611,7 +1595,7 @@ impl Daemon {
             audio_feedback,
             text_processor,
             session_text_is_english: true,
-            profile_vocabularies,
+            vocabularies,
             recording_profile: None,
             post_processor,
             last_dictation: None,
@@ -2371,6 +2355,11 @@ impl Daemon {
         if transcriber.as_streaming().is_none() {
             return false;
         }
+        // For the Whisper engine, prepare_for_recording hands the terms to the
+        // model manager, which keeps them only for a gpu_isolation worker, so
+        // this adapter never gets them there; a recovery may also have left
+        // other terms on it.
+        transcriber.set_vocabulary(&self.recording_vocabulary_terms());
         self.streaming_recovery_audio.clear();
         self.streaming_stop_deadline = None;
         self.streaming_recovery_file_output_path = None;
@@ -2794,9 +2783,7 @@ impl Daemon {
             // apply replacements and spoken punctuation over the whole
             // text, same as the batch path does before writing (#669).
             let profile = self.recording_profile();
-            let vocabulary = profile
-                .as_ref()
-                .and_then(|name| self.profile_vocabularies.get(name));
+            let vocabulary = self.vocabularies.for_profile(profile.as_deref());
             let raw_text = buffered;
             let final_text = self
                 .text_processor
@@ -2980,6 +2967,7 @@ impl Daemon {
         };
         self.update_state("transcribing");
 
+        let vocabulary = self.recording_vocabulary_terms();
         let preloaded = self.transcriber_preloaded.clone();
         let running_config = self.config.clone();
         let mut whisper_config = self.config.clone();
@@ -2990,7 +2978,7 @@ impl Daemon {
                 Arc<dyn Transcriber>,
                 crate::error::TranscribeError,
             > {
-                match (whisper, preloaded.clone()) {
+                let transcriber = match (whisper, preloaded.clone()) {
                     (true, _) => {
                         crate::transcribe::create_transcriber(&whisper_config).map(Arc::from)
                     }
@@ -2998,7 +2986,9 @@ impl Daemon {
                     (false, None) => {
                         crate::transcribe::create_transcriber(&running_config).map(Arc::from)
                     }
-                }
+                }?;
+                transcriber.set_vocabulary(&vocabulary);
+                Ok(transcriber)
             };
             match build(prefer_whisper) {
                 Ok(transcriber) => transcriber.transcribe(&samples),
@@ -3438,10 +3428,12 @@ impl Daemon {
         self.recording_profile = None;
     }
 
-    fn active_profile_vocabulary_terms(&mut self) -> Vec<String> {
-        self.recording_profile()
-            .as_ref()
-            .and_then(|name| self.profile_vocabularies.get(name))
+    /// The terms the engine gets for the current recording: the top-level
+    /// vocabulary, then its profile's.
+    fn recording_vocabulary_terms(&mut self) -> Vec<String> {
+        let profile = self.recording_profile();
+        self.vocabularies
+            .for_profile(profile.as_deref())
             .map(|vocabulary| vocabulary.terms().map(str::to_string).collect())
             .unwrap_or_default()
     }
@@ -3452,7 +3444,7 @@ impl Daemon {
     fn prepare_for_recording(&mut self, model_override: Option<&str>) {
         // A new recording carries only the profile its own override names.
         self.recording_profile = read_profile_override();
-        let vocabulary = self.active_profile_vocabulary_terms();
+        let vocabulary = self.recording_vocabulary_terms();
         if let Some(name) = model_override {
             if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
                 model_catalog::override_route(&self.config, name)
@@ -3877,7 +3869,7 @@ impl Daemon {
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
-        let vocabulary = self.active_profile_vocabulary_terms();
+        let vocabulary = self.recording_vocabulary_terms();
         if let Some(name) = model_override {
             match model_catalog::override_route(&self.config, name) {
                 Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
@@ -4005,6 +3997,54 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// The transcriber eager processing sends a recording's chunks to; it
+    /// also transcribes what is left at stop. It gets the recording's
+    /// vocabulary here, because the transcriber it can come from was not
+    /// given one when the recording started: the cached local Whisper model,
+    /// or the remote and whisper-cli transcribers it builds fresh.
+    async fn select_eager_transcriber(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> Option<Arc<dyn Transcriber>> {
+        let separate_override = model_override.is_some_and(|name| {
+            matches!(
+                model_catalog::override_route(&self.config, name),
+                Ok(model_catalog::OverrideRoute::Separate { .. })
+            )
+        });
+        let mut selected = None;
+        if separate_override {
+            // Chunks wait until the override model has loaded; whatever is
+            // left over is transcribed at stop.
+            if let Some(name) = model_override {
+                selected = self.ready_override(name).await;
+            }
+        } else {
+            selected = self.transcriber_preloaded.clone();
+        }
+        if !separate_override
+            && selected.is_none()
+            && self.config.engine == crate::config::TranscriptionEngine::Whisper
+        {
+            // Whisper engine: get from model manager
+            if let Some(mm) = &mut self.model_manager {
+                match mm.get_prepared_transcriber(model_override) {
+                    Ok(t) => {
+                        tracing::debug!("Created eager transcriber for chunk dispatch");
+                        selected = Some(t);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create eager transcriber: {}", e);
+                    }
+                }
+            }
+        }
+        if let Some(transcriber) = &selected {
+            transcriber.set_vocabulary(&self.recording_vocabulary_terms());
+        }
+        selected
     }
 
     /// Update the meeting state file if configured
@@ -4199,16 +4239,19 @@ impl Daemon {
     }
 
     /// Dictation's loaded transcriber, when a meeting configured as `meeting`
-    /// can use it instead of loading its own copy.
+    /// can use it instead of loading its own copy. The vocabulary the last
+    /// dictation set on it is cleared: a meeting has none.
     fn resident_transcriber_for(&mut self, meeting: &Config) -> Option<Arc<dyn Transcriber>> {
         if !meeting::start::shares_dictation_transcriber(&self.config, meeting) {
             return None;
         }
-        if self.config.engine == crate::config::TranscriptionEngine::Whisper {
+        let transcriber = if self.config.engine == crate::config::TranscriptionEngine::Whisper {
             self.model_manager.as_mut()?.get_transcriber(None).ok()
         } else {
             self.transcriber_preloaded.clone()
-        }
+        }?;
+        transcriber.set_vocabulary(&[]);
+        Some(transcriber)
     }
 
     /// Drop a deleted segment from the HUD snapshot and tell meeting.sock
@@ -5618,6 +5661,9 @@ impl Daemon {
             .unwrap_or(0);
         let tail_start = eager::tail_start(&boundaries, chunks_sent);
 
+        // A meeting that took dictation's model while the chunks ran cleared
+        // its vocabulary; the tail is this recording's.
+        let tail_vocabulary = self.recording_vocabulary_terms();
         let tail_task = (accumulated_audio.len().saturating_sub(tail_start) >= 4800).then(|| {
             let tail_audio = accumulated_audio[tail_start..].to_vec();
             tracing::debug!(
@@ -5626,6 +5672,7 @@ impl Daemon {
                 tail_start
             );
             let tail_transcriber = transcriber.clone();
+            tail_transcriber.set_vocabulary(&tail_vocabulary);
             let decoded = self.eager_decoded.clone();
             tokio::task::spawn_blocking(move || {
                 let result = tail_transcriber.transcribe(&tail_audio);
@@ -5936,9 +5983,7 @@ impl Daemon {
                     }
 
                     // Apply text processing (replacements, punctuation)
-                    let vocabulary = profile_override
-                        .as_ref()
-                        .and_then(|name| self.profile_vocabularies.get(name));
+                    let vocabulary = self.vocabularies.for_profile(profile_override.as_deref());
                     let processed_text = self.text_processor.process_recording(
                         &text,
                         vocabulary,
@@ -5996,7 +6041,11 @@ impl Daemon {
                             );
                             tracing::debug!("Post-processing context: {:?}", recent_context);
                             let result = profile_processor
-                                .process_with_context(&processed_text, recent_context.as_deref())
+                                .process_with_vocabulary(
+                                    &processed_text,
+                                    recent_context.as_deref(),
+                                    vocabulary,
+                                )
                                 .await;
                             tracing::info!("Post-processed: changed: {}", result != processed_text);
                             tracing::debug!("Post-processed result: {:?}", result);
@@ -6014,9 +6063,10 @@ impl Daemon {
                                     recent_context
                                 );
                                 let result = post_processor
-                                    .process_with_context(
+                                    .process_with_vocabulary(
                                         &processed_text,
                                         recent_context.as_deref(),
+                                        vocabulary,
                                     )
                                     .await;
                                 tracing::info!(
@@ -6040,7 +6090,11 @@ impl Daemon {
                             recent_context
                         );
                         let result = post_processor
-                            .process_with_context(&processed_text, recent_context.as_deref())
+                            .process_with_vocabulary(
+                                &processed_text,
+                                recent_context.as_deref(),
+                                vocabulary,
+                            )
                             .await;
                         tracing::info!("Post-processed: changed: {}", result != processed_text);
                         tracing::debug!("Post-processed result: {:?}", result);
@@ -7421,40 +7475,9 @@ impl Daemon {
                             State::EagerRecording { model_override, .. } => model_override.clone(),
                             _ => None,
                         };
-                        let separate_override = model_override.as_deref().is_some_and(|name| {
-                            matches!(
-                                model_catalog::override_route(&self.config, name),
-                                Ok(model_catalog::OverrideRoute::Separate { .. })
-                            )
-                        });
-                        let model_override = model_override.as_deref();
-                        if separate_override {
-                            // Chunks wait until the override model has loaded;
-                            // whatever is left over is transcribed at stop.
-                            if let Some(name) = model_override {
-                                eager_transcriber = self.ready_override(name).await;
-                            }
-                        } else {
-                            eager_transcriber = self.transcriber_preloaded.clone();
-                        }
-                        if !separate_override
-                            && eager_transcriber.is_none()
-                            && self.config.engine
-                                == crate::config::TranscriptionEngine::Whisper
-                        {
-                            // Whisper engine: get from model manager
-                            if let Some(ref mut mm) = self.model_manager {
-                                match mm.get_prepared_transcriber(model_override) {
-                                    Ok(t) => {
-                                        tracing::debug!("Created eager transcriber for chunk dispatch");
-                                        eager_transcriber = Some(t);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to create eager transcriber: {}", e);
-                                    }
-                                }
-                            }
-                        }
+                        eager_transcriber = self
+                            .select_eager_transcriber(model_override.as_deref())
+                            .await;
                     }
 
                     if let State::EagerRecording {
@@ -7829,9 +7852,8 @@ impl Daemon {
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
                                     let profile = self.recording_profile();
-                                    let vocabulary = profile
-                                        .as_ref()
-                                        .and_then(|name| self.profile_vocabularies.get(name));
+                                    let vocabulary =
+                                        self.vocabularies.for_profile(profile.as_deref());
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
@@ -7859,9 +7881,8 @@ impl Daemon {
                                     s.replace_and_commit_silent(backspace, &text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
                                     let profile = self.recording_profile();
-                                    let vocabulary = profile
-                                        .as_ref()
-                                        .and_then(|name| self.profile_vocabularies.get(name));
+                                    let vocabulary =
+                                        self.vocabularies.for_profile(profile.as_deref());
                                     if let Err(e) = s.replace_and_commit(
                                         chain,
                                         backspace,
@@ -8585,9 +8606,11 @@ while True:
     }
 
     /// A recording's `--profile` reaches every stage of the dictation, not
-    /// only the first one that reads its override file (#1097). Each test
-    /// runs in a process of its own, since the profile travels through the
-    /// runtime directory, which must be a scratch one.
+    /// only the first one that reads its override file (#1097), and so does
+    /// its vocabulary: the top-level `[vocabulary]`, then the profile's, for
+    /// the engine and the text correction. Each test runs in a process of its
+    /// own, since the profile travels through the runtime directory, which
+    /// must be a scratch one.
     mod recording_profile {
         use super::*;
         use crate::config::{PostProcessConfig, Profile, VocabularyConfig};
@@ -8650,6 +8673,18 @@ while True:
             config
         }
 
+        /// `config(target)` with more top-level tables, written as a user
+        /// writes them in config.toml. `config(target)` serializes an empty
+        /// `[vocabulary]` table; it is removed, so `tables` alone decides
+        /// whether the config has one. A table in `tables` replaces the
+        /// base's table of that name whole; it is not merged.
+        fn config_with(target: &Path, tables: &str) -> Config {
+            let mut document = toml::Table::try_from(config(target)).unwrap();
+            document.remove("vocabulary");
+            document.extend(tables.parse::<toml::Table>().unwrap());
+            document.try_into().unwrap()
+        }
+
         /// What `voxtype record start|stop --profile <name>` does before it
         /// signals the daemon.
         fn cli_names_profile(name: &str) {
@@ -8658,10 +8693,10 @@ while True:
             fs::write(dir.join("profile_override"), name).unwrap();
         }
 
-        /// Transcriber prep, which reads the profile's vocabulary again
+        /// Transcriber prep, which reads the recording's vocabulary again
         /// once the recording stops.
         fn prepare_transcriber(daemon: &mut Daemon) -> Vec<String> {
-            daemon.active_profile_vocabulary_terms()
+            daemon.recording_vocabulary_terms()
         }
 
         async fn deliver(daemon: &mut Daemon, spoken: &str) {
@@ -8792,9 +8827,7 @@ while True:
             // The event pump looks the vocabulary up for each final segment.
             for segment in ["pipe wire starts", "pipe wire stops"] {
                 let profile = daemon.recording_profile();
-                let vocabulary = profile
-                    .as_ref()
-                    .and_then(|name| daemon.profile_vocabularies.get(name));
+                let vocabulary = daemon.vocabularies.for_profile(profile.as_deref());
                 session
                     .commit_segment(
                         &chain,
@@ -8854,6 +8887,407 @@ while True:
             assert!(state.is_idle());
             assert_eq!(fs::read_to_string(&target).unwrap(), "PipeWire works\n");
             assert_eq!(daemon.recording_profile(), None, "outlived its dictation");
+        }
+
+        #[tokio::test]
+        async fn global_vocabulary_applies_without_a_profile() {
+            if !in_scratch_runtime("global_vocabulary_applies_without_a_profile") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let config = config_with(&target, "[vocabulary]\nterms = [\"Voxtype\"]");
+            let mut daemon = Daemon::new(config, None);
+
+            daemon.prepare_for_recording(None);
+            assert_eq!(prepare_transcriber(&mut daemon), vec!["Voxtype"]);
+            deliver(&mut daemon, "vox type works").await;
+
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "DEFAULT:Voxtype works\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn global_terms_come_first_and_profile_repeats_drop() {
+            if !in_scratch_runtime("global_terms_come_first_and_profile_repeats_drop") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut config =
+                config_with(&target, "[vocabulary]\nterms = [\"Voxtype\", \"PipeWire\"]");
+            config
+                .profiles
+                .get_mut("calendar")
+                .unwrap()
+                .vocabulary
+                .terms = vec!["Tailscale".to_string(), "pipewire".to_string()];
+            let mut daemon = Daemon::new(config, None);
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            assert_eq!(
+                prepare_transcriber(&mut daemon),
+                vec!["Voxtype", "PipeWire", "Tailscale"]
+            );
+            deliver(&mut daemon, "vox type and pipe wire over tail scale").await;
+
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "CALENDAR:Voxtype and PipeWire over Tailscale\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn absent_or_empty_global_vocabulary_changes_nothing() {
+            if !in_scratch_runtime("absent_or_empty_global_vocabulary_changes_nothing") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            for (name, tables) in [("absent", ""), ("empty", "[vocabulary]\nterms = []")] {
+                let target = dir.path().join(format!("{name}.txt"));
+                let mut daemon = Daemon::new(config_with(&target, tables), None);
+
+                daemon.prepare_for_recording(None);
+                assert!(prepare_transcriber(&mut daemon).is_empty(), "{name}");
+                deliver(&mut daemon, "vox type works").await;
+
+                assert_eq!(
+                    fs::read_to_string(&target).unwrap(),
+                    "DEFAULT:vox type works\n",
+                    "{name}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn streamed_file_output_gets_the_global_vocabulary() {
+            if !in_scratch_runtime("streamed_file_output_gets_the_global_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let config = config_with(&target, "[vocabulary]\nterms = [\"Voxtype\"]");
+            let mut daemon = Daemon::new(config, None);
+
+            daemon.prepare_for_recording(None);
+            let mut state = streaming_state(Some(target.clone()));
+            let mut session = StreamingSession::new();
+            session.commit_segment_silent("vox type works");
+            daemon
+                .end_streaming(
+                    &mut state,
+                    &mut None,
+                    &mut None,
+                    &mut Some(session),
+                    &mut None,
+                    StreamingEndReason::Completed,
+                )
+                .await;
+
+            assert!(state.is_idle());
+            assert_eq!(fs::read_to_string(&target).unwrap(), "Voxtype works\n");
+        }
+
+        /// The post-process command reads the recording's vocabulary, the
+        /// same merged list the engine gets, one term per line.
+        #[tokio::test]
+        async fn post_process_command_gets_the_recording_vocabulary() {
+            if !in_scratch_runtime("post_process_command_gets_the_recording_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("dictation.txt");
+            let mut config =
+                config_with(&target, "[vocabulary]\nterms = [\"Voxtype\", \"PipeWire\"]");
+            let print_vocabulary = "printf '%s' \"$VOXTYPE_VOCABULARY\" | tr '\\n' ','";
+            config.output.post_process.as_mut().unwrap().command = print_vocabulary.to_string();
+            let calendar = config.profiles.get_mut("calendar").unwrap();
+            calendar.vocabulary.terms = vec!["Tailscale".to_string()];
+            calendar.post_process_command = Some(print_vocabulary.to_string());
+            let mut daemon = Daemon::new(config, None);
+
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "Voxtype,PipeWire\n",
+                "no profile: the global terms"
+            );
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            prepare_transcriber(&mut daemon);
+            deliver(&mut daemon, "hello there").await;
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "Voxtype,PipeWire,Tailscale\n",
+                "a profile: global terms, then the profile's"
+            );
+        }
+
+        /// Records the vocabulary it was last given, and the one each
+        /// transcription ran with.
+        #[derive(Default)]
+        struct VocabularyProbe {
+            last_set: std::sync::Mutex<Vec<String>>,
+            per_transcription: std::sync::Mutex<Vec<Vec<String>>>,
+        }
+
+        impl VocabularyProbe {
+            fn terms(&self) -> Vec<String> {
+                self.last_set.lock().unwrap().clone()
+            }
+
+            fn transcribed_with(&self) -> Vec<Vec<String>> {
+                self.per_transcription.lock().unwrap().clone()
+            }
+        }
+
+        impl Transcriber for VocabularyProbe {
+            fn transcribe(
+                &self,
+                _samples: &[f32],
+            ) -> std::result::Result<String, crate::error::TranscribeError> {
+                self.per_transcription.lock().unwrap().push(self.terms());
+                Ok(String::new())
+            }
+
+            fn set_vocabulary(&self, terms: &[String]) {
+                *self.last_set.lock().unwrap() = terms.to_vec();
+            }
+        }
+
+        /// Load `probe` as dictation's local Whisper model, as `run` does
+        /// with `on_demand_loading = false`.
+        fn load_whisper_model(daemon: &mut Daemon, probe: Arc<VocabularyProbe>) {
+            let mut manager = crate::model_manager::ModelManager::new(&daemon.config.whisper, None);
+            let model = daemon.config.whisper.model.clone();
+            manager.insert_loaded_model_for_test(&model, probe, true);
+            daemon.model_manager = Some(manager);
+        }
+
+        /// A meeting on dictation's loaded model does not inherit the
+        /// vocabulary the last dictation set on it.
+        #[tokio::test]
+        async fn a_meeting_on_the_resident_model_gets_no_dictation_vocabulary() {
+            if !in_scratch_runtime("a_meeting_on_the_resident_model_gets_no_dictation_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_whisper_model(&mut daemon, probe.clone());
+
+            daemon.get_transcriber_for_recording(None).await.unwrap();
+            assert_eq!(
+                probe.terms(),
+                ["Voxtype"],
+                "the dictation set its vocabulary"
+            );
+
+            let meeting = daemon.config.clone();
+            assert!(
+                daemon.resident_transcriber_for(&meeting).is_some(),
+                "the meeting shares dictation's model"
+            );
+            assert!(
+                probe.terms().is_empty(),
+                "the meeting got {:?}",
+                probe.terms()
+            );
+        }
+
+        /// Eager processing on dictation's cached local Whisper model sends
+        /// its chunks, and what is left at stop, with the recording's
+        /// vocabulary.
+        #[tokio::test]
+        async fn eager_whisper_chunks_get_the_recording_vocabulary() {
+            if !in_scratch_runtime("eager_whisper_chunks_get_the_recording_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_whisper_model(&mut daemon, probe.clone());
+
+            daemon.prepare_for_recording(None);
+            assert!(daemon.select_eager_transcriber(None).await.is_some());
+
+            assert_eq!(probe.terms(), ["Voxtype"]);
+        }
+
+        /// A meeting that takes dictation's model mid-dictation clears its
+        /// vocabulary; the eager tail is still transcribed with the
+        /// recording's terms.
+        #[tokio::test]
+        async fn the_eager_tail_gets_the_recording_vocabulary_after_a_meeting_clears_it() {
+            if !in_scratch_runtime(
+                "the_eager_tail_gets_the_recording_vocabulary_after_a_meeting_clears_it",
+            ) {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let mut config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            config.vad.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_whisper_model(&mut daemon, probe.clone());
+
+            daemon.prepare_for_recording(None);
+            let selected = daemon.select_eager_transcriber(None).await.unwrap();
+            let meeting = daemon.config.clone();
+            assert!(daemon.resident_transcriber_for(&meeting).is_some());
+            assert!(probe.terms().is_empty(), "the meeting cleared them");
+
+            let mut state = State::EagerRecording {
+                started_at: std::time::Instant::now(),
+                model_override: None,
+                accumulated_audio: vec![0.2; 16_000],
+                chunks_sent: 0,
+                chunk_results: Vec::new(),
+                tasks_in_flight: 0,
+            };
+            daemon.finish_eager_recording(&mut state, selected).await;
+
+            assert_eq!(probe.transcribed_with(), [vec!["Voxtype".to_string()]]);
+        }
+
+        /// A streaming session that ends without text is recovered by a
+        /// freshly built batch transcriber, which gets the recording's
+        /// vocabulary like any other.
+        #[tokio::test]
+        async fn streaming_recovery_gets_the_recording_vocabulary() {
+            if !in_scratch_runtime("streaming_recovery_gets_the_recording_vocabulary") {
+                return;
+            }
+            let server = crate::llm::fake_server::FakeServer::start(vec![
+                crate::llm::fake_server::Reply::status(200, r#"{"text":"ok"}"#),
+            ]);
+            let dir = TempDir::new().unwrap();
+            let mut config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            config.vad.enabled = false;
+            config.whisper.mode = Some(crate::config::WhisperMode::Remote);
+            config.whisper.remote_endpoint = Some(format!("http://127.0.0.1:{}", server.port()));
+            let mut daemon = Daemon::new(config, None);
+
+            let mut state = streaming_state(None);
+            daemon
+                .recover_streaming_audio(&mut state, None, vec![0.0; 16_000])
+                .await;
+            let task = daemon.transcription_task.take().expect("recovery started");
+            assert_eq!(task.await.unwrap().unwrap(), "ok");
+
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0]
+                    .body
+                    .contains("name=\"prompt\"\r\n\r\nVoxtype\r\n"),
+                "no vocabulary prompt in the request"
+            );
+        }
+
+        /// `probe` as dictation's streaming engine: the sliding-window
+        /// adapter over it, preloaded as `[whisper] streaming = true` has it.
+        fn load_streaming_model(daemon: &mut Daemon, probe: Arc<VocabularyProbe>) {
+            let adapter = crate::transcribe::SlidingWindowStreamingTranscriber::new(
+                probe,
+                crate::transcribe::SlidingWindowConfig::default(),
+            );
+            daemon.transcriber_preloaded = Some(Arc::new(adapter));
+        }
+
+        /// Start a streaming session on a capture that delivers nothing.
+        async fn start_streaming(daemon: &mut Daemon) {
+            daemon.history_test_capture = Some(Box::new(FakeCapture(None)));
+            let mut state = State::Idle;
+            let (mut capture, mut handle, mut session, mut chain) = (None, None, None, None);
+            assert!(
+                daemon
+                    .try_start_streaming(
+                        &mut state,
+                        &mut capture,
+                        &mut handle,
+                        &mut session,
+                        &mut chain,
+                        None,
+                        false,
+                    )
+                    .await
+            );
+        }
+
+        /// A streaming session on the preloaded engine gets the recording's
+        /// vocabulary.
+        #[tokio::test]
+        async fn streaming_session_gets_the_recording_vocabulary() {
+            if !in_scratch_runtime("streaming_session_gets_the_recording_vocabulary") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_streaming_model(&mut daemon, probe.clone());
+
+            daemon.prepare_for_recording(None);
+            start_streaming(&mut daemon).await;
+
+            assert_eq!(probe.terms(), ["Voxtype"]);
+        }
+
+        /// The terms a recovery sets on the shared streaming engine do not
+        /// carry over to the next session.
+        #[tokio::test]
+        async fn recovery_terms_do_not_reach_the_next_streaming_session() {
+            if !in_scratch_runtime("recovery_terms_do_not_reach_the_next_streaming_session") {
+                return;
+            }
+            let dir = TempDir::new().unwrap();
+            let mut config = config_with(
+                &dir.path().join("unused.txt"),
+                "[vocabulary]\nterms = [\"Voxtype\"]",
+            );
+            config.vad.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            let probe = Arc::new(VocabularyProbe::default());
+            load_streaming_model(&mut daemon, probe.clone());
+
+            cli_names_profile("calendar");
+            daemon.prepare_for_recording(None);
+            let mut state = streaming_state(None);
+            daemon
+                .recover_streaming_audio(&mut state, None, vec![0.0; 16_000])
+                .await;
+            let task = daemon.transcription_task.take().expect("recovery started");
+            let _ = task.await;
+            assert_eq!(probe.terms(), ["Voxtype", "PipeWire"], "the recovery");
+            daemon.discard_recording_overrides();
+
+            daemon.prepare_for_recording(None);
+            start_streaming(&mut daemon).await;
+            assert_eq!(probe.terms(), ["Voxtype"], "the next session");
         }
 
         #[tokio::test]

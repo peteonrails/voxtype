@@ -5,6 +5,7 @@
 //! an abstraction from a single use site.
 
 use std::path::PathBuf;
+use voxtype::text::vocabulary::Vocabulary;
 use voxtype::{config, transcribe, vad};
 
 /// Transcribe an audio file
@@ -87,22 +88,34 @@ pub(crate) fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow
         }
     }
 
-    // Create transcriber and transcribe
+    // Create transcriber and transcribe. There is no profile here, so the
+    // top-level [vocabulary] is the whole vocabulary.
+    let vocabulary = Vocabulary::global(&config.vocabulary);
     let transcriber = transcribe::create_transcriber(config)?;
+    if let Some(vocabulary) = &vocabulary {
+        transcriber.set_vocabulary(&vocabulary.terms().map(str::to_string).collect::<Vec<_>>());
+    }
     let text = transcriber.transcribe(&final_samples)?;
 
-    println!("\n{}", process_transcript(config, &text));
+    println!(
+        "\n{}",
+        process_transcript(config, vocabulary.as_ref(), &text)
+    );
     Ok(())
 }
 
-/// Apply the configured text pipeline (replacements, spoken punctuation,
-/// filler filtering) to the finished transcript — the same treatment the
-/// daemon gives a batch dictation before output. `voxtype transcribe`
-/// shipped without this, so a config that worked for dictation silently
-/// did nothing here (#581).
-fn process_transcript(config: &config::Config, text: &str) -> String {
+/// Apply the configured text pipeline (vocabulary, replacements, spoken
+/// punctuation, filler filtering) to the finished transcript — the same
+/// treatment the daemon gives a batch dictation before output. `voxtype
+/// transcribe` shipped without this, so a config that worked for dictation
+/// silently did nothing here (#581).
+fn process_transcript(
+    config: &config::Config,
+    vocabulary: Option<&Vocabulary>,
+    text: &str,
+) -> String {
     voxtype::text::TextProcessor::new_for_config(&config.text, config.text_language(), config)
-        .process(text)
+        .process_with_vocabulary(text, vocabulary)
 }
 
 #[cfg(test)]
@@ -121,8 +134,21 @@ mod tests {
         config.text.spoken_punctuation = true;
 
         assert_eq!(
-            process_transcript(&config, "I use vox type period"),
+            process_transcript(&config, None, "I use vox type period"),
             "I use voxtype."
+        );
+    }
+
+    /// The top-level [vocabulary] corrects the transcript as it does a
+    /// dictation without a profile.
+    #[test]
+    fn transcript_gets_the_global_vocabulary() {
+        let config: config::Config = toml::from_str("[vocabulary]\nterms = [\"Voxtype\"]").unwrap();
+        let vocabulary = Vocabulary::global(&config.vocabulary);
+
+        assert_eq!(
+            process_transcript(&config, vocabulary.as_ref(), "I use vox type"),
+            "I use Voxtype"
         );
     }
 }

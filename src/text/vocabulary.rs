@@ -1,14 +1,56 @@
-//! Conservative post-hoc spelling correction for profile vocabulary.
+//! Conservative post-hoc spelling correction for the top-level and
+//! profile vocabularies.
 
-use crate::config::VocabularyConfig;
+use crate::config::{Config, VocabularyConfig};
 use regex::Regex;
 use rphonetic::{DoubleMetaphone, Encoder};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 
-/// Prepared profile vocabulary. Empty or invalid entries are ignored.
+/// The vocabularies recordings use, prepared once at daemon startup: the
+/// top-level `[vocabulary]`, and for each profile with a vocabulary of its
+/// own, the top-level terms followed by the profile's.
+pub struct Vocabularies {
+    global: Option<Vocabulary>,
+    profiles: HashMap<String, Vocabulary>,
+}
+
+impl Vocabularies {
+    /// Load every vocabulary `config` names. A terms file that cannot be
+    /// read disables only the vocabulary that names it, with a warning.
+    pub fn load(config: &Config) -> Self {
+        let global = Vocabulary::global(&config.vocabulary);
+        let profiles = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| profile.vocabulary.is_configured())
+            .filter_map(|(name, profile)| match read_terms(&profile.vocabulary) {
+                Ok(own) => {
+                    let global_terms = global.iter().flat_map(|v| v.terms()).map(str::to_string);
+                    let terms = global_terms.chain(own).collect();
+                    Some((name.clone(), Vocabulary::from_terms(terms)))
+                }
+                Err(error) => {
+                    tracing::warn!(profile = %name, %error, "Profile vocabulary disabled");
+                    None
+                }
+            })
+            .collect();
+        Self { global, profiles }
+    }
+
+    /// The vocabulary of a recording with `profile`: the profile's, which
+    /// starts with the top-level terms, or else the top-level one.
+    pub fn for_profile(&self, profile: Option<&str>) -> Option<&Vocabulary> {
+        profile
+            .and_then(|name| self.profiles.get(name))
+            .or(self.global.as_ref())
+    }
+}
+
+/// Prepared vocabulary. Empty, repeated or invalid entries are ignored.
 pub struct Vocabulary {
     terms: Vec<Term>,
     word_re: Regex,
@@ -23,33 +65,27 @@ struct Term {
 }
 
 impl Vocabulary {
-    /// Load inline terms and an optional JSON terms file.
+    /// Load inline terms and an optional JSON terms file. A terms file
+    /// written `~/...` is read from the home directory.
     pub fn load(config: &VocabularyConfig) -> Result<Self, VocabularyLoadError> {
-        let mut terms = config.terms.clone();
-        if let Some(path) = &config.terms_file {
-            let contents =
-                fs::read_to_string(path).map_err(|source| VocabularyLoadError::Read {
-                    path: path.display().to_string(),
-                    source,
-                })?;
-            let parsed: Value =
-                serde_json::from_str(&contents).map_err(|source| VocabularyLoadError::Json {
-                    path: path.display().to_string(),
-                    source,
-                })?;
-            let values = parsed
-                .as_array()
-                .ok_or_else(|| VocabularyLoadError::Shape {
-                    path: path.display().to_string(),
-                })?;
-            for value in values {
-                let term = value.as_str().ok_or_else(|| VocabularyLoadError::Shape {
-                    path: path.display().to_string(),
-                })?;
-                terms.push(term.to_string());
+        read_terms(config).map(Self::from_terms)
+    }
+
+    /// The vocabulary of the top-level `[vocabulary]` table `config`: `None`
+    /// when it holds no terms or names a terms file that cannot be read
+    /// (logged).
+    pub fn global(config: &VocabularyConfig) -> Option<Self> {
+        if !config.is_configured() {
+            return None;
+        }
+        match Self::load(config) {
+            Ok(vocabulary) if !vocabulary.terms.is_empty() => Some(vocabulary),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, "Global vocabulary disabled");
+                None
             }
         }
-        Ok(Self::from_terms(terms))
     }
 
     fn from_terms(terms: Vec<String>) -> Self {
@@ -163,6 +199,38 @@ impl Vocabulary {
     }
 }
 
+/// Inline terms, then those of the JSON terms file, as configured. A terms
+/// file written `~/...` is read from the home directory.
+fn read_terms(config: &VocabularyConfig) -> Result<Vec<String>, VocabularyLoadError> {
+    let mut terms = config.terms.clone();
+    if let Some(configured) = &config.terms_file {
+        let path = configured
+            .to_str()
+            .map_or_else(|| configured.clone(), crate::llm::expand_home);
+        let contents = fs::read_to_string(&path).map_err(|source| VocabularyLoadError::Read {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let parsed: Value =
+            serde_json::from_str(&contents).map_err(|source| VocabularyLoadError::Json {
+                path: path.display().to_string(),
+                source,
+            })?;
+        let values = parsed
+            .as_array()
+            .ok_or_else(|| VocabularyLoadError::Shape {
+                path: path.display().to_string(),
+            })?;
+        for value in values {
+            let term = value.as_str().ok_or_else(|| VocabularyLoadError::Shape {
+                path: path.display().to_string(),
+            })?;
+            terms.push(term.to_string());
+        }
+    }
+    Ok(terms)
+}
+
 fn letters_only(value: &str) -> String {
     value
         .chars()
@@ -214,7 +282,7 @@ pub enum VocabularyLoadError {
 
 #[cfg(test)]
 mod tests {
-    use super::Vocabulary;
+    use super::{Vocabularies, Vocabulary};
     use crate::config::{TextConfig, VocabularyConfig};
     use crate::text::TextProcessor;
     use std::collections::HashMap;
@@ -286,6 +354,157 @@ mod tests {
         assert_eq!(
             vocabulary.correct("Vox tipe uses pipe wire and tail scale"),
             "Voxtype uses PipeWire and Tailscale"
+        );
+    }
+
+    /// The vocabularies a config.toml holding `config` sets up.
+    fn vocabularies(config: &str) -> Vocabularies {
+        Vocabularies::load(&toml::from_str(config).unwrap())
+    }
+
+    fn terms_for(vocabularies: &Vocabularies, profile: Option<&str>) -> Vec<String> {
+        vocabularies
+            .for_profile(profile)
+            .map(|vocabulary| vocabulary.terms().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn global_vocabulary_applies_with_or_without_a_profile() {
+        let vocabularies = vocabularies(
+            r#"
+            [vocabulary]
+            terms = ["Voxtype", "PipeWire"]
+
+            [profiles.notes]
+            post_process_command = "cat"
+            "#,
+        );
+
+        for profile in [None, Some("notes"), Some("unknown")] {
+            assert_eq!(
+                terms_for(&vocabularies, profile),
+                ["Voxtype", "PipeWire"],
+                "{profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_vocabulary_alone_applies_only_to_its_profile() {
+        let vocabularies = vocabularies(
+            r#"
+            [profiles.code.vocabulary]
+            terms = ["Hyprland"]
+            "#,
+        );
+
+        assert_eq!(terms_for(&vocabularies, Some("code")), ["Hyprland"]);
+        assert!(vocabularies.for_profile(None).is_none());
+    }
+
+    #[test]
+    fn global_terms_come_first_and_profile_repeats_drop() {
+        let vocabularies = vocabularies(
+            r#"
+            [vocabulary]
+            terms = ["Voxtype", "PipeWire"]
+
+            [profiles.code.vocabulary]
+            terms = ["Hyprland", "pipewire", "Voxtype"]
+            "#,
+        );
+
+        assert_eq!(
+            terms_for(&vocabularies, Some("code")),
+            ["Voxtype", "PipeWire", "Hyprland"]
+        );
+        assert_eq!(
+            vocabularies
+                .for_profile(Some("code"))
+                .unwrap()
+                .correct("vox type on hyper land with pipe wire"),
+            "Voxtype on Hyprland with PipeWire"
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_global_vocabulary_is_none() {
+        for config in [
+            "",
+            "[vocabulary]",
+            "[vocabulary]\nterms = []",
+            "[vocabulary]\nterms = [\" \"]",
+        ] {
+            assert!(
+                vocabularies(config).for_profile(None).is_none(),
+                "{config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_terms_file_disables_only_its_own_vocabulary() {
+        let broken_profile = vocabularies(
+            r#"
+            [vocabulary]
+            terms = ["Voxtype"]
+
+            [profiles.broken.vocabulary]
+            terms = ["Hyprland"]
+            terms_file = "/nonexistent/voxtype-terms.json"
+            "#,
+        );
+        assert_eq!(terms_for(&broken_profile, Some("broken")), ["Voxtype"]);
+
+        let broken_global = vocabularies(
+            r#"
+            [vocabulary]
+            terms = ["Voxtype"]
+            terms_file = "/nonexistent/voxtype-terms.json"
+
+            [profiles.code.vocabulary]
+            terms = ["Hyprland"]
+            "#,
+        );
+        assert!(broken_global.for_profile(None).is_none());
+        assert_eq!(terms_for(&broken_global, Some("code")), ["Hyprland"]);
+    }
+
+    /// A terms file under the home directory can be written `~/...`, as
+    /// config.toml paths usually are, in the top-level table and in a
+    /// profile's. Runs in its own process with a scratch HOME, so it never
+    /// reads the real home directory.
+    #[test]
+    fn terms_files_expand_a_leading_tilde() {
+        let scratch = tempfile::tempdir().unwrap();
+        if !crate::test_support::own_process(
+            "text::vocabulary::tests::terms_files_expand_a_leading_tilde",
+            |child| {
+                child.env("HOME", scratch.path());
+            },
+        ) {
+            return;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        std::fs::write(home.join("global.json"), r#"["PipeWire", "Voxtype"]"#).unwrap();
+        std::fs::write(home.join("code.json"), r#"["Hyprland"]"#).unwrap();
+
+        let vocabularies = vocabularies(
+            r#"
+            [vocabulary]
+            terms = ["Voxtype"]
+            terms_file = "~/global.json"
+
+            [profiles.code.vocabulary]
+            terms_file = "~/code.json"
+            "#,
+        );
+
+        assert_eq!(terms_for(&vocabularies, None), ["Voxtype", "PipeWire"]);
+        assert_eq!(
+            terms_for(&vocabularies, Some("code")),
+            ["Voxtype", "PipeWire", "Hyprland"]
         );
     }
 }

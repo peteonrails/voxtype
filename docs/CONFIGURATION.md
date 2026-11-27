@@ -2165,7 +2165,7 @@ terms = ["Voxtype", "Hyprland", "tokio-tungstenite"]
 **Default:** unset
 **Required:** No
 
-Path to a JSON file containing a list of vocabulary boost terms — `["term1", "term2", ...]`. Loaded once at daemon startup and merged into `context.terms`. Useful for sharing a corrections list across multiple voxtype config snapshots or projects.
+Path to a JSON file containing a list of vocabulary boost terms — `["term1", "term2", ...]`. A leading `~/` means your home directory. Loaded once at daemon startup and merged into `context.terms`. Useful for sharing a corrections list across multiple voxtype config snapshots or projects.
 
 ```toml
 [soniox]
@@ -3423,6 +3423,19 @@ When post-processing is enabled, voxtype passes the previous dictation's text vi
 
 See the example scripts in `examples/` for how to use `VOXTYPE_CONTEXT`.
 
+### Vocabulary of the Dictation
+
+When a dictation has a vocabulary (the top-level [`[vocabulary]`](#vocabulary)
+terms, then those of the active profile), a post-processing command reads it
+from the `VOXTYPE_VOCABULARY` environment variable, one term per line. The
+variable is unset when there are no terms, and also when they add up to more
+than 64 KiB, to stay clear of the system limit for one environment variable;
+Voxtype leaves it out and logs a warning.
+
+- Stdin still contains only the current text
+- A cleanup script can tell its model to keep these spellings
+- The model backends (`omarchy`, `openai`) and meeting mode do not receive it
+
 ### Error Handling
 
 If the post-processing command fails for any reason (command not found, non-zero
@@ -3475,6 +3488,73 @@ Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
 
 ---
 
+## [vocabulary]
+
+Terms for every recording, with or without a profile. Put the names and jargon
+you say everywhere here, and keep context-specific terms in a
+[profile's vocabulary](#vocabularyterms).
+
+```toml
+[vocabulary]
+terms = ["Voxtype", "Hyprland", "PipeWire"]
+terms_file = "~/.config/voxtype/vocabulary.json"
+```
+
+Voxtype sends the terms through each backend's native vocabulary mechanism
+when one exists: the local Whisper and whisper-cli prompts, the
+OpenAI-compatible remote `prompt` field, and Soniox `context.terms`. An
+explicit `[whisper] initial_prompt` or `[soniox] terms` list is preserved and
+the terms are appended. `voxtype transcribe` uses them too. Meeting mode does
+not: a meeting starts without the vocabulary, also when it shares dictation's
+loaded model. A dictation made while a meeting runs on the same loaded model
+sets its terms there again, so the meeting's later chunks get them. A meeting
+that starts while a dictation is still being transcribed shares the loaded
+model with it, so the dictation can be decoded without its terms, or the
+meeting can take them.
+
+When text becomes final, Voxtype also corrects only unambiguous phonetic
+near-matches of the terms. Provisional streaming text is not corrected. Exact
+case-insensitive matches receive the configured casing. Short terms, URLs,
+email addresses, paths, ties, and known ordinary word collisions are left
+unchanged. Correction runs before cleanup stages; `[text.replacements]` still
+runs last and can override it.
+
+A post-processing command reads the terms from the
+[`VOXTYPE_VOCABULARY`](#vocabulary-of-the-dictation) environment variable.
+
+When a recording uses a profile with its own vocabulary, the top-level terms
+come first and the profile's terms follow. Terms are compared by their ASCII
+letters alone, ignoring case: spaces, punctuation, digits and non-ASCII letters
+do not count. A profile term that compares equal to a top-level term is
+dropped, so the top-level spelling wins. For example, a top-level `GPT-4` drops
+a profile's `GPT-5`. A term with no ASCII letters at all is ignored.
+
+Without a `[vocabulary]` table, or with empty `terms` and no `terms_file`,
+nothing changes.
+
+### terms
+
+**Type:** Array of strings
+**Default:** `[]`
+**Required:** No
+
+Canonical spellings for product names, people, acronyms, and jargon.
+
+### terms_file
+
+**Type:** Path
+**Default:** None
+**Required:** No
+
+Path to a UTF-8 JSON array of additional terms, merged after `terms`. A leading
+`~/` means your home directory. The file is loaded once when the daemon starts;
+restart the daemon after editing it. A file that cannot be read, or JSON that
+is not an array of strings, disables the top-level vocabulary and writes a
+`Global vocabulary disabled` warning to the log. Profile vocabularies still
+load.
+
+---
+
 ## [profiles.*]
 
 Named profiles for context-specific settings. Profiles allow you to define vocabulary, post-processing commands, and output modes for different use cases, selectable at recording time via `--profile`.
@@ -3492,8 +3572,8 @@ post_process_command = "ollama run llama3.2:1b 'Format as code comment:'"
 output_mode = "clipboard"
 
 [profiles.code.vocabulary]
-terms = ["Voxtype", "Hyprland", "PipeWire"]
-terms_file = "/home/me/.config/voxtype/work-terms.json"
+terms = ["Tokio", "serde", "rustfmt"]
+terms_file = "~/.config/voxtype/work-terms.json"
 
 [profiles.email]
 post_process_command = "ollama run llama3.2:1b 'Format as professional email:'"
@@ -3509,19 +3589,9 @@ post_process_timeout_ms = 45000
 **Default:** `[]`
 **Required:** No
 
-Canonical spellings for product names, people, acronyms, and jargon used by
-this profile. Voxtype sends the terms through each backend's native vocabulary
-mechanism when one exists: the local Whisper and whisper-cli prompts, the
-OpenAI-compatible remote `prompt` field, and Soniox `context.terms`. An
-explicit `[whisper] initial_prompt` or `[soniox] terms` list is preserved and
-the profile terms are appended.
-
-When text becomes final, Voxtype also corrects only unambiguous phonetic
-near-matches. Provisional streaming text is not corrected. Exact
-case-insensitive matches receive the configured casing. Short terms, URLs,
-email addresses, paths, ties, and known ordinary word collisions are left
-unchanged. Correction runs before cleanup stages; `[text.replacements]` still
-runs last and can override it.
+Canonical spellings, as for the top-level [`[vocabulary]`](#vocabulary)
+`terms`, for this profile only, added after the top-level terms. They reach
+the engine and the text correction the same way.
 
 #### vocabulary.terms_file
 
@@ -3530,15 +3600,17 @@ runs last and can override it.
 **Default:** None
 **Required:** No
 
-Path to a UTF-8 JSON array of additional terms, for example:
+Path to a UTF-8 JSON array of additional terms. A leading `~/` means your home
+directory. For example:
 
 ```json
-["Shae Wilde", "PipeWire", "Tailscale"]
+["Shae Wilde", "Axum", "Clippy"]
 ```
 
 The file is loaded once when the daemon starts and merged with `terms`.
 Invalid or unreadable files disable vocabulary for that profile and write a
-warning to the log. Restart the daemon after editing the file. Streaming
+warning to the log; its recordings still get the top-level `[vocabulary]`
+terms. Restart the daemon after editing the file. Streaming
 backends receive the terms when the session starts, and correction applies to
 final segments only, never provisional text.
 

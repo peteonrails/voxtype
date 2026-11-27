@@ -148,7 +148,7 @@ pub struct SonioxTranscriber {
     /// Merged vocabulary-boost terms from `config.terms` + `config.terms_file`.
     /// Loaded once at construction so we don't hit disk per session.
     context_terms: Vec<String>,
-    /// Profile vocabulary selected for the current recording.
+    /// Vocabulary selected for the current recording.
     active_vocabulary: std::sync::Mutex<Vec<String>>,
     /// Lazy reqwest client for the async REST path. Built on first use
     /// via `OnceLock` so we don't pay TLS/DNS-pool init per dictation
@@ -179,8 +179,11 @@ fn load_context_terms(config: &SonioxConfig) -> Result<Vec<String>, TranscribeEr
             push(t.clone());
         }
     }
-    if let Some(path) = &config.terms_file {
-        let bytes = std::fs::read(path).map_err(|e| {
+    if let Some(configured) = &config.terms_file {
+        let path = configured
+            .to_str()
+            .map_or_else(|| configured.clone(), crate::llm::expand_home);
+        let bytes = std::fs::read(&path).map_err(|e| {
             TranscribeError::ConfigError(format!(
                 "Soniox terms_file unreadable ({}): {}",
                 path.display(),
@@ -1515,6 +1518,27 @@ mod tests {
         cfg.terms_file = Some(path);
         let err = SonioxTranscriber::new(cfg).unwrap_err();
         assert!(matches!(err, TranscribeError::ConfigError(_)));
+    }
+
+    /// `~/` in `terms_file` means the home directory. Runs in its own
+    /// process with a scratch HOME, so it never reads the real one.
+    #[test]
+    fn load_context_terms_expands_a_leading_tilde() {
+        let scratch = tempfile::tempdir().unwrap();
+        if !crate::test_support::own_process(
+            "transcribe::soniox::tests::load_context_terms_expands_a_leading_tilde",
+            |child| {
+                child.env("HOME", scratch.path());
+            },
+        ) {
+            return;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        std::fs::write(home.join("terms.json"), r#"["Hyprland"]"#).unwrap();
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.terms_file = Some("~/terms.json".into());
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        assert_eq!(t.context_terms, vec!["Hyprland"]);
     }
 
     #[test]

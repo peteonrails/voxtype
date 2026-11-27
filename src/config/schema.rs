@@ -1463,6 +1463,18 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Word replacements",
         "Case-insensitive substitutions applied to the transcription, keyed by the spoken form.",
     ),
+    // The `voxtype configure` TUI has no row for this one yet; `config set`
+    // and the Omarchy settings form reach it. `vocabulary.terms` is a list,
+    // a hand edit.
+    spec(
+        "vocabulary.terms_file",
+        "vocabulary",
+        "terms_file",
+        KeyType::String,
+        "Text Cleanup",
+        "Vocabulary file",
+        "Path to a JSON list of terms for every recording, loaded at daemon startup. They bias the engine and correct the final text; a profile's own vocabulary is added after them.",
+    ),
     // -- VAD ----------------------------------------------------------------
     spec(
         "vad.enabled",
@@ -3543,6 +3555,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
                 .collect();
             Json::Object(map)
         }
+        "vocabulary.terms_file" => match &cfg.vocabulary.terms_file {
+            Some(p) => json!(p.to_string_lossy()),
+            None => Json::Null,
+        },
 
         "vad.enabled" => json!(cfg.vad.enabled),
         "vad.backend" => serde_json::to_value(cfg.vad.backend).ok()?,

@@ -31,7 +31,7 @@ pub struct WhisperTranscriber {
     context_window_optimization: bool,
     /// Initial prompt to provide context for transcription
     initial_prompt: Option<String>,
-    /// Profile vocabulary selected for the current recording.
+    /// Vocabulary selected for the current recording.
     active_vocabulary: Mutex<Vec<String>>,
     /// Two-letter code for the language used during the most recent
     /// `transcribe()` call. Populated for single-language and constrained

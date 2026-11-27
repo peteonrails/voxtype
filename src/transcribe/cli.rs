@@ -29,7 +29,7 @@ pub struct CliTranscriber {
     threads: usize,
     /// Initial prompt for context
     initial_prompt: Option<String>,
-    /// Profile vocabulary selected for the current recording.
+    /// Vocabulary selected for the current recording.
     active_vocabulary: Mutex<Vec<String>>,
 }
 
@@ -246,7 +246,7 @@ impl CliTranscriber {
             cmd.arg("--translate");
         }
 
-        // Preserve the configured prompt and append active profile terms.
+        // Preserve the configured prompt and append the recording's terms.
         let vocabulary = self
             .active_vocabulary
             .lock()

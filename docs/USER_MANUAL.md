@@ -1858,6 +1858,23 @@ voxtype --initial-prompt "Discussion about Terraform and AWS Lambda" daemon
 - Combine with a larger model (`small.en` or `medium.en`) for best results on difficult vocabulary
 - The prompt guides Whisper's expectations but doesn't guarantee exact transcription
 
+### Vocabulary for Every Recording
+
+A `[vocabulary]` table lists the spellings you want everywhere, whatever the
+engine and whether or not a profile is active:
+
+```toml
+[vocabulary]
+terms = ["Voxtype", "Hyprland", "PipeWire", "Tailscale"]
+terms_file = "~/.config/voxtype/vocabulary.json"  # optional JSON array
+```
+
+Voxtype gives the terms to the engine and corrects close misspellings of them
+in the final text; [`[vocabulary]`](CONFIGURATION.md#vocabulary) in the
+configuration reference says which engines take them. `voxtype transcribe`
+uses them too. A [profile](#profiles) can add its own terms after these.
+Restart the daemon after changing the terms or the file.
+
 ---
 
 ## Whisper Models
@@ -2965,6 +2982,16 @@ In meeting mode, context is tracked separately for microphone and loopback audio
 
 See the example scripts in `examples/` for full implementations.
 
+When the dictation has a [vocabulary](#vocabulary-for-every-recording), your
+command also gets its terms in `VOXTYPE_VOCABULARY`, one per line, so a
+cleanup prompt can keep their spellings:
+
+```bash
+if [[ -n "${VOXTYPE_VOCABULARY:-}" ]]; then
+  PROMPT="$PROMPT Spell these terms exactly as written: ${VOXTYPE_VOCABULARY//$'\n'/, }."
+fi
+```
+
 ### Error Handling
 
 Post-processing is designed to be fault-tolerant:
@@ -3019,7 +3046,7 @@ post_process_command = "ollama run llama3.2:1b 'Format as a code comment. Be tec
 output_mode = "clipboard"  # Override output mode for this profile
 
 [profiles.code.vocabulary]
-terms = ["Voxtype", "Hyprland", "PipeWire", "Tailscale"]
+terms = ["Tokio", "serde", "rustfmt"]
 
 [profiles.email]
 post_process_command = "ollama run llama3.2:1b 'Format as professional email text:'"
@@ -3072,6 +3099,9 @@ Each profile can override these settings:
 - Profiles work with all recording modes (evdev hotkey, compositor keybindings)
 - Profile terms bias Whisper-compatible and Soniox backends without replacing
   an explicit backend prompt or Soniox terms list
+- Profile terms follow the top-level [`[vocabulary]`](#vocabulary-for-every-recording)
+  terms; a profile term with the same ASCII letters as one of them, ignoring
+  case, digits and everything else, is dropped
 - Vocabulary correction runs when batch or streaming text becomes final;
   provisional streaming text is left untouched
 - `[text.replacements]` runs after vocabulary correction and can override it

@@ -3,7 +3,7 @@ use super::{
     MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
     ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
     StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine, VadConfig,
-    WhisperConfig,
+    VocabularyConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -111,6 +111,11 @@ pub struct Config {
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
+
+    /// Vocabulary for every recording, with or without a profile. A
+    /// profile's own vocabulary is added after it.
+    #[serde(default)]
+    pub vocabulary: VocabularyConfig,
 
     /// Voice Activity Detection configuration
     /// When enabled, filters silence-only recordings before transcription
@@ -227,6 +232,7 @@ impl Default for Config {
             streaming: None,
             streaming_recovery: None,
             text: TextConfig::default(),
+            vocabulary: VocabularyConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),

@@ -53,7 +53,7 @@ pub enum Commands {
         #[arg(long)]
         threads: Option<usize>,
 
-        /// Initial prompt merged with profile vocabulary by the parent
+        /// Initial prompt merged with the recording's vocabulary by the parent
         #[arg(long, hide = true)]
         initial_prompt: Option<String>,
     },
