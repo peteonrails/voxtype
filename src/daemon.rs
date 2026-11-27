@@ -8143,6 +8143,12 @@ impl Daemon {
             let _ = capture.stop().await;
         }
         self.restore_recording_media();
+        // The restore runs on a spawned task; let it finish its final write
+        // before the runtime is dropped, or a shutdown mid-dictation leaves
+        // media ducked (and stream-restore remembers the ducked volume).
+        if let Some(task) = self.media_fade_task.take() {
+            let _ = task.await;
+        }
         notification::close_persistent().await;
 
         // Cleanup hotkey listener
