@@ -167,12 +167,28 @@ fn render_matrix(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(block, area);
 
     if app.inventory.install_kind == InstallKind::Source {
+        let nix = crate::setup::install_hint::is_nix_store_path(&app.inventory.binary_path);
+        let intro = if nix {
+            [
+                "Nix install detected.",
+                "Each voxtype flake package is one fixed build. To change",
+                "engine or backend, set programs.voxtype.package to another",
+                "flake package (vulkan, onnx, onnx-cuda, onnx-migraphx).",
+            ]
+        } else {
+            [
+                "Source build detected.",
+                "Variant switching applies only to package installs",
+                "(/usr/lib/voxtype/voxtype-*). To enable a different",
+                "engine, rebuild with the appropriate Cargo features.",
+            ]
+        };
         let para = Paragraph::new(vec![
-            Line::from("Source build detected."),
+            Line::from(intro[0]),
             Line::from(""),
-            Line::from("Variant switching applies only to package installs"),
-            Line::from("(/usr/lib/voxtype/voxtype-*). To enable a different"),
-            Line::from("engine, rebuild with the appropriate Cargo features."),
+            Line::from(intro[1]),
+            Line::from(intro[2]),
+            Line::from(intro[3]),
             Line::from(""),
             Line::from(format!(
                 "Compiled features: {}",

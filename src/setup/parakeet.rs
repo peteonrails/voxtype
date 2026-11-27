@@ -262,6 +262,21 @@ fn print_binary(next_launch: &Path) {
 pub fn show_status() {
     println!("=== Voxtype ONNX Engine Status ===\n");
 
+    if super::install_hint::running_from_nix() {
+        let exe = binary::current_binary_path();
+        let running = super::install_hint::running_nix_package();
+        for line in super::install_hint::nix_status_lines(&exe, running) {
+            println!("{line}");
+        }
+        if !running.starts_with("onnx") {
+            println!(
+                "\nTo use ONNX engines, {}.",
+                super::install_hint::onnx_variant_hint()
+            );
+        }
+        return;
+    }
+
     if is_parakeet_active() {
         if let Some(backend) = detect_current_parakeet_backend() {
             println!("Active engine: Parakeet");
@@ -338,6 +353,17 @@ pub fn show_status() {
 }
 
 pub fn enable() -> anyhow::Result<()> {
+    if super::install_hint::running_from_nix() {
+        anyhow::bail!(
+            "{}",
+            super::install_hint::nix_switch_refusal(
+                "setup onnx --enable",
+                super::install_hint::nix_onnx_target(),
+                super::install_hint::running_nix_package()
+            )
+        );
+    }
+
     let available = detect_available_backends();
     if available.is_empty() {
         anyhow::bail!(
@@ -373,6 +399,17 @@ pub fn enable() -> anyhow::Result<()> {
 }
 
 pub fn disable() -> anyhow::Result<()> {
+    if super::install_hint::running_from_nix() {
+        anyhow::bail!(
+            "{}",
+            super::install_hint::nix_switch_refusal(
+                "setup onnx --disable",
+                Variant::WhisperAvx2,
+                super::install_hint::running_nix_package()
+            )
+        );
+    }
+
     if !is_parakeet_active() {
         println!("ONNX engine is not currently enabled (already using Whisper).");
         return Ok(());

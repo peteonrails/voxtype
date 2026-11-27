@@ -139,9 +139,10 @@ pub fn enable() -> anyhow::Result<()> {
     #[cfg(not(feature = "openvino-whisper"))]
     {
         anyhow::bail!(
-            "NPU support requires the openvino-whisper feature.\n\
-             Install a build with openvino-whisper enabled, or rebuild with:\n  \
-             cargo build --features openvino-whisper"
+            "NPU support needs the openvino-whisper feature, which this voxtype binary \
+             was built without.\n\
+             To fix this, {}.",
+            super::install_hint::hint(super::install_hint::Need::Feature("openvino"))
         );
     }
 

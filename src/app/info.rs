@@ -174,6 +174,9 @@ impl ModelStatus {
             o.insert("languages".into(), serde_json::json!(metadata.languages));
             o.insert("architecture".into(), serde_json::json!(metadata.arch));
         }
+        if let Some(decoder) = voxtype::setup::model::gguf_decoder(self.name) {
+            o.insert("decoder".into(), serde_json::json!(decoder.id()));
+        }
         if let Some((license, url)) = voxtype::setup::model::gguf_license(self.name) {
             o.insert("license".into(), serde_json::json!(license));
             o.insert("license_url".into(), serde_json::json!(url));
@@ -307,7 +310,19 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
                 Some(arg) if arg != status.name => format!("  (download: {})", arg),
                 _ => String::new(),
             };
-            println!("  {}  {}{}{}", status.label(), status.name, star, arg);
+            // GGUF files carry their own architecture; name the decoder so
+            // a GGUF Parakeet reads as TDT like its ONNX counterpart.
+            let decoder = voxtype::setup::model::gguf_decoder(status.name)
+                .map(|d| format!("  [{} decoder]", d.label()))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}{}{}{}",
+                status.label(),
+                status.name,
+                star,
+                decoder,
+                arg
+            );
             for problem in status.problems() {
                 any_corrupt = true;
                 println!("               {}", problem);
@@ -504,6 +519,13 @@ fn print_variants_text(inv: &setup::binary::Inventory, config: &Config) {
 
     println!();
     if matches!(inv.install_kind, InstallKind::Source) {
+        if setup::install_hint::is_nix_store_path(&inv.binary_path) {
+            let running = setup::install_hint::running_nix_package();
+            for line in setup::install_hint::nix_status_lines(&inv.binary_path, running) {
+                println!("{line}");
+            }
+            return;
+        }
         println!("Source build: variant switching not applicable.");
         println!("To enable a different engine, rebuild with the appropriate Cargo features.");
         return;

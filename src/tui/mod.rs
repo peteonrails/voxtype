@@ -685,6 +685,24 @@ fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("   Fix: rebuild voxtype with ", dim),
             Span::styled(format!("--features {}", feature), warn),
         ]),
+        Remediation::NixPackage { feature } => {
+            match crate::setup::install_hint::nix_package_for_feature(feature) {
+                Some(package) => Line::from(vec![
+                    Span::styled("   Fix: set ", dim),
+                    Span::styled("programs.voxtype.package", warn),
+                    Span::styled(" to the voxtype flake's ", dim),
+                    Span::styled(package, warn),
+                    Span::styled(" package", dim),
+                ]),
+                None => Line::from(vec![
+                    Span::styled(
+                        "   Fix: no flake package has it; build from source with ",
+                        dim,
+                    ),
+                    Span::styled(format!("--features {}", feature), warn),
+                ]),
+            }
+        }
     };
 
     f.render_widget(Paragraph::new(vec![line1, line2]), area);

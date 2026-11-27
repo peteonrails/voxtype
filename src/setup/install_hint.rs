@@ -13,6 +13,10 @@
 //! (see the AUR PKGBUILD). Deb and rpm do not write it, which means every
 //! variant is installed. The record only changes the wording of a hint; nothing
 //! requires it.
+//!
+//! A Nix install has neither `/usr/lib/voxtype` nor anything to rebuild in
+//! place: each flake package is one fixed build in the read-only store, so
+//! the fix there is to install the flake package that has what is missing.
 
 use std::cell::OnceCell;
 use std::fmt;
@@ -26,6 +30,21 @@ pub const PACKAGE_VARIANTS_FILE: &str = "package-variants";
 
 /// `install_method` value written by the AUR `voxtype-bin` package.
 const AUR_BIN: &str = "aur-bin";
+
+/// Where every Nix-built binary lives.
+const NIX_STORE: &str = "/nix/store";
+
+/// True when `exe` is a Nix build. A Nix wrapper `exec`s the real binary, so
+/// `/proc/self/exe` (and its canonical form) points into the store.
+pub fn is_nix_store_path(exe: &Path) -> bool {
+    exe.starts_with(NIX_STORE)
+}
+
+/// True when the running binary came from the Nix store.
+pub fn running_from_nix() -> bool {
+    let exe = binary::current_binary_path();
+    is_nix_store_path(&exe.canonicalize().unwrap_or(exe))
+}
 
 /// What the fix has to provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +70,13 @@ pub enum Hint {
     Reinstall { method: InstallMethod },
     /// A source build: rebuild with the feature.
     Rebuild { feature: Option<&'static str> },
+    /// A Nix install: install the voxtype flake package (`package`, a
+    /// `packages.<system>` output) that has it. `None` when no flake package
+    /// includes `feature`.
+    Nix {
+        package: Option<&'static str>,
+        feature: Option<&'static str>,
+    },
 }
 
 impl fmt::Display for Hint {
@@ -85,6 +111,28 @@ impl fmt::Display for Hint {
                 feature: Some(feature),
             } => write!(f, "rebuild with --features {feature}"),
             Hint::Rebuild { feature: None } => write!(f, "rebuild voxtype"),
+            Hint::Nix {
+                package: Some(package),
+                ..
+            } => write!(
+                f,
+                "install the voxtype flake's `{package}` package: set \
+                 `programs.voxtype.package = voxtype.packages.${{system}}.{package};` \
+                 in your NixOS or Home Manager configuration, or run \
+                 `nix profile install github:peteonrails/voxtype#{package}`"
+            ),
+            Hint::Nix {
+                package: None,
+                feature: Some(feature),
+            } => write!(
+                f,
+                "build voxtype from source with --features {feature}; \
+                 no voxtype flake package includes it"
+            ),
+            Hint::Nix {
+                package: None,
+                feature: None,
+            } => write!(f, "build voxtype from source"),
         }
     }
 }
@@ -175,11 +223,168 @@ fn variant_feature(variant: Variant) -> Option<&'static str> {
     }
 }
 
+/// The Cargo feature a build needs to provide what `need` asks for.
+fn build_feature(need: Need) -> Option<&'static str> {
+    match need {
+        // Engine names double as feature names except OpenVINO's.
+        Need::Feature("openvino") => Some("openvino-whisper"),
+        Need::Feature(feature) => Some(feature),
+        Need::Variant(variant) => variant_feature(variant),
+    }
+}
+
+/// The voxtype flake package (a `packages.<system>` output in flake.nix)
+/// that is the Nix counterpart of a packaged variant.
+pub fn nix_package_for_variant(variant: Variant) -> &'static str {
+    match variant {
+        Variant::WhisperVulkan => "vulkan",
+        Variant::OnnxCuda | Variant::OnnxCuda12 | Variant::OnnxCuda13 => "onnx-cuda",
+        Variant::OnnxMigraphx => "onnx-migraphx",
+        Variant::OnnxAvx2 | Variant::OnnxAvx512 | Variant::OnnxNative => "onnx",
+        Variant::WhisperBaseline
+        | Variant::WhisperAvx2
+        | Variant::WhisperAvx512
+        | Variant::WhisperNative => "default",
+    }
+}
+
+/// The flake package that provides what `need` asks for, if any does.
+/// Every flake package carries the GGUF clients; none carries OpenVINO or
+/// ML diarization.
+fn nix_package(need: Need) -> Option<&'static str> {
+    match need {
+        Need::Variant(variant) => Some(nix_package_for_variant(variant)),
+        Need::Feature("gguf" | "cohere-gguf" | "parakeet-gguf") => Some("default"),
+        Need::Feature("gpu-vulkan") => Some("vulkan"),
+        Need::Feature("gpu-hipblas") => Some("rocm"),
+        // The release ONNX variants carry these; the flake's do not.
+        Need::Feature("openvino" | "openvino-whisper" | "ml-diarization") => None,
+        Need::Feature(engine) if provides(Variant::OnnxAvx2, engine) => Some("onnx"),
+        Need::Feature(_) => None,
+    }
+}
+
+/// The flake package whose build has `feature`, if any.
+pub fn nix_package_for_feature(feature: &'static str) -> Option<&'static str> {
+    nix_package(Need::Feature(feature))
+}
+
+/// The flake package this binary was built as, read from its features.
+pub fn running_nix_package() -> &'static str {
+    if cfg!(feature = "parakeet-cuda") {
+        "onnx-cuda"
+    } else if cfg!(feature = "parakeet-migraphx") {
+        "onnx-migraphx"
+    } else if cfg!(feature = "parakeet") {
+        "onnx"
+    } else if cfg!(feature = "gpu-vulkan") {
+        "vulkan"
+    } else if cfg!(feature = "gpu-hipblas") {
+        "rocm"
+    } else {
+        "default"
+    }
+}
+
+/// The flake packages, with what each one runs, for status output.
+const NIX_PACKAGES: &[(&str, &str)] = &[
+    ("default", "Whisper on the CPU"),
+    ("vulkan", "Whisper on a Vulkan GPU (AMD, Intel, NVIDIA)"),
+    ("rocm", "Whisper on an AMD GPU through ROCm"),
+    (
+        "onnx",
+        "ONNX engines (Parakeet, Moonshine, SenseVoice, ...) on the CPU",
+    ),
+    ("onnx-cuda", "ONNX engines on an NVIDIA GPU"),
+    ("onnx-migraphx", "ONNX engines on an AMD GPU (MIGraphX)"),
+];
+
+/// What `setup gpu` and `setup onnx` print in place of the package status
+/// on a Nix install, where there are no variants to list or switch.
+pub fn nix_status_lines(exe: &Path, running: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("Installed with Nix: {}", exe.display()),
+        format!("  Flake package: {running}"),
+        String::new(),
+        "Each voxtype flake package is one fixed build, so `setup gpu` and".to_string(),
+        "`setup onnx` have nothing to switch. Choose the build by installing".to_string(),
+        "its package (programs.voxtype.package, or nix profile install):".to_string(),
+    ];
+    for (package, runs) in NIX_PACKAGES {
+        let mark = if *package == running { "*" } else { " " };
+        lines.push(format!("  {mark} {package:<14} {runs}"));
+    }
+    lines
+}
+
+/// The error for a `setup` command that swaps packaged binaries, run on a
+/// Nix install. `command` is what was run, e.g. `setup gpu --enable`;
+/// `target` is the variant that command would have switched to and
+/// `running` the flake package this binary was built as.
+pub fn nix_switch_refusal(command: &str, target: Variant, running: &str) -> String {
+    let package = nix_package_for_variant(target);
+    let runs = NIX_PACKAGES
+        .iter()
+        .find(|(name, _)| *name == package)
+        .map_or(package, |(_, runs)| *runs);
+    let fix = if package == running {
+        format!("This is already the `{package}` flake package ({runs}).")
+    } else {
+        let hint = Hint::Nix {
+            package: Some(package),
+            feature: None,
+        };
+        format!("For {runs}, {hint}.")
+    };
+    format!(
+        "`voxtype {command}` switches between the binaries a deb, rpm or AUR package \
+         installs in /usr/lib/voxtype.\n\
+         This voxtype was installed with Nix, where each flake package is one fixed \
+         build, so there is nothing to switch and nothing was changed.\n\
+         {fix}"
+    )
+}
+
+/// The build `setup gpu --enable` (`enable`) or `--disable` would move a
+/// Nix install to. `onnx_build` says this binary runs the ONNX engines;
+/// `onnx_pick` is the ONNX variant for this machine's hardware.
+fn nix_gpu_target_for(enable: bool, onnx_build: bool, onnx_pick: Variant) -> Variant {
+    let onnx_gpu = matches!(
+        onnx_pick,
+        Variant::OnnxCuda | Variant::OnnxCuda12 | Variant::OnnxCuda13 | Variant::OnnxMigraphx
+    );
+    match (enable, onnx_build) {
+        (true, true) if onnx_gpu => onnx_pick,
+        (true, _) => Variant::WhisperVulkan,
+        (false, true) => Variant::OnnxAvx2,
+        (false, false) => Variant::WhisperAvx2,
+    }
+}
+
+/// [`nix_gpu_target_for`] on this machine.
+pub fn nix_gpu_target(enable: bool) -> Variant {
+    let onnx_build = cfg!(feature = "parakeet");
+    let pick = if enable && onnx_build {
+        system_onnx_pick()
+    } else {
+        Variant::OnnxAvx2
+    };
+    nix_gpu_target_for(enable, onnx_build, pick)
+}
+
+/// The ONNX build for this machine's hardware, as `setup onnx --enable`
+/// would pick it.
+pub fn nix_onnx_target() -> Variant {
+    system_onnx_pick()
+}
+
 /// What the hint can see of this install. Probes that run a program are
 /// deferred and done at most once, because most hints never reach them.
 pub struct Host<'a> {
     /// The running binary is a packaged variant under `lib_dir`.
     running_from_package: bool,
+    /// The running binary is a Nix build.
+    nix: bool,
     exe: PathBuf,
     lib_dir: PathBuf,
     record: Option<PackageRecord>,
@@ -204,9 +409,11 @@ impl<'a> Host<'a> {
         let canonical = exe.canonicalize().unwrap_or_else(|_| exe.clone());
         let lib_dir = lib_dir.canonicalize().unwrap_or(lib_dir);
         let running_from_package = canonical.starts_with(&lib_dir);
+        let nix = is_nix_store_path(&canonical);
         let record = PackageRecord::read(&lib_dir.join(PACKAGE_VARIANTS_FILE));
         Self {
             running_from_package,
+            nix,
             exe: canonical,
             lib_dir,
             record,
@@ -218,19 +425,21 @@ impl<'a> Host<'a> {
     }
 
     pub fn hint(&self, need: Need) -> Hint {
+        if self.nix {
+            return Hint::Nix {
+                package: nix_package(need),
+                feature: build_feature(need),
+            };
+        }
         let packaged = match need {
             Need::Feature(_) => self.running_from_package,
             // Switching variants acts on the package, whichever binary asks.
             Need::Variant(_) => self.running_from_package || self.lib_dir.is_dir(),
         };
         if !packaged {
-            let feature = match need {
-                // Engine names double as feature names except OpenVINO's.
-                Need::Feature("openvino") => Some("openvino-whisper"),
-                Need::Feature(feature) => Some(feature),
-                Need::Variant(variant) => variant_feature(variant),
+            return Hint::Rebuild {
+                feature: build_feature(need),
             };
-            return Hint::Rebuild { feature };
         }
 
         let installed = |variant: Variant| self.lib_dir.join(variant.binary_name()).exists();
@@ -634,5 +843,182 @@ explicit=
         host.hint(Need::Feature("parakeet"));
         host.hint(Need::Feature("moonshine"));
         assert_eq!(runner.calls.borrow().len(), 1, "{:?}", runner.calls);
+    }
+
+    fn nix_host(runner: &FakeRunner, lib_dir: PathBuf) -> Host<'_> {
+        Host::new(
+            PathBuf::from("/nix/store/abc123-voxtype-1.3.1/bin/voxtype"),
+            lib_dir,
+            runner,
+            pick_avx512,
+        )
+    }
+
+    #[test]
+    fn nix_install_names_the_flake_package_not_a_rebuild() {
+        let runner = runner(&[("pacman", "voxtype-bin\n")]);
+        let host = nix_host(&runner, PathBuf::from("/nonexistent/usr/lib/voxtype"));
+
+        let hint = host.hint(Need::Feature("parakeet"));
+        assert_eq!(
+            hint,
+            Hint::Nix {
+                package: Some("onnx"),
+                feature: Some("parakeet"),
+            }
+        );
+        assert_eq!(
+            hint.to_string(),
+            "install the voxtype flake's `onnx` package: set \
+             `programs.voxtype.package = voxtype.packages.${system}.onnx;` \
+             in your NixOS or Home Manager configuration, or run \
+             `nix profile install github:peteonrails/voxtype#onnx`"
+        );
+        assert_eq!(
+            host.hint(Need::Variant(Variant::WhisperVulkan)),
+            Hint::Nix {
+                package: Some("vulkan"),
+                feature: Some("gpu-vulkan"),
+            }
+        );
+        assert_eq!(
+            host.hint(Need::Variant(Variant::OnnxCuda13)),
+            Hint::Nix {
+                package: Some("onnx-cuda"),
+                feature: Some("parakeet-cuda"),
+            }
+        );
+        assert_eq!(
+            host.hint(Need::Feature("gpu-vulkan")).to_string(),
+            host.hint(Need::Variant(Variant::WhisperVulkan)).to_string()
+        );
+        // No package manager is asked about a store path.
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn nix_install_without_a_flake_package_says_so() {
+        let runner = runner(&[]);
+        let host = nix_host(&runner, PathBuf::from("/nonexistent/usr/lib/voxtype"));
+        for feature in ["openvino", "ml-diarization"] {
+            let hint = host.hint(Need::Feature(feature));
+            assert!(matches!(hint, Hint::Nix { package: None, .. }), "{hint:?}");
+        }
+        assert_eq!(
+            host.hint(Need::Feature("openvino")).to_string(),
+            "build voxtype from source with --features openvino-whisper; \
+             no voxtype flake package includes it"
+        );
+    }
+
+    #[test]
+    fn nix_install_ignores_a_package_directory_beside_it() {
+        // A leftover /usr/lib/voxtype does not make a Nix binary a package one.
+        let fx = Fixture::new(None, &[Variant::OnnxAvx2, Variant::WhisperVulkan], None);
+        let runner = runner(&[]);
+        let host = nix_host(&runner, fx.dir.path().join("lib"));
+        assert!(matches!(
+            host.hint(Need::Feature("parakeet")),
+            Hint::Nix {
+                package: Some("onnx"),
+                ..
+            }
+        ));
+        assert!(matches!(
+            host.hint(Need::Variant(Variant::WhisperVulkan)),
+            Hint::Nix {
+                package: Some("vulkan"),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn store_paths_are_nix_and_package_paths_are_not() {
+        assert!(is_nix_store_path(Path::new(
+            "/nix/store/abc-voxtype-1.3.1/bin/.voxtype-wrapped"
+        )));
+        assert!(!is_nix_store_path(Path::new(
+            "/usr/lib/voxtype/voxtype-avx2"
+        )));
+        assert!(!is_nix_store_path(Path::new("/home/u/nix/store/voxtype")));
+    }
+
+    /// Every package a hint or the status names is a real flake output.
+    #[test]
+    fn nix_packages_named_exist_in_the_flake() {
+        let flake = include_str!("../../flake.nix");
+        let mut names: Vec<&str> = NIX_PACKAGES.iter().map(|(name, _)| *name).collect();
+        names.extend(Variant::ALL.iter().map(|v| nix_package_for_variant(*v)));
+        names.push(running_nix_package());
+        for name in names {
+            assert!(
+                flake.contains(&format!("\n          {name} = ")),
+                "flake.nix has no packages.{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn nix_switch_refusal_explains_and_names_the_package() {
+        let message = nix_switch_refusal("setup gpu --enable", Variant::WhisperVulkan, "default");
+        assert_eq!(
+            message,
+            "`voxtype setup gpu --enable` switches between the binaries a deb, rpm or AUR \
+             package installs in /usr/lib/voxtype.\n\
+             This voxtype was installed with Nix, where each flake package is one fixed \
+             build, so there is nothing to switch and nothing was changed.\n\
+             For Whisper on a Vulkan GPU (AMD, Intel, NVIDIA), install the voxtype flake's \
+             `vulkan` package: set `programs.voxtype.package = voxtype.packages.${system}.vulkan;` \
+             in your NixOS or Home Manager configuration, or run \
+             `nix profile install github:peteonrails/voxtype#vulkan`."
+        );
+
+        let already = nix_switch_refusal("setup gpu --enable", Variant::WhisperVulkan, "vulkan");
+        assert!(
+            already.ends_with(
+                "This is already the `vulkan` flake package \
+                 (Whisper on a Vulkan GPU (AMD, Intel, NVIDIA))."
+            ),
+            "{already}"
+        );
+
+        let onnx = nix_switch_refusal("setup onnx --enable", Variant::OnnxCuda13, "default");
+        assert!(
+            onnx.contains("For ONNX engines on an NVIDIA GPU, install"),
+            "{onnx}"
+        );
+        assert!(onnx.contains("voxtype#onnx-cuda`"), "{onnx}");
+    }
+
+    #[test]
+    fn nix_status_marks_the_running_package() {
+        let lines = nix_status_lines(
+            Path::new("/nix/store/abc-voxtype-vulkan-1.3.1/bin/voxtype"),
+            "vulkan",
+        );
+        assert_eq!(
+            lines[0],
+            "Installed with Nix: /nix/store/abc-voxtype-vulkan-1.3.1/bin/voxtype"
+        );
+        assert!(lines.iter().any(|l| l.starts_with("  * vulkan ")));
+        assert!(lines.iter().any(|l| l.starts_with("    default ")));
+        assert!(!lines.iter().any(|l| l.contains("/usr/lib/voxtype")));
+    }
+
+    #[test]
+    fn nix_gpu_targets_follow_the_build_and_the_hardware() {
+        use Variant::*;
+        // Whisper builds move between default and vulkan.
+        assert_eq!(nix_gpu_target_for(true, false, OnnxCuda13), WhisperVulkan);
+        assert_eq!(nix_gpu_target_for(false, false, OnnxCuda13), WhisperAvx2);
+        // ONNX builds move to the GPU ONNX package the hardware supports.
+        assert_eq!(nix_gpu_target_for(true, true, OnnxCuda13), OnnxCuda13);
+        assert_eq!(nix_gpu_target_for(true, true, OnnxMigraphx), OnnxMigraphx);
+        assert_eq!(nix_gpu_target_for(false, true, OnnxCuda13), OnnxAvx2);
+        // No GPU the ONNX engines can use: Vulkan is the GPU build there is.
+        assert_eq!(nix_gpu_target_for(true, true, OnnxAvx512), WhisperVulkan);
+        assert_eq!(nix_package_for_variant(OnnxCuda13), "onnx-cuda");
+        assert_eq!(nix_package_for_variant(WhisperAvx2), "default");
     }
 }

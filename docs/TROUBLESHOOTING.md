@@ -81,7 +81,9 @@ no selectable language hint for Parakeet. No translation or streaming is added.
 ## "not available" next to an engine in `voxtype setup model`
 
 The binary you are running was built without that engine. Voxtype prints the
-fix for your install:
+fix for your install, here and when `voxtype setup --model <name>` names a
+model of that engine ("needs the '<feature>' feature, which this voxtype binary
+was built without"):
 
 - **`run sudo voxtype setup onnx --enable`**: the ONNX build is already
   installed. This switches to it; switch back with `sudo voxtype setup onnx --disable`.
@@ -91,8 +93,13 @@ fix for your install:
   `VOXTYPE_VARIANTS=<variant> makepkg -si` from a clone of the AUR repo.
 - **`reinstall the voxtype package`**: the package is missing a file it should
   have. Reinstall it with your package manager.
+- **`install the voxtype flake's <package> package`**: you installed voxtype
+  with Nix. Each flake package is one fixed build; set
+  `programs.voxtype.package` to the named package (`onnx` for the ONNX
+  engines, `vulkan` for Whisper on a GPU), or run
+  `nix profile install github:peteonrails/voxtype#<package>`.
 - **`rebuild with --features <name>`**: you built voxtype from source. Rebuild
-  with that Cargo feature.
+  with that Cargo feature. Only source builds get this advice.
 
 Whisper builds since 1.2.0 run Parakeet and Cohere as GGUF models with no ONNX
 build at all. `voxtype setup model` lists them under "Parakeet GGUF" and
@@ -111,6 +118,23 @@ without `voxtype-`), then `sudo voxtype setup onnx --enable` or
 If `voxtype setup onnx --enable` (or `setup gpu --enable`) says the variant is
 not installed, check `/usr/lib/voxtype/package-variants` and rebuild with the
 one you need, for example `VOXTYPE_VARIANTS=onnx-cuda-13 yay -S --rebuild voxtype-bin`.
+
+## `setup gpu --enable` on NixOS says there is nothing to switch
+
+`voxtype setup gpu --enable`, `setup gpu --disable`, `setup onnx --enable`,
+`setup onnx --disable` and `setup variant` switch between the binaries a deb,
+rpm or AUR package installs in `/usr/lib/voxtype`. A Nix install has no such
+directory: each flake package is one fixed build in the Nix store. On Nix these
+commands change nothing and name the flake package to install instead, for
+example:
+
+```nix
+programs.voxtype.package = voxtype.packages.${system}.vulkan;
+```
+
+or `nix profile install github:peteonrails/voxtype#vulkan`. `voxtype setup gpu`
+on Nix lists the flake packages (`default`, `vulkan`, `rocm`, `onnx`,
+`onnx-cuda`, `onnx-migraphx`) and marks the one you are running.
 
 ## "Illegal CPU instruction (SIGILL)" from voxtype, the OSD or the audio bridge
 
@@ -841,6 +865,17 @@ or model change. Download the named model first with
 the same Voxtype build. `streaming = true` is intentionally unsupported. An
 explicit `vulkan` backend also fails when no hardware Vulkan device is visible;
 use `auto` or `cpu` only when that is the backend you intend.
+
+A curated checkpoint also refuses a language it was not trained on. The error
+names the languages it has and both ways out, for example for the Japanese
+Moonshine model with `gguf.language = "en"`: set `voxtype config set
+gguf.language ja` (or `auto`), or switch to a model that supports English,
+such as `voxtype config set gguf.model Qwen3-ASR-0.6B-Q8_0.gguf`.
+
+`voxtype models` and `voxtype setup model` list each GGUF model's decoder
+(TDT, RNN-T, CTC, transformer or LLM). It is information only: Parakeet's
+**Decoder type** setting (`parakeet.model_type`) applies to ONNX models and is
+hidden for a `.gguf` file, which carries its own architecture.
 
 ### GGUF worker selection
 
