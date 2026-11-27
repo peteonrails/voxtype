@@ -14,7 +14,9 @@
 //!
 //! The live meeting (and one that has just ended) can be fixed from here:
 //! rename speakers, move a line, add a note, edit the notes. A past meeting
-//! opened from the list is read-only and shows its `summary.md`.
+//! opened from the list is read-only apart from its title, and shows its
+//! `summary.md`. Any meeting can be renamed from its title; one the daemon
+//! is done with can be deleted from the list or its header.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -90,6 +92,13 @@ enum Msg {
     Labeled(ViewAuthority, Vec<String>, String),
     AskLine(ViewAuthority, u64, String),
     AskExited(ViewAuthority, u64, bool),
+    /// A meeting's Delete was clicked in the list: ask first.
+    ConfirmDelete {
+        id: String,
+        title: String,
+    },
+    /// `meeting delete` ran for this meeting.
+    Deleted(String, Outcome),
 }
 
 /// Configuration and effective selection that authorized a meeting action.
@@ -106,6 +115,9 @@ struct Ui {
     stack: gtk4::Stack,
     state_label: gtk4::Label,
     title_label: gtk4::Label,
+    /// The title, clickable to rename the meeting on screen.
+    title_button: gtk4::Button,
+    title_edit: gtk4::Image,
     elapsed_label: gtk4::Label,
     levels: gtk4::Box,
     mic_level: gtk4::LevelBar,
@@ -113,6 +125,7 @@ struct Ui {
     back_button: gtk4::Button,
     pause_button: gtk4::Button,
     stop_button: gtk4::Button,
+    delete_button: gtk4::Button,
     transcript: gtk4::ListBox,
     transcript_scroll: gtk4::ScrolledWindow,
     follow_button: gtk4::Button,
@@ -255,6 +268,28 @@ impl State {
     fn read_only(&self) -> bool {
         self.past && self.stored.is_some()
     }
+
+    /// The daemon still works on meeting `id`: records it, finishes it or
+    /// writes its summary. Deleting it now would pull its folder away.
+    fn daemon_busy_with(&self, id: &str) -> bool {
+        self.live.meeting_id.as_deref() == Some(id)
+            && (self.live.state.is_live() || self.live.state == ViewState::Summarizing)
+    }
+
+    /// The meeting on screen can be deleted.
+    fn can_delete(&self) -> bool {
+        self.meeting_id()
+            .is_some_and(|id| !self.daemon_busy_with(&id))
+    }
+
+    /// Delete meeting `id`; the loop hears how it went.
+    fn delete(&self, id: &str) {
+        let (cli, tx, id) = (self.cli.clone(), self.tx.clone(), id.to_string());
+        std::thread::spawn(move || {
+            let out = cli.run(&commands::delete(&id));
+            let _ = tx.send(Msg::Deleted(id, out));
+        });
+    }
 }
 
 type Shared = Rc<RefCell<State>>;
@@ -329,15 +364,28 @@ fn build_ui(app: &gtk4::Application) -> Ui {
     let pause_button = gtk4::Button::with_label("Pause");
     let stop_button = gtk4::Button::with_label("Stop");
     stop_button.add_css_class("destructive-action");
+    let delete_button = gtk4::Button::with_label("Delete…");
+    delete_button.add_css_class("destructive-action");
+    delete_button.set_tooltip_text(Some("Delete this meeting and its audio"));
+    delete_button.set_visible(false);
     header.pack_start(&back_button);
+    header.pack_end(&delete_button);
     header.pack_end(&stop_button);
     header.pack_end(&pause_button);
     let title_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let state_label = gtk4::Label::new(None);
     let title_label = gtk4::Label::new(None);
+    // The title renames the meeting when clicked, as in the Quickshell view.
+    let title_edit = gtk4::Image::from_icon_name("document-edit-symbolic");
+    let title_inner = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    title_inner.append(&title_label);
+    title_inner.append(&title_edit);
+    let title_button = gtk4::Button::new();
+    title_button.set_child(Some(&title_inner));
+    title_button.add_css_class("flat");
     let elapsed_label = gtk4::Label::new(None);
     title_box.append(&state_label);
-    title_box.append(&title_label);
+    title_box.append(&title_button);
     title_box.append(&elapsed_label);
     // Level meters, while the daemon sends levels for a recording meeting.
     let levels = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
@@ -469,6 +517,8 @@ fn build_ui(app: &gtk4::Application) -> Ui {
         stack,
         state_label,
         title_label,
+        title_button,
+        title_edit,
         elapsed_label,
         levels,
         mic_level,
@@ -476,6 +526,7 @@ fn build_ui(app: &gtk4::Application) -> Ui {
         back_button,
         pause_button,
         stop_button,
+        delete_button,
         transcript,
         transcript_scroll,
         follow_button,
@@ -586,6 +637,16 @@ fn refresh(ui: &Ui, st: &mut State) {
             "Pause"
         });
     ui.back_button.set_visible(!showing_list);
+    // A meeting on screen can be renamed, a past or ended one also deleted.
+    // On the list the title just says "Meetings".
+    let renamable = !showing_list && st.meeting_id().is_some();
+    ui.title_button.set_can_target(renamable);
+    ui.title_button.set_focusable(renamable);
+    ui.title_button
+        .set_tooltip_text(renamable.then_some("Rename this meeting"));
+    ui.title_edit.set_visible(renamable);
+    ui.delete_button
+        .set_visible(!showing_list && st.can_delete());
     // Following only means something while lines still arrive.
     ui.follow_button
         .set_visible(!st.follow && st.stored.is_none() && view.state.is_live());
@@ -784,7 +845,9 @@ fn render_list(ui: &Ui, st: &State) {
     }
     for e in &st.list {
         let m = &e.metadata;
+        let id = m.id.to_string();
         let l = label("");
+        l.set_hexpand(true);
         l.set_markup(&format!(
             "<span alpha=\"60%\">{}</span>  <b>{}</b>  {}  {} speaker{}{}",
             m.started_at
@@ -798,11 +861,30 @@ fn render_list(ui: &Ui, st: &State) {
             if e.speaker_count == 1 { "" } else { "s" },
             if e.has_summary { "  · summary" } else { "" }
         ));
-        l.set_widget_name(&m.id.to_string());
         l.set_margin_top(6);
         l.set_margin_start(8);
         l.set_margin_bottom(6);
-        ui.list.append(&l);
+        // The row's name is the meeting's ID: activating the row opens it.
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+        row.set_widget_name(&id);
+        row.append(&l);
+        if !st.daemon_busy_with(&id) {
+            let delete = gtk4::Button::from_icon_name("user-trash-symbolic");
+            delete.add_css_class("flat");
+            delete.set_valign(gtk4::Align::Center);
+            delete.set_margin_end(8);
+            delete.set_tooltip_text(Some("Delete this meeting"));
+            delete.update_property(&[gtk4::accessible::Property::Label("Delete this meeting")]);
+            let (tx, title) = (st.tx.clone(), m.display_title());
+            delete.connect_clicked(move |_| {
+                let _ = tx.send(Msg::ConfirmDelete {
+                    id: id.clone(),
+                    title: title.clone(),
+                });
+            });
+            row.append(&delete);
+        }
+        ui.list.append(&row);
     }
 }
 
@@ -812,6 +894,18 @@ fn prompt(
     title: &str,
     choices: &[String],
     placeholder: &str,
+    on_done: impl Fn(String) + 'static,
+) {
+    prompt_with(parent, title, choices, placeholder, "", on_done);
+}
+
+/// `prompt`, its entry starting out with `text`, selected.
+fn prompt_with(
+    parent: &gtk4::ApplicationWindow,
+    title: &str,
+    choices: &[String],
+    placeholder: &str,
+    text: &str,
     on_done: impl Fn(String) + 'static,
 ) {
     let win = gtk4::Window::builder()
@@ -837,6 +931,7 @@ fn prompt(
     }
     let entry = gtk4::Entry::new();
     entry.set_placeholder_text(Some(placeholder));
+    entry.set_text(text);
     body.append(&entry);
     let ok = gtk4::Button::with_label("OK");
     {
@@ -855,6 +950,103 @@ fn prompt(
     body.append(&ok);
     win.set_child(Some(&body));
     win.present();
+    if !text.is_empty() {
+        entry.grab_focus();
+        entry.select_region(0, -1);
+    }
+}
+
+/// A small modal window that asks before something that cannot be undone.
+/// Cancel has the focus, so Enter does not confirm; Escape cancels.
+fn confirm(
+    parent: &gtk4::ApplicationWindow,
+    title: &str,
+    message: &str,
+    action: &str,
+    on_confirm: impl Fn() + 'static,
+) {
+    let win = gtk4::Window::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title(title)
+        .default_width(360)
+        .build();
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    let text = label(message);
+    text.set_wrap(true);
+    text.set_max_width_chars(48);
+    body.append(&text);
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    buttons.set_halign(gtk4::Align::End);
+    let cancel = gtk4::Button::with_label("Cancel");
+    let ok = gtk4::Button::with_label(action);
+    ok.add_css_class("destructive-action");
+    {
+        let win = win.clone();
+        cancel.connect_clicked(move |_| win.close());
+    }
+    {
+        let win = win.clone();
+        ok.connect_clicked(move |_| {
+            on_confirm();
+            win.close();
+        });
+    }
+    buttons.append(&cancel);
+    buttons.append(&ok);
+    body.append(&buttons);
+    let keys = gtk4::EventControllerKey::new();
+    {
+        let win = win.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Escape {
+                win.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+    }
+    win.add_controller(keys);
+    win.set_child(Some(&body));
+    win.present();
+    cancel.grab_focus();
+}
+
+/// Ask before deleting meeting `id`, then delete it.
+fn confirm_delete(ui: &Rc<Ui>, shared: &Shared, id: String, title: String) {
+    let (s, u) = (shared.clone(), ui.clone());
+    confirm(
+        &ui.window,
+        "Delete meeting?",
+        &format!(
+            "This deletes \"{title}\" for good: its transcript, notes, summary and kept audio."
+        ),
+        "Delete",
+        move || {
+            let st = s.borrow();
+            if st.daemon_busy_with(&id) {
+                u.status
+                    .set_text("This meeting is still being recorded or summarized.");
+                return;
+            }
+            st.delete(&id);
+        },
+    );
+}
+
+/// Back to the list of meetings, read again.
+fn show_list(ui: &Ui, st: &mut State) {
+    st.stored = None;
+    select_view(ui, st, None);
+    st.list = voxtype::meeting::list_meeting_entries(&st.meetings, Some(50)).unwrap_or_default();
+    render_list(ui, st);
+    ui.stack.set_visible_child_name("list");
+    st.rendered_revision = None;
 }
 
 fn select_view(ui: &Ui, st: &mut State, id: Option<String>) {
@@ -875,7 +1067,13 @@ fn select_view(ui: &Ui, st: &mut State, id: Option<String>) {
 }
 
 fn dialog_current(ui: &Ui, st: &State, origin: &ViewAuthority) -> bool {
-    let current = st.authority() == *origin && !st.read_only();
+    view_current(ui, st, origin) && !st.read_only()
+}
+
+/// The meeting a dialog was opened for is still on screen, read-only or
+/// not: a past meeting's title can be changed too.
+fn view_current(ui: &Ui, st: &State, origin: &ViewAuthority) -> bool {
+    let current = st.authority() == *origin;
     if !current {
         ui.status
             .set_text("Meeting selection changed. Reopen this action in the current meeting.");
@@ -1071,14 +1269,56 @@ fn wire(ui: Rc<Ui>, shared: Shared) {
         let (s, u) = (shared.clone(), ui.clone());
         ui.back_button.connect_clicked(move |_| {
             let mut st = s.borrow_mut();
-            st.stored = None;
-            select_view(&u, &mut st, None);
-            st.list =
-                voxtype::meeting::list_meeting_entries(&st.meetings, Some(50)).unwrap_or_default();
-            render_list(&u, &st);
-            u.stack.set_visible_child_name("list");
-            st.rendered_revision = None;
+            show_list(&u, &mut st);
             refresh(&u, &mut st);
+        });
+    }
+    // Rename the meeting on screen: click its title.
+    {
+        let (s, u) = (shared.clone(), ui.clone());
+        ui.title_button.connect_clicked(move |_| {
+            if u.stack.visible_child_name().as_deref() != Some("meeting") {
+                return;
+            }
+            let st = s.borrow();
+            let Some(id) = st.meeting_id() else {
+                return;
+            };
+            let current = st.view().title.clone().unwrap_or_default();
+            let origin = st.authority();
+            let (s2, u2, before) = (s.clone(), u.clone(), current.clone());
+            prompt_with(
+                &u.window,
+                "Rename meeting",
+                &[],
+                "Title",
+                &current,
+                move |title| {
+                    let st = s2.borrow();
+                    if title != before && view_current(&u2, &st, &origin) {
+                        st.run(commands::title(&id, &title));
+                    }
+                },
+            );
+        });
+    }
+    // Delete the meeting on screen, once the daemon is done with it.
+    {
+        let (s, u) = (shared.clone(), ui.clone());
+        ui.delete_button.connect_clicked(move |_| {
+            let (id, title) = {
+                let st = s.borrow();
+                let Some(id) = st.meeting_id().filter(|_| st.can_delete()) else {
+                    return;
+                };
+                let title = st
+                    .view()
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "this meeting".into());
+                (id, title)
+            };
+            confirm_delete(&u, &s, id, title);
         });
     }
     // Open a meeting from the list.
@@ -1343,6 +1583,24 @@ fn wire(ui: Rc<Ui>, shared: Shared) {
                         a.finished(ok);
                     }
                 }
+                Msg::ConfirmDelete { id, title } => {
+                    if !st.daemon_busy_with(&id) {
+                        confirm_delete(&u, &s, id, title);
+                    }
+                }
+                Msg::Deleted(id, out) => {
+                    if out.ok {
+                        if st.meeting_id().as_deref() == Some(id.as_str()) {
+                            show_list(&u, &mut st);
+                        } else {
+                            st.list =
+                                voxtype::meeting::list_meeting_entries(&st.meetings, Some(50))
+                                    .unwrap_or_default();
+                            list_changed = true;
+                        }
+                    }
+                    u.status.set_text(&out.status_line());
+                }
                 _ => {}
             }
         }
@@ -1398,9 +1656,17 @@ fn smoke_report(ui: &Ui, st: &State) -> serde_json::Value {
         child = c.next_sibling();
     }
     let mut list_rows = 0;
+    let mut list_delete_buttons = 0;
     let mut c = ui.list.first_child();
     while let Some(w) = c {
         list_rows += 1;
+        if w.downcast_ref::<gtk4::ListBoxRow>()
+            .and_then(|r| r.child())
+            .and_then(|row| row.last_child())
+            .is_some_and(|last| last.is::<gtk4::Button>())
+        {
+            list_delete_buttons += 1;
+        }
         c = w.next_sibling();
     }
     serde_json::json!({
@@ -1413,6 +1679,9 @@ fn smoke_report(ui: &Ui, st: &State) -> serde_json::Value {
         "chips": chips,
         "summary": ui.summary.text().to_string(),
         "list_rows": list_rows,
+        "list_delete_buttons": list_delete_buttons,
+        "rename_enabled": ui.title_button.can_target(),
+        "delete_visible": ui.delete_button.is_visible(),
         "start_sensitive": ui.start_button.is_sensitive(),
         "follow_visible": ui.follow_button.is_visible(),
         "read_only": ui.read_only.is_visible(),

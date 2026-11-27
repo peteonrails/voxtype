@@ -154,6 +154,14 @@ fn the_window_shows_a_live_meeting() {
     assert_eq!(report["move_visible"], true, "{report}");
     assert_eq!(report["notes_editable"], true, "{report}");
     assert_eq!(report["levels_visible"], true, "{report}");
+    assert_eq!(
+        report["rename_enabled"], true,
+        "the title renames: {report}"
+    );
+    assert_eq!(
+        report["delete_visible"], false,
+        "a meeting being recorded is not deleted: {report}"
+    );
 }
 
 #[test]
@@ -218,6 +226,11 @@ fn a_past_meeting_opens_read_only_with_its_summary() {
         "chips are names, not buttons: {report}"
     );
     assert_eq!(report["pause_visible"], false, "{report}");
+    assert_eq!(
+        report["rename_enabled"], true,
+        "read-only, but the title still renames: {report}"
+    );
+    assert_eq!(report["delete_visible"], true, "{report}");
     let shown = report["summary"].as_str().unwrap();
     assert!(
         shown.starts_with("Retro\n\nDecisions\n• Keep Friday releases"),
@@ -237,4 +250,38 @@ fn without_a_daemon_the_window_lists_meetings() {
     assert_eq!(report["connected"], false);
     assert_eq!(report["pause_visible"], false);
     assert_eq!(report["list_rows"], 1, "the empty-list message: {report}");
+    assert_eq!(report["list_delete_buttons"], 0, "{report}");
+    assert_eq!(
+        report["rename_enabled"], false,
+        "the list has no title: {report}"
+    );
+    assert_eq!(report["delete_visible"], false, "{report}");
+}
+
+#[test]
+fn each_listed_meeting_has_a_delete_button() {
+    use voxtype::meeting::data::MeetingMetadata;
+    use voxtype::meeting::{MeetingStorage, StorageConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path();
+    let Some(_bw) = broadway(runtime, 44) else {
+        eprintln!("skipping: gtk4-broadwayd is not available");
+        return;
+    };
+    let storage = MeetingStorage::open(StorageConfig {
+        storage_path: runtime.join("data/voxtype/meetings"),
+        ..StorageConfig::default()
+    })
+    .unwrap();
+    for title in ["Retro", "Planning"] {
+        let mut meta = MeetingMetadata::new(Some(title.into()));
+        meta.duration_secs = Some(60);
+        storage.create_meeting(&meta).unwrap();
+    }
+
+    let report = run_window(runtime, 44);
+    assert_eq!(report["screen"], "list", "{report}");
+    assert_eq!(report["list_rows"], 2, "{report}");
+    assert_eq!(report["list_delete_buttons"], 2, "{report}");
 }

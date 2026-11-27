@@ -219,6 +219,27 @@ pub fn label(meeting_id: &str, speaker: &str, name: &str) -> Request {
     }
 }
 
+/// Give the meeting a new title.
+pub fn title(meeting_id: &str, title: &str) -> Request {
+    Request {
+        what: "Rename meeting".into(),
+        args: args(["meeting", "title", meeting_id, title.trim()]),
+        stdin: None,
+        reload: true,
+    }
+}
+
+/// Delete the meeting with its folder, audio included. The view asks first,
+/// so this passes `--force`.
+pub fn delete(meeting_id: &str) -> Request {
+    Request {
+        what: "Delete".into(),
+        args: args(["meeting", "delete", meeting_id, "--force"]),
+        stdin: None,
+        reload: false,
+    }
+}
+
 /// Replace the meeting's notes with `text`.
 pub fn set_notes(meeting_id: &str, text: &str) -> Request {
     Request {
@@ -311,6 +332,10 @@ mod tests {
         assert_eq!(notes.stdin.as_deref(), Some("agenda"));
         assert_eq!(ask("m1", "q"), ["meeting", "ask", "m1", "q", "--json"]);
         assert!(stop().args.ends_with(&["stop".to_string()]));
+        let t = title("m1", " Q4 retro ");
+        assert_eq!(t.args, ["meeting", "title", "m1", "Q4 retro"]);
+        assert!(t.reload, "a past meeting is read again for its new title");
+        assert_eq!(delete("m1").args, ["meeting", "delete", "m1", "--force"]);
     }
 
     #[test]
