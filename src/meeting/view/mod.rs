@@ -110,6 +110,11 @@ pub enum ViewEvent {
         #[serde(default)]
         updated_at: Option<DateTime<Utc>>,
     },
+    /// The meeting was retitled (`meeting title`, or from the calendar).
+    TitleChanged {
+        meeting_id: String,
+        title: String,
+    },
     Status {
         status: String,
         #[serde(default)]
@@ -278,6 +283,7 @@ pub enum Change {
     Lines,
     State,
     Notes,
+    Title,
     Summary,
     Error,
     Playback,
@@ -682,6 +688,7 @@ impl MeetingView {
                 self.notes_updated_at = updated_at.or_else(|| Some(Utc::now()));
                 Change::Notes
             }
+            ViewEvent::TitleChanged { meeting_id, title } => self.retitled(&meeting_id, title),
             ViewEvent::Status { status, meeting_id } => {
                 let Some(state) = ViewState::from_status(&status) else {
                     return Change::Nothing;
@@ -787,8 +794,17 @@ impl MeetingView {
                 meeting_id: Some(id),
                 code,
             } if self.is_ours(Some(&id)) => self.error(Some(&id), message, code),
+            ViewEvent::TitleChanged { meeting_id, title } => self.retitled(&meeting_id, title),
             _ => Change::Nothing,
         }
+    }
+
+    fn retitled(&mut self, meeting_id: &str, title: String) -> Change {
+        if !self.is_ours(Some(meeting_id)) {
+            return Change::Nothing;
+        }
+        self.title = Some(title);
+        Change::Title
     }
 
     fn summary_ready(
@@ -1260,6 +1276,34 @@ mod tests {
             Change::Notes
         );
         assert!(v.notes_updated_at.is_some());
+    }
+
+    #[test]
+    fn a_new_title_reaches_the_meeting_it_names_live_or_stored() {
+        let mut v = MeetingView::live();
+        v.apply_line(&hello("recording", "m1", vec![]));
+        assert_eq!(
+            v.apply_line(r#"{"event":"title_changed","meeting_id":"m2","title":"Other"}"#),
+            Change::Nothing
+        );
+        assert_eq!(v.title.as_deref(), Some("Standup"));
+        assert_eq!(
+            v.apply_line(r#"{"event":"title_changed","meeting_id":"m1","title":"Planning"}"#),
+            Change::Title
+        );
+        assert_eq!(v.title.as_deref(), Some("Planning"));
+
+        let data = MeetingData::new(Some("Retro".into()));
+        let id = data.metadata.id.to_string();
+        let mut stored = MeetingView::stored(&data);
+        assert_eq!(
+            stored.apply_line(r#"{"event":"title_changed","meeting_id":"m1","title":"No"}"#),
+            Change::Nothing
+        );
+        let renamed =
+            serde_json::json!({"event": "title_changed", "meeting_id": id, "title": "Q4 retro"});
+        assert_eq!(stored.apply_line(&ev(renamed)), Change::Title);
+        assert_eq!(stored.title.as_deref(), Some("Q4 retro"));
     }
 
     #[test]
