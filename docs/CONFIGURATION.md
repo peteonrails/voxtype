@@ -949,6 +949,8 @@ VOXTYPE_ENGINE=cohere VOXTYPE_LANGUAGE=de voxtype config get cohere.language   #
 
 Earlier releases set only `whisper.language` (and `gguf.language` for GGUF), so with another engine these did nothing.
 
+For one recording only, pass the language to `record start` or `record toggle` instead: `voxtype record start --language en`. The next recording uses the configured language again. See the user manual's [Language override](USER_MANUAL.md#voxtype-record) for how the daemon serves it.
+
 ### translate
 
 **Type:** Boolean

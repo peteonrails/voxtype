@@ -42,6 +42,20 @@ pub enum RecordAction {
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
 
+        /// Transcribe this recording in this language (e.g., en, de, auto)
+        ///
+        /// Sets the active engine's language for this one recording; the
+        /// next one uses the configured language again. Takes what
+        /// `--language` takes for that engine: a code or auto, or for
+        /// Whisper a set such as en,fr. An engine with no language setting
+        /// (Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual), or a
+        /// value it cannot take, fails here before anything is recorded.
+        /// The daemon keeps one transcriber for the last override language
+        /// loaded beside the default model (unless on_demand_loading is set),
+        /// so switching back and forth does not reload either.
+        #[arg(long, value_name = "LANG")]
+        language: Option<String>,
+
         /// Use a named profile for vocabulary and post-processing (e.g., --profile code)
         ///
         /// Profile terms bias Whisper-compatible and Soniox transcription,
@@ -147,6 +161,20 @@ pub enum RecordAction {
         /// undownloaded model fails immediately.
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
+
+        /// Transcribe this recording in this language (e.g., en, de, auto)
+        ///
+        /// Sets the active engine's language for this one recording; the
+        /// next one uses the configured language again. Takes what
+        /// `--language` takes for that engine: a code or auto, or for
+        /// Whisper a set such as en,fr. An engine with no language setting
+        /// (Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual), or a
+        /// value it cannot take, fails here before anything is recorded.
+        /// The daemon keeps one transcriber for the last override language
+        /// loaded beside the default model (unless on_demand_loading is set),
+        /// so switching back and forth does not reload either.
+        #[arg(long, value_name = "LANG")]
+        language: Option<String>,
 
         /// Use a named profile for vocabulary and post-processing (e.g., --profile code)
         ///
@@ -262,6 +290,16 @@ impl RecordAction {
         match self {
             RecordAction::Start { model, .. } | RecordAction::Toggle { model, .. } => {
                 model.as_deref()
+            }
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// The language for this one recording, from --language on start or toggle
+    pub fn language_override(&self) -> Option<&str> {
+        match self {
+            RecordAction::Start { language, .. } | RecordAction::Toggle { language, .. } => {
+                language.as_deref()
             }
             RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
@@ -609,6 +647,27 @@ mod tests {
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    #[test]
+    fn record_start_and_toggle_take_a_language() {
+        for verb in ["start", "toggle"] {
+            let cli = Cli::parse_from(["voxtype", "record", verb, "--language", "de"]);
+            match cli.command {
+                Some(Commands::Record { action }) => {
+                    assert_eq!(action.language_override(), Some("de"), "{verb}");
+                    assert_eq!(action.model_override(), None, "{verb}");
+                }
+                _ => panic!("Expected Record command"),
+            }
+        }
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => assert_eq!(action.language_override(), None),
+            _ => panic!("Expected Record command"),
+        }
+        // Stop takes no language: it is chosen when the recording starts.
+        assert!(Cli::try_parse_from(["voxtype", "record", "stop", "--language", "de"]).is_err());
     }
 
     #[test]

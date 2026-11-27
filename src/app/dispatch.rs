@@ -601,7 +601,12 @@ pub(crate) async fn dispatch(
         }
 
         Commands::Record { action } => {
-            send_record_command(&config, action, top_level_model.as_deref())?;
+            send_record_command(
+                &config,
+                action,
+                top_level_model.as_deref(),
+                cli.language.as_deref(),
+            )?;
         }
 
         Commands::Meeting {

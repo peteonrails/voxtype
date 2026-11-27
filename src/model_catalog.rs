@@ -505,6 +505,64 @@ pub fn override_config(
     config
 }
 
+/// The configuration a recording started with `record start --language`
+/// runs with (#484): the recording's own configuration, after any `--model`
+/// override, with `language` set on its engine the way `--language` sets it
+/// (#860).
+///
+/// `Ok(None)` means the recording's engine already writes that language, so
+/// the transcriber it would use anyway serves it. `Err` says why the
+/// language cannot apply: an engine with no language setting, a value the
+/// engine cannot take, or a model that writes only one other language.
+pub fn language_override_config(
+    base: &Config,
+    model_override: Option<&str>,
+    language: &str,
+) -> Result<Option<Config>, String> {
+    let recording = match model_override {
+        None => base.clone(),
+        Some(name) => match override_route(base, name)? {
+            OverrideRoute::Active => base.clone(),
+            OverrideRoute::WhisperManager => {
+                override_config(base, crate::config::TranscriptionEngine::Whisper, name)
+            }
+            OverrideRoute::Separate { engine, model } => override_config(base, engine, &model),
+        },
+    };
+    language_override_config_for(recording, language)
+}
+
+/// [`language_override_config`] once the recording's configuration is known.
+fn language_override_config_for(
+    recording: Config,
+    language: &str,
+) -> Result<Option<Config>, String> {
+    if let Some(only) = recording.model_language() {
+        let base = |code: &str| code.split(['-', '_']).next().map(str::to_ascii_lowercase);
+        let other = language
+            .split(',')
+            .map(str::trim)
+            .find(|code| *code != "auto" && base(code) != base(only));
+        if let Some(code) = other {
+            return Err(format!(
+                "Language '{code}' is not available for {} / {}: the model writes only '{only}'",
+                recording.engine.name(),
+                recording.model_name()
+            ));
+        }
+        // Its only language, or auto, is what the model writes anyway,
+        // whether or not its engine has a setting to put it in.
+        return Ok(None);
+    }
+    let mut with_language = recording.clone();
+    with_language.set_engine_language(language)?;
+    let unchanged = matches!(
+        (serde_json::to_value(&recording), serde_json::to_value(&with_language)),
+        (Ok(a), Ok(b)) if a == b
+    );
+    Ok((!unchanged).then_some(with_language))
+}
+
 /// Whether the text of a recording served by `route` (the route of the
 /// `--model` override `name`) counts as English for text cleanup.
 ///
@@ -1087,5 +1145,56 @@ mod tests {
             "moonshine-base-ja",
             separate(Moonshine, "base-ja")
         ));
+    }
+
+    #[test]
+    fn a_recording_language_sets_the_recordings_engine_or_says_why_not() {
+        let mut whisper = Config::default();
+        whisper.whisper.model = "large-v3-turbo".into();
+        whisper.whisper.language = crate::config::LanguageConfig::Single("es".into());
+        let english = language_override_config(&whisper, None, "en")
+            .unwrap()
+            .unwrap();
+        assert_eq!(english.active_language(), Some("en"));
+        assert_eq!(whisper.active_language(), Some("es"));
+        // Already the engine's language: the usual transcriber serves it.
+        assert!(language_override_config(&whisper, None, "es")
+            .unwrap()
+            .is_none());
+
+        let mut cohere = Config::default();
+        cohere.set_model_for(
+            crate::config::TranscriptionEngine::Cohere,
+            "cohere-transcribe-q4f16",
+        );
+        let german = language_override_config(&cohere, None, "de")
+            .unwrap()
+            .unwrap();
+        assert_eq!(german.cohere.unwrap().language, "de");
+        assert!(language_override_config(&cohere, None, "auto").is_err());
+
+        let mut english_only = Config::default();
+        english_only.whisper.model = "base.en".into();
+        let err = language_override_config(&english_only, None, "de").unwrap_err();
+        assert!(err.contains("writes only 'en'"), "{err}");
+        assert!(language_override_config(&english_only, None, "en")
+            .unwrap()
+            .is_none());
+
+        let mut parakeet = Config::default();
+        parakeet.set_model_for(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v3",
+        );
+        let err = language_override_config(&parakeet, None, "de").unwrap_err();
+        assert!(err.contains("has no language setting"), "{err}");
+        // An English-only Parakeet writes English whatever it is told.
+        parakeet.set_model_for(
+            crate::config::TranscriptionEngine::Parakeet,
+            "parakeet-tdt-0.6b-v2",
+        );
+        assert!(language_override_config(&parakeet, None, "en")
+            .unwrap()
+            .is_none());
     }
 }
