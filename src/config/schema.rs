@@ -223,6 +223,10 @@ const WHISPER_LANG_CHOICES: &[&str] = &[
 ];
 /// Presets for `text.language`. Any language code is accepted.
 const TEXT_LANG_CHOICES: &[&str] = WHISPER_LANG_CHOICES;
+/// Same list as the TUI's `DEEPGRAM_LANG_CHOICES`.
+const DEEPGRAM_LANG_CHOICES: &[&str] = &[
+    "en", "auto", "multi", "es", "fr", "de", "it", "pt", "nl", "hi", "ja", "ru",
+];
 const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
@@ -451,6 +455,89 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Model name to request from the remote endpoint (e.g. whisper-1).",
     )
     .for_engine("whisper"),
+    // deepgram. `api_key` is left out so a settings client never shows or
+    // writes the key: it belongs in DEEPGRAM_API_KEY. (Soniox's `api_key`
+    // predates this and is listed.)
+    spec(
+        "deepgram.model",
+        "deepgram",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "Deepgram model identifier (nova-3 by default).",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.language",
+        "deepgram",
+        "language",
+        open(DEEPGRAM_LANG_CHOICES),
+        "Engine",
+        "Language",
+        "BCP-47 language code, auto for detection, or multi for multilingual recognition.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.smart_format",
+        "deepgram",
+        "smart_format",
+        KeyType::Bool,
+        "Engine",
+        "Smart format",
+        "Format dates, numbers, punctuation, and other entities in the transcript.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.mip_opt_out",
+        "deepgram",
+        "mip_opt_out",
+        KeyType::Bool,
+        "Engine",
+        "Model improvement opt-out",
+        "Exclude request audio from Deepgram's Model Improvement Program.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.streaming",
+        "deepgram",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Stream audio to Deepgram's realtime API while recording; off sends the finished recording instead.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.endpointing_ms",
+        "deepgram",
+        "endpointing_ms",
+        KeyType::Int { min: 10, max: 10000 },
+        "Engine",
+        "Endpointing",
+        "Streaming only: milliseconds of silence that end a segment. Unset uses Deepgram's default.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.timeout_secs",
+        "deepgram",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 300 },
+        "Engine",
+        "Timeout",
+        "Seconds to wait for Deepgram: the whole request for a finished recording, the connection and the last transcript when streaming.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.endpoint",
+        "deepgram",
+        "endpoint",
+        KeyType::String,
+        "Engine",
+        "Endpoint",
+        "Deepgram /v1/listen endpoint; streaming uses the same URL over wss://. HTTPS is required except for localhost testing.",
+    )
+    .for_engine("deepgram"),
     // parakeet
     spec(
         "parakeet.model",
@@ -3344,6 +3431,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let gg = || cfg.gguf.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
     let so = || cfg.soniox.clone().unwrap_or_default();
+    let dg = || cfg.deepgram.clone().unwrap_or_default();
     // Without a table, post-processing is off; report the values a new
     // table would start with.
     let pp = || cfg.output.post_process.clone().unwrap_or_default();
@@ -3376,6 +3464,18 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
+
+        "deepgram.model" => json!(dg().model),
+        "deepgram.language" => json!(dg().language),
+        "deepgram.smart_format" => json!(dg().smart_format),
+        "deepgram.mip_opt_out" => json!(dg().mip_opt_out),
+        "deepgram.streaming" => json!(dg().streaming),
+        "deepgram.endpointing_ms" => match dg().endpointing_ms {
+            Some(ms) => json!(ms),
+            None => Json::Null,
+        },
+        "deepgram.timeout_secs" => json!(dg().timeout_secs),
+        "deepgram.endpoint" => json!(dg().endpoint),
 
         "parakeet.model" => json!(pk().model),
         "parakeet.max_window_secs" => json!(pk().max_window_secs),
@@ -4362,8 +4462,8 @@ mod tests {
     #[test]
     fn feature_gate_agrees_with_config_set() {
         for name in config_set::ENGINE_NAMES {
-            if *name == "whisper" {
-                continue; // always available, so it has no feature entry
+            if matches!(*name, "whisper" | "deepgram") {
+                continue; // unconditional engines have no Cargo feature entry
             }
             assert_eq!(
                 feature_compiled(name),
@@ -4380,8 +4480,9 @@ mod tests {
     fn onnx_engine_keys_are_feature_gated() {
         for s in CONFIG_KEYS {
             let Some(engine) = s.engine else { continue };
-            // Whisper and the Soniox cloud client are always compiled in.
-            if engine == "whisper" || engine == "soniox" {
+            // Whisper and the Soniox and Deepgram cloud clients are always
+            // compiled in.
+            if matches!(engine, "whisper" | "soniox" | "deepgram") {
                 assert!(
                     s.requires_feature.is_none(),
                     "{} should not be feature-gated; {} is always compiled in",
@@ -4698,6 +4799,8 @@ mod tests {
         // Lists, which need a hand edit.
         "output.driver_order",
         "soniox.terms",
+        // Left out on purpose; see the deepgram entries.
+        "deepgram.api_key",
     ];
 
     /// Tables of arbitrary keys, also a hand edit.
@@ -4734,6 +4837,7 @@ mod tests {
             "gguf",
             "openvino",
             "soniox",
+            "deepgram",
         ]
         .iter()
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))

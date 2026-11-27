@@ -226,6 +226,21 @@ translate = false
 # enabled = true
 # stop_timeout_secs = 30
 
+# --- Deepgram cloud transcription ---
+# Select with the root setting: engine = "deepgram"
+# Credentials: set DEEPGRAM_API_KEY (recommended), or add api_key here.
+# Dictation streams 16 kHz mono audio to Deepgram's realtime API while you
+# speak; with streaming = false, the finished recording is sent as a WAV.
+# [deepgram]
+# model = "nova-3"
+# language = "en"       # BCP-47 code, "auto" (finished recordings only), or "multi"
+# smart_format = true
+# mip_opt_out = true
+# streaming = true
+# endpointing_ms = 300  # streaming: silence that ends a segment; unset uses Deepgram's default
+# timeout_secs = 30
+# endpoint = "https://api.deepgram.com/v1/listen"
+
 [output]
 # Primary output mode: "type" or "clipboard"
 # - type: Simulates keyboard input at cursor position (requires ydotool)

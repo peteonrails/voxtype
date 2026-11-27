@@ -74,6 +74,9 @@ Item {
   property string schemaError: ""
   property var errors: ({})
   property string engineError: ""
+  // engineError came from `config set engine` (Use on an engine with no model)
+  // rather than from `config select-model`.
+  property bool engineErrorIsSwitch: false
   property string replacementsError: ""
 
   property string daemonState: ""
@@ -761,9 +764,10 @@ Item {
 
   // ---------------------------------------------------------------- writes
 
-  function recordError(key, message) {
+  function recordError(key, message, subcommand) {
     if (key === "engine") {
       root.engineError = message
+      root.engineErrorIsSwitch = subcommand === "set"
       return
     }
     if (key.indexOf("text.replacements.") === 0) {
@@ -925,8 +929,8 @@ Item {
         root.osdStyleNotice = "Styles belong to the Quickshell OSD, so the OSD frontend was also set to auto, which picks Quickshell."
       }
     }
-    onWriteFailed: function(key, message) {
-      root.recordError(key, message)
+    onWriteFailed: function(key, message, subcommand) {
+      root.recordError(key, message, subcommand)
       form.revertRow(key)
       if (key === "osd.frontend" && root.osdFrontendSwitchPending) {
         root.osdFrontendSwitchPending = false
@@ -1365,6 +1369,7 @@ Item {
             replacements: root.replacements
             errors: root.errors
             engineError: root.engineError
+            engineErrorIsSwitch: root.engineErrorIsSwitch
             replacementsError: root.replacementsError
             replacementsSectionName: root.replacementsSectionName
             overlayHost: settingsCard.card
@@ -1380,6 +1385,9 @@ Item {
               // A language hint is GGUF-only in select-model.
               else if (root.catalogModelKey !== "") cli.selectModel(root.catalogEngine, name, "")
             }
+            // An engine with no model to pick is switched to by name; its
+            // result lands where every engine write does (engineError).
+            onEngineUseRequested: function(name) { cli.setKey("engine", name) }
             onDownloadRequested: function(name) {
               root.startModelDownload(name)
             }

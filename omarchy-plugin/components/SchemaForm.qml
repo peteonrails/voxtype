@@ -34,6 +34,7 @@ Item {
   // key → message from the last failed `config set`.
   property var errors: ({})
   property string engineError: ""
+  property bool engineErrorIsSwitch: false
   property string replacementsError: ""
 
   property Item overlayHost: null
@@ -43,6 +44,8 @@ Item {
   signal unsetRequested(string key)
   signal engineChangeRequested(string name)
   signal modelSelectionRequested(string name, string language)
+  // Use on an engine the catalog has no models for (a cloud engine).
+  signal engineUseRequested(string name)
   signal downloadRequested(string name)
   signal replacementSetRequested(string from, string to)
   signal replacementUnsetRequested(string from)
@@ -407,6 +410,7 @@ Item {
       engineChoices: root.engineChoices
       engineAvailability: root.engineAvailability
       errorText: root.engineError
+      errorIsSwitch: root.engineErrorIsSwitch
       downloadBusy: root.downloadBusy
       onEngineChangeRequested: function(name) { root.engineChangeRequested(name) }
     }
@@ -463,6 +467,7 @@ Item {
           width: parent.width
           visible: root.showEngineCard
           engine: root.catalogEngine
+          activeEngine: root.engine
           engines: root.engines
           modelKey: root.catalogModelKey
           modelValue: root.catalogEngine === root.engine ? root.modelValue : ""
@@ -476,6 +481,7 @@ Item {
           onModelChangeRequested: function(name, language) {
             root.modelSelectionRequested(name, language)
           }
+          onEngineUseRequested: function(name) { root.engineUseRequested(name) }
           onDownloadRequested: function(name) { root.downloadRequested(name) }
           onCancelDownloadRequested: root.cancelDownloadRequested()
         }

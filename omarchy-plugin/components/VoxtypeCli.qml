@@ -65,7 +65,10 @@ Item {
   // rather than printing a number nobody measured.
   signal vramLoaded(string label, string text)
   signal writeSucceeded(string key)
-  signal writeFailed(string key, string message)
+  // `subcommand` is the `config` verb that failed ("set", "select-model",
+  // "unset"): both `config set engine` and `config select-model` report as key
+  // "engine", and an engine switch and a model pick fail for different reasons.
+  signal writeFailed(string key, string message, string subcommand)
   signal restarted(bool ok, string message)
   // A voxtype command could not be started at all: the binary is missing or
   // not executable. Every reader that fails this way reports it, so the panel
@@ -245,6 +248,7 @@ Item {
     if (writeProc.running || writeQueue.length === 0) return
     var op = writeQueue[0]
     writeProc.activeKey = op.key
+    writeProc.activeSubcommand = String(op.args[2])
     writeProc.err = ""
     writeProc.launch(op.args)
   }
@@ -284,6 +288,7 @@ Item {
   CliProcess {
     id: writeProc
     property string activeKey: ""
+    property string activeSubcommand: ""
     property string err: ""
 
     stderr: StdioCollector {
@@ -292,11 +297,12 @@ Item {
     }
     onExited: function(exitCode) {
       var key = writeProc.activeKey
+      var subcommand = writeProc.activeSubcommand
       var message = writeProc.err
       root.writeQueue = root.writeQueue.slice(1)
       if (exitCode === 0) root.writeSucceeded(key)
-      else if (exitCode === 2) root.writeFailed(key, message || "voxtype rejected that value")
-      else root.writeFailed(key, message || "voxtype could not write the config file")
+      else if (exitCode === 2) root.writeFailed(key, message || "voxtype rejected that value", subcommand)
+      else root.writeFailed(key, message || "voxtype could not write the config file", subcommand)
       root.pumpWrites()
     }
     // Every queued write would fail the same way, so drop them all rather than
@@ -304,7 +310,7 @@ Item {
     onFailedToStart: {
       var key = writeProc.activeKey
       root.writeQueue = []
-      root.writeFailed(key, "Could not run " + root.bin)
+      root.writeFailed(key, "Could not run " + root.bin, writeProc.activeSubcommand)
       root.cliUnavailable(root.bin)
     }
   }

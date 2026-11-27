@@ -3,10 +3,12 @@ import qs.Commons
 import qs.Commons as ShellTheme
 import qs.Ui
 
-// The model catalog for the engine in effect: which models this engine knows
-// about, which are on disk, and which one is loaded. It needs more than a plain
-// form row because a model can be known but not downloaded yet, so it gets its
-// own card at the top of the form.
+// The model catalog for the engine being browsed: which models this engine
+// knows about, which are on disk, and which one is loaded. It needs more than a
+// plain form row because a model can be known but not downloaded yet, so it
+// gets its own card at the top of the form. An engine with no catalog at all (a
+// cloud engine such as Deepgram) has no model to pick, so the card offers the
+// engine itself instead.
 //
 // The engine switch itself lives in EnginePicker, pinned above the scroller,
 // because it has to stay reachable while this list is being scrolled.
@@ -14,6 +16,8 @@ Item {
   id: root
 
   property string engine: ""
+  // The engine the config has in effect; `engine` is the one being browsed.
+  property string activeEngine: ""
 
   // The `engines` map out of `voxtype info models --json`: per-engine model
   // catalogs with an installed flag on each entry.
@@ -52,12 +56,27 @@ Item {
   signal modelChangeRequested(string name, string language)
   signal downloadRequested(string name)
   signal cancelDownloadRequested()
+  // Use on an engine with no model catalog: `config set engine <name>`, since
+  // `config select-model` needs a model and refuses such an engine.
+  signal engineUseRequested(string name)
 
   readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
   readonly property bool haveModelInfo: {
     for (var k in root.engines) return true
     return false
   }
+
+  // `voxtype info models --json` answered, and lists no catalog for this
+  // engine: it has no model to download (today only Deepgram, a cloud engine).
+  // An engine listed with an empty catalog is a different case and keeps its
+  // "no downloadable models" line.
+  readonly property bool catalogless: root.haveModelInfo && root.engine !== ""
+    && root.engines[root.engine] === undefined
+  readonly property string engineTitle: root.engine === "" ? ""
+    : root.engine.charAt(0).toUpperCase() + root.engine.slice(1)
+  readonly property string cataloglessNote: root.engine === "deepgram"
+    ? "Deepgram runs in the cloud and has no model to download. It reads its API key from DEEPGRAM_API_KEY in the daemon's environment, or [deepgram] api_key; without one the daemon will not start."
+    : root.engineTitle + " has no model to download."
 
   // Walks `length` rather than asking Array.isArray: this list is rebuilt by the
   // panel when a download finishes, and an array that has crossed a `var`
@@ -116,11 +135,16 @@ Item {
       spacing: Style.spacing.lg
 
       PanelSectionHeader {
-        text: root.engine === "" ? "MODELS" : ("MODELS FOR " + root.engine.toUpperCase())
+        objectName: "catalogHeader"
+        // An engine with no model list is headed by its name alone.
+        text: root.engine === "" ? "MODELS"
+          : root.catalogless ? root.engine.toUpperCase()
+          : ("MODELS FOR " + root.engine.toUpperCase())
       }
 
       Text {
-        visible: root.modelRows.length === 0
+        objectName: "noModelsText"
+        visible: root.modelRows.length === 0 && !root.catalogless
         width: parent.width
         text: root.haveModelInfo
           ? "This engine reports no downloadable models."
@@ -129,6 +153,81 @@ Item {
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
+      }
+
+      // An engine with no model to download is chosen by name alone, in the
+      // same row shape a model gets.
+      Column {
+        visible: root.catalogless
+        width: parent.width
+        spacing: Style.spacing.xxs
+
+        CursorSurface {
+          id: engineRow
+
+          readonly property bool inUse: root.engine === root.activeEngine
+
+          width: parent.width
+          implicitHeight: Math.max(Style.space(30),
+                                   engineName.implicitHeight + Style.spacing.controlGap)
+          height: implicitHeight
+          current: engineRow.inUse
+          foreground: ShellTheme.Color.foreground
+
+          Text {
+            id: engineName
+            anchors.left: parent.left
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.engineTitle
+            color: ShellTheme.Color.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            font.bold: engineRow.inUse
+          }
+
+          Row {
+            anchors.right: parent.right
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.controlGap
+
+            Text {
+              objectName: "engineInUse:" + root.engine
+              anchors.verticalCenter: parent.verticalCenter
+              visible: engineRow.inUse
+              text: "configured"
+              color: ShellTheme.Color.accent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            // The dropdown never browses an engine `info engines` reports
+            // missing. Without that list, `config set engine` refuses a
+            // missing engine with an error shown above the card.
+            Button {
+              objectName: "useEngine:" + root.engine
+              anchors.verticalCenter: parent.verticalCenter
+              visible: !engineRow.inUse
+              text: "Use " + root.engineTitle
+              tooltipText: "Switch the engine to " + root.engineTitle
+              bordered: true
+              onClicked: root.engineUseRequested(root.engine)
+            }
+          }
+        }
+
+        Text {
+          objectName: "cataloglessNote"
+          width: parent.width
+          leftPadding: Style.spacing.controlPaddingX
+          text: root.cataloglessNote
+          color: root.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
       }
 
       Column {

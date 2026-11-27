@@ -68,13 +68,25 @@ pub struct StreamingSession {
     /// post-processor returned (since the post-processor is allowed to
     /// reformat). For accurate rewinding we count *typed* output.
     typed_chars: usize,
-    /// Most recent partial text (for status only; never typed).
+    /// The partial not yet finalized: typed as it arrives in a typing
+    /// session, only held in one that types nothing.
     partial: String,
     history_context: Option<crate::history::recorder::DeliveryContext>,
     history_raw_finalized: String,
     history_raw_partial: String,
     output_error: Option<String>,
     last_delivery: Option<Delivered>,
+    /// Text committed silently after earlier text was typed: what a backend
+    /// sent once a stop disowned the typing surface. It is always the end
+    /// of `finalized_text` and `partial`, so delivering it appends to what
+    /// is on screen. Empty in sessions that never type (file output).
+    held: String,
+    /// How many bytes at the end of `partial` are also in `held`.
+    held_partial_len: usize,
+    /// Set when a silent revision removed characters that were typed.
+    /// Nothing deletes text on screen after a stop, so the held text is not
+    /// typed then: it would follow the stale characters.
+    held_revises_typed: bool,
 }
 
 impl StreamingSession {
@@ -89,6 +101,9 @@ impl StreamingSession {
             history_raw_partial: String::new(),
             output_error: None,
             last_delivery: None,
+            held: String::new(),
+            held_partial_len: 0,
+            held_revises_typed: false,
         }
     }
 
@@ -182,6 +197,7 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        debug_assert!(self.held.is_empty(), "typed output after text was held");
         if new_partial.is_empty() {
             return Ok(());
         }
@@ -213,18 +229,22 @@ impl StreamingSession {
         self.partial.clear();
     }
 
-    /// File-output counterpart to `type_partial_delta`: accumulate the
-    /// delta into the partial buffer without typing anything. File-mode
-    /// sessions have no cursor to type into, but the delta still has to
-    /// be held until the next commit — partials are deltas, not a
-    /// cumulative transcript (see `type_partial_delta`), so dropping
-    /// this would silently lose whatever text was only ever seen as an
-    /// unfinalized partial.
+    /// Counterpart to `type_partial_delta` for a session that types nothing
+    /// (file output, or after a stop took the typing surface away):
+    /// accumulate the delta into the partial buffer without typing anything.
+    /// Such a session has no cursor to type into, but the delta still has to
+    /// be held until the next commit — partials are deltas, not a cumulative
+    /// transcript (see `type_partial_delta`), so dropping this would silently
+    /// lose whatever text was only ever seen as an unfinalized partial.
     pub fn observe_partial_delta(&mut self, new_partial: &str) {
         if self.history_context.is_some() {
             self.history_raw_partial.push_str(new_partial);
         }
         self.partial.push_str(new_partial);
+        if self.typed_chars > 0 {
+            self.held.push_str(new_partial);
+            self.held_partial_len += new_partial.len();
+        }
     }
 
     /// Current partial buffer.
@@ -275,6 +295,7 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        debug_assert!(self.held.is_empty(), "typed output after text was held");
         self.finalize_history_raw(text);
         // A backend can finalize text that was already typed as a provisional
         // partial without adding a new tail (Soniox does this commonly). Only
@@ -385,22 +406,96 @@ impl StreamingSession {
         if !self.partial.is_empty() {
             self.finalized_text.push_str(&self.partial);
             self.partial.clear();
+            self.held_partial_len = 0;
         }
     }
 
-    /// File-output counterpart to `commit_segment`: same finalized_text
-    /// bookkeeping, but skips `output_with_fallback` entirely — there's
-    /// no cursor/focused window to type into when the session's target
-    /// is a file.
+    /// Counterpart to `commit_segment` for a session that types nothing
+    /// (file output, or after a stop took the typing surface away): same
+    /// finalized_text bookkeeping, but skips `output_with_fallback` entirely,
+    /// since there is no cursor or focused window to type into. An empty
+    /// `text` still commits the held partial: Soniox sends an empty Final
+    /// when the tokens it finalizes are the partial it already sent.
     pub fn commit_segment_silent(&mut self, text: &str) {
         self.finalize_history_raw(text);
-        if text.is_empty() {
-            self.clear_partial();
-            return;
-        }
-        let finalized_tail = format!("{}{}", self.partial, text);
-        self.finalized_text.push_str(&finalized_tail);
+        self.finalized_text.push_str(&self.partial);
+        self.finalized_text.push_str(text);
+        self.held_partial_len = 0;
+        self.hold(text);
         self.clear_partial();
+    }
+
+    /// Hold `text`, just committed silently, for [`Self::deliver_held`]
+    /// when earlier text was typed.
+    fn hold(&mut self, text: &str) {
+        if self.typed_chars > 0 {
+            self.held.push_str(text);
+        }
+    }
+
+    /// Text committed silently after earlier text was typed, which is
+    /// what a backend sent once a stop disowned the typing surface.
+    #[cfg(test)]
+    pub(crate) fn held_text(&self) -> &str {
+        &self.held
+    }
+
+    /// Type the held text after what is on screen, processed like a final,
+    /// and count it as typed. Call once, at stream end, after
+    /// [`Self::finalize_pending_partial`]. The text is typed after the
+    /// stop, so the modifier keys of a stop binding are waited out the way
+    /// batch output waits them out. When a revision after the stop reached
+    /// into typed text, nothing is typed: deleting text after a stop could
+    /// delete it in another window, and typing after the stale characters
+    /// would garble the line.
+    pub async fn deliver_held(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        text_processing: Option<(&TextProcessor, Option<&Vocabulary>)>,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+        wait_for_modifier_release: bool,
+        modifier_release_timeout: std::time::Duration,
+    ) -> Result<(), OutputError> {
+        let held = std::mem::take(&mut self.held);
+        self.held_partial_len = 0;
+        if std::mem::take(&mut self.held_revises_typed) {
+            // The transcript holds the revision; the screen does not. Say so,
+            // so history does not record the end as delivered.
+            let reason = "the backend revised text already typed after the stop; \
+                          the text that followed was not typed";
+            tracing::info!("Streaming: {reason}");
+            if self.output_error.is_none() {
+                self.output_error = Some(reason.to_string());
+            }
+            return Ok(());
+        }
+        let processed = match text_processing {
+            Some((tp, vocabulary)) => tp.process_with_vocabulary(&held, vocabulary),
+            None => held.clone(),
+        };
+        debug_assert!(
+            self.finalized_text.ends_with(held.as_str()),
+            "held text is the end of the transcript"
+        );
+        let start = self.finalized_text.len().saturating_sub(held.len());
+        self.finalized_text.truncate(start);
+        self.finalized_text.push_str(&processed);
+        if processed.trim().is_empty() {
+            return Ok(());
+        }
+        let history_context = self.history_context.clone();
+        let opts = OutputOptions {
+            history_context: history_context.as_ref(),
+            pre_output_command,
+            post_output_command,
+            wait_for_modifier_release,
+            modifier_release_timeout,
+        };
+        let result = deliver_with_fallback(chain, &processed, opts).await;
+        self.note_delivery(result)?;
+        self.typed_chars += processed.chars().count();
+        Ok(())
     }
 
     /// Backspace `backspace` chars then commit `text`. Used by streaming
@@ -462,11 +557,12 @@ impl StreamingSession {
         .await
     }
 
-    /// File-output counterpart to `replace_and_commit`: no real cursor to
-    /// send backspace keystrokes to, but `backspace` still means the same
-    /// thing — trim that many trailing chars off the accumulated
-    /// `partial` (a plain string edit, not a keystroke) before folding
-    /// the (now-truncated) partial tail plus `text` into `finalized_text`.
+    /// Counterpart to `replace_and_commit` for a session that types nothing
+    /// (file output, or after a stop took the typing surface away): no real
+    /// cursor to send backspace keystrokes to, but `backspace` still means
+    /// the same thing — trim that many trailing chars off the accumulated
+    /// `partial` (a plain string edit, not a keystroke) before folding the
+    /// (now-truncated) partial tail plus `text` into `finalized_text`.
     ///
     /// Originally shipped ignoring `backspace` entirely under the
     /// assumption that "no cursor" meant "nothing to revise" — wrong:
@@ -480,13 +576,29 @@ impl StreamingSession {
         self.revise_history_raw(backspace);
         self.finalize_history_raw(text);
         if backspace > 0 {
-            let new_partial_len = self.partial.chars().count().saturating_sub(backspace);
-            self.partial = self.partial.chars().take(new_partial_len).collect();
+            let before = std::mem::take(&mut self.partial);
+            let keep = before.chars().count().saturating_sub(backspace);
+            let cut = before
+                .char_indices()
+                .nth(keep)
+                .map_or(before.len(), |(i, _)| i);
+            self.partial = before[..cut].to_string();
+            // A revision removes the newest characters first: the held
+            // ones, then typed ones, which stay on screen.
+            let removed = before.len() - cut;
+            let from_held = removed.min(self.held_partial_len);
+            self.held.truncate(self.held.len() - from_held);
+            self.held_partial_len -= from_held;
+            if self.typed_chars > 0 && removed > from_held {
+                self.held_revises_typed = true;
+            }
         }
-        if !text.is_empty() {
-            let finalized_tail = format!("{}{}", self.partial, text);
-            self.finalized_text.push_str(&finalized_tail);
-        }
+        // Like `commit_segment_silent`, an empty `text` still commits what
+        // is left of the partial.
+        self.finalized_text.push_str(&self.partial);
+        self.finalized_text.push_str(text);
+        self.held_partial_len = 0;
+        self.hold(text);
         self.clear_partial();
     }
 
@@ -999,6 +1111,98 @@ mod tests {
         assert_eq!(session.typed_chars(), 0);
     }
 
+    /// After a stop takes the output away, the session holds what was never
+    /// typed: a final's tail after a typed partial, partials it only
+    /// observed, minus what a revision removed. `deliver_held` types exactly
+    /// that after the typed text, and a session that never typed holds
+    /// nothing.
+    #[tokio::test]
+    async fn held_text_is_what_was_never_typed() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "Hello.", None, None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&chain, " How ar".into(), None, None)
+            .await
+            .unwrap();
+        // The output is gone from here on.
+        session.commit_segment_silent("e you?");
+        session.observe_partial_delta(" Fine thanks");
+        session.replace_and_commit_silent(7, ", ok.");
+        session.observe_partial_delta(" Bye");
+        session.finalize_pending_partial();
+        assert_eq!(session.held_text(), "e you? Fine, ok. Bye");
+        assert_eq!(
+            session.finalized_text(),
+            "Hello. How are you? Fine, ok. Bye"
+        );
+
+        session
+            .deliver_held(&chain, None, None, None, false, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed().concat(), "Hello. How are you? Fine, ok. Bye");
+        assert_eq!(
+            session.typed_chars(),
+            session.finalized_text().chars().count()
+        );
+        assert_eq!(session.held_text(), "");
+
+        let mut silent_only = StreamingSession::new();
+        silent_only.commit_segment_silent("file output");
+        assert_eq!(silent_only.held_text(), "");
+    }
+
+    /// A revision after the stop that reaches into typed text: nothing after
+    /// a stop deletes text on screen, so the replacement is not typed after
+    /// the stale characters. Soniox's default `type_partials` finalizes
+    /// " hello wor" as "Hello world." this way. A revision of held text
+    /// alone still types.
+    #[tokio::test]
+    async fn a_held_revision_of_typed_text_types_nothing() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, " hello wor".into(), None, None)
+            .await
+            .unwrap();
+        let _ = StreamingSession::take_test_backspaces();
+        // The output is gone from here on.
+        session.replace_and_commit_silent(9, "Hello world.");
+        session.finalize_pending_partial();
+
+        session
+            .deliver_held(&chain, None, None, None, false, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(StreamingSession::take_test_backspaces().is_empty());
+        assert_eq!(rec.typed(), vec![" hello wor"]);
+        assert!(
+            session.output_error().is_some(),
+            "history must not record the untyped end as delivered"
+        );
+
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "Hello.", None, None, None)
+            .await
+            .unwrap();
+        session.observe_partial_delta(" wor");
+        session.replace_and_commit_silent(3, "world.");
+        session
+            .deliver_held(&chain, None, None, None, false, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed().concat(), "Hello. world.");
+    }
+
     #[tokio::test]
     async fn partial_buffer_is_replaced_not_appended() {
         let mut session = StreamingSession::new();
@@ -1108,6 +1312,51 @@ mod tests {
         session.observe_partial_delta(" wor");
         session.replace_and_commit_silent(999, "world");
         assert_eq!(session.finalized_text(), "helloworld");
+    }
+
+    /// Soniox sends an empty Final when the finalized tokens equal the
+    /// partial it already sent. The empty Final confirms that partial; it
+    /// must not drop it, as the typing path's `commit_segment` already knows.
+    #[test]
+    fn empty_silent_final_commits_the_held_partial() {
+        let mut session = StreamingSession::new();
+        session.commit_segment_silent("Hello.");
+        session.observe_partial_delta(" How are you?");
+        session.commit_segment_silent("");
+        assert_eq!(session.finalized_text(), "Hello. How are you?");
+        assert_eq!(session.partial(), "");
+    }
+
+    /// A revision with no new text still confirms the trimmed partial.
+    #[test]
+    fn empty_silent_replace_commits_the_trimmed_partial() {
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("Hello world,");
+        session.replace_and_commit_silent(1, "");
+        assert_eq!(session.finalized_text(), "Hello world");
+        assert_eq!(session.partial(), "");
+    }
+
+    /// After a stop, a partial confirmed by an empty Final is held text
+    /// like any other, and is typed.
+    #[tokio::test]
+    async fn a_held_partial_confirmed_by_an_empty_final_is_typed() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "How ar".into(), None, None)
+            .await
+            .unwrap();
+        // The output is gone from here on.
+        session.observe_partial_delta("e you?");
+        session.commit_segment_silent("");
+        assert_eq!(session.held_text(), "e you?");
+        session
+            .deliver_held(&chain, None, None, None, false, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed().concat(), "How are you?");
     }
 
     #[tokio::test]

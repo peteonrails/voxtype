@@ -1,9 +1,9 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
-    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
-    ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
-    StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine, VadConfig,
-    WhisperConfig,
+    AudioConfig, CohereConfig, DeepgramConfig, DolphinConfig, GgufConfig, HotkeyConfig,
+    MeetingConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig,
+    StatusConfig, StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine,
+    VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -107,6 +107,11 @@ pub struct Config {
     /// `[streaming]` so changing recovery cannot override legacy tuning.
     #[serde(default)]
     pub streaming_recovery: Option<StreamingRecoveryConfig>,
+
+    /// Deepgram cloud STT configuration, streaming and batch
+    /// (optional, only used when engine = "deepgram")
+    #[serde(default)]
+    pub deepgram: Option<DeepgramConfig>,
 
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
@@ -226,6 +231,7 @@ impl Default for Config {
             soniox: None,
             streaming: None,
             streaming_recovery: None,
+            deepgram: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -268,6 +274,10 @@ impl Config {
                 .as_ref()
                 .map(|s| s.streaming && !s.async_api)
                 .unwrap_or(false),
+            // Same as Soniox: Deepgram types each final while recording.
+            // Unlike Soniox, a missing [deepgram] table still runs, on the
+            // defaults, so it streams.
+            TranscriptionEngine::Deepgram => self.deepgram.as_ref().is_none_or(|d| d.streaming),
             // Same reasoning as Parakeet/Soniox: an absent [openvino] section
             // means the transcriber can't initialize anyway, so don't
             // auto-promote push-to-talk to toggle for a config that can't
@@ -606,8 +616,8 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
-            // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            // Cloud backends have no local model to load on demand.
+            TranscriptionEngine::Soniox | TranscriptionEngine::Deepgram => false,
         }
     }
 
@@ -644,6 +654,13 @@ impl Config {
             },
             TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str()),
             TranscriptionEngine::Gguf => self.gguf.as_ref().map(|g| g.language.as_str()),
+            // "multi" asks Deepgram to code-switch; it pins no one language.
+            // A missing table runs on the defaults (see create_transcriber).
+            TranscriptionEngine::Deepgram => match self.deepgram.as_ref() {
+                Some(d) if d.language == "multi" => return EngineLanguage::Open,
+                Some(d) => Some(d.language.as_str()),
+                None => Some(crate::config::DEEPGRAM_DEFAULT_LANGUAGE),
+            },
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())
             }
@@ -690,6 +707,7 @@ impl Config {
             TranscriptionEngine::SenseVoice => "sensevoice.language",
             TranscriptionEngine::OpenVino => "openvino.language",
             TranscriptionEngine::Soniox => "soniox.language_hints",
+            TranscriptionEngine::Deepgram => "deepgram.language",
             TranscriptionEngine::Parakeet
             | TranscriptionEngine::Moonshine
             | TranscriptionEngine::Paraformer
@@ -929,6 +947,7 @@ impl Config {
                 .soniox
                 .as_ref()
                 .is_some_and(|s| s.streaming && !s.async_api),
+            TranscriptionEngine::Deepgram => self.deepgram.as_ref().is_none_or(|d| d.streaming),
             _ => false,
         }
     }
@@ -987,6 +1006,10 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Deepgram => self
+                .deepgram
+                .as_ref()
+                .map_or(crate::config::DEEPGRAM_DEFAULT_MODEL, |d| d.model.as_str()),
         }
     }
 
@@ -1072,6 +1095,9 @@ impl Config {
             }
             TranscriptionEngine::Soniox => {
                 self.soniox.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Deepgram => {
+                self.deepgram.get_or_insert_with(Default::default).model = model
             }
         }
     }
@@ -1349,7 +1375,7 @@ mod tests {
         language.and_then(|l| l.split(['-', '_']).next()) == Some("en")
     }
 
-    const ENGINES: [TranscriptionEngine; 11] = [
+    const ENGINES: [TranscriptionEngine; 12] = [
         TranscriptionEngine::Whisper,
         TranscriptionEngine::Parakeet,
         TranscriptionEngine::Moonshine,
@@ -1361,6 +1387,7 @@ mod tests {
         TranscriptionEngine::Gguf,
         TranscriptionEngine::OpenVino,
         TranscriptionEngine::Soniox,
+        TranscriptionEngine::Deepgram,
     ];
 
     /// `engine` active with `model`, every other setting at its default.
@@ -1386,6 +1413,12 @@ mod tests {
             }
             TranscriptionEngine::OpenVino => {
                 config.openvino.as_mut().unwrap().language = language.into()
+            }
+            TranscriptionEngine::Deepgram => {
+                config
+                    .deepgram
+                    .get_or_insert_with(Default::default)
+                    .language = language.into()
             }
             other => panic!("{} has no language key", other.name()),
         }
@@ -1445,6 +1478,7 @@ mod tests {
             TranscriptionEngine::Gguf => &["auto", "en", "en-US", "ja", "ru"],
             TranscriptionEngine::SenseVoice => &["auto", "en", "zh", "yue"],
             TranscriptionEngine::OpenVino => &["auto", "en", "fr", "pt"],
+            TranscriptionEngine::Deepgram => &["auto", "multi", "en", "en-US", "fr"],
             _ => &[],
         };
         configs.extend(
@@ -1530,7 +1564,8 @@ mod tests {
             TranscriptionEngine::Whisper
             | TranscriptionEngine::Gguf
             | TranscriptionEngine::SenseVoice
-            | TranscriptionEngine::OpenVino => with_engine_language(config, "auto"),
+            | TranscriptionEngine::OpenVino
+            | TranscriptionEngine::Deepgram => with_engine_language(config, "auto"),
             // Cohere has no automatic setting; the rest have no key.
             _ => config,
         }
@@ -1678,6 +1713,18 @@ mod tests {
                         assert_eq!(before, None, "{context}");
                         continue;
                     }
+                    // Deepgram is newer than the resolution `before` models,
+                    // so it has no old answer: its own language is the answer,
+                    // and "auto" or "multi" pin none.
+                    if engine == TranscriptionEngine::Deepgram {
+                        let own = config.deepgram.as_ref().unwrap().language.as_str();
+                        let expected = match own {
+                            "auto" | "multi" => config.model_language(),
+                            code => Some(code),
+                        };
+                        assert_eq!(now, expected, "{context}");
+                        continue;
+                    }
                     match before {
                         // An engine language that was set is still the answer.
                         Some(code) => assert_eq!(now, Some(code), "{context}"),
@@ -1701,6 +1748,22 @@ mod tests {
             }
         }
         assert!(checked > 300, "{checked} configurations");
+    }
+
+    /// A config with no `[deepgram]` table runs on `DeepgramConfig`'s
+    /// defaults, so its language is the default one, as for the model.
+    #[test]
+    fn deepgram_without_a_table_reports_the_default_language() {
+        let config = Config {
+            engine: TranscriptionEngine::Deepgram,
+            deepgram: None,
+            ..Config::default()
+        };
+        assert_eq!(
+            config.active_language(),
+            Some(crate::config::DEEPGRAM_DEFAULT_LANGUAGE)
+        );
+        assert_eq!(config.model_name(), crate::config::DEEPGRAM_DEFAULT_MODEL);
     }
 
     /// The multilingual defaults, spelled out: automatic detection and

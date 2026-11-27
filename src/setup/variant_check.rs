@@ -105,11 +105,13 @@ pub enum Remediation {
 /// Map a `TranscriptionEngine` to its required Cargo feature, or `None`
 /// for engines that have no compile-time gate.
 ///
-/// Whisper and Soniox are unconditional in every variant. The remaining
-/// engines are behind feature flags matching their canonical names.
+/// Whisper, Soniox and Deepgram are unconditional in every variant. The
+/// remaining engines are behind feature flags matching their canonical names.
 pub fn required_feature(engine: TranscriptionEngine) -> Option<&'static str> {
     match engine {
-        TranscriptionEngine::Whisper | TranscriptionEngine::Soniox => None,
+        TranscriptionEngine::Whisper
+        | TranscriptionEngine::Soniox
+        | TranscriptionEngine::Deepgram => None,
         other => Some(other.name()),
     }
 }
@@ -603,5 +605,6 @@ mod tests {
         }
         assert_eq!(required_feature(TranscriptionEngine::Whisper), None);
         assert_eq!(required_feature(TranscriptionEngine::Soniox), None);
+        assert_eq!(required_feature(TranscriptionEngine::Deepgram), None);
     }
 }

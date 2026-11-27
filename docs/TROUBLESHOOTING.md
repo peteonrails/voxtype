@@ -378,6 +378,7 @@ what is wrong instead of showing an empty pane:
   - [Copied to clipboard, paste manually](#copied-to-clipboard-paste-manually-notification)
   - [Transcription not delivered](#transcription-not-delivered-notification)
 - [Performance Issues](#performance-issues)
+- [Deepgram Backend Issues](#deepgram-backend-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
@@ -1975,6 +1976,36 @@ model = "tiny.en"
 1. Ensure voxtype is running with normal priority
 2. Check for other applications using evdev
 3. Try a different hotkey
+
+---
+
+## Deepgram Backend Issues
+
+### "Deepgram API key required"
+
+Set `DEEPGRAM_API_KEY` (or `VOXTYPE_DEEPGRAM_API_KEY`) in the environment of the Voxtype daemon. An optional `[deepgram] api_key` value is supported as a less-safe fallback. The environment variable wins when both are present.
+
+### Deepgram authentication, billing, or rate-limit errors
+
+HTTP 401 means the key was rejected, 403 that the key's project has no access to the requested model (check `[deepgram] model`), 402 indicates insufficient credit, and 429 means the account is rate limited. Check the Deepgram console, then retry the recording after resolving the account condition.
+
+### Deepgram timeout or network error
+
+Confirm the machine can reach `https://api.deepgram.com` over HTTPS (streaming uses `wss://` to the same host). Increase `[deepgram] timeout_secs` if a proxy or slow connection routinely exceeds 30 seconds. Voxtype does not retry a failed request; when a stream fails before any text was typed, streaming recovery sends the recording once to the pre-recorded API.
+
+### "Deepgram closed the connection during recording"
+
+Deepgram ended the stream before recording stopped, for example after a network drop or when the key was revoked. The message carries Deepgram's close code and reason. When the stream ended before any text was typed, Voxtype transcribes the recording through the pre-recorded API instead (see `[streaming_recovery]`); otherwise the words after the drop are lost. Set `[deepgram] streaming = false` to always send the finished recording.
+
+### Streamed dictation in the wrong language
+
+Deepgram detects the language of finished recordings only. With `language = "auto"`, a streamed dictation is transcribed as English. Set `[deepgram] language` to the language you speak, or `"multi"` for code-switching.
+
+### Deepgram returns an empty or malformed result
+
+A missing channel alternative or malformed JSON is reported as a transcription error. A recording with no words gives an empty transcript, and nothing is typed. Check the journal for the category; Voxtype does not log the request audio or credential.
+
+See [DEEPGRAM.md](DEEPGRAM.md) for the complete provider configuration.
 
 ---
 

@@ -862,6 +862,10 @@ mod tests {
     #[test]
     fn catalog_covers_the_settable_engines() {
         for name in ENGINE_NAMES {
+            // Cloud engine: settable, with nothing to download.
+            if *name == "deepgram" {
+                continue;
+            }
             assert!(
                 CATALOG_ENGINES.contains(name),
                 "engine '{}' is settable but has no model catalog",

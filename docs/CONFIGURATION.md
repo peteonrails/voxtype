@@ -153,6 +153,8 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
+- `deepgram` - Deepgram cloud transcription: realtime WebSocket streaming or pre-recorded HTTPS (built in)
+- `soniox` - Soniox WebSocket/REST cloud transcription (built in)
 
 **Example:**
 ```toml
@@ -185,10 +187,11 @@ new engine to take effect.
 
 **Notes:**
 - First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
-- Whisper, Remote Whisper, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
+- Whisper, Remote Whisper, Deepgram, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
+- See [DEEPGRAM.md](DEEPGRAM.md) for Deepgram credentials, privacy, and request behavior
 - Cohere Transcribe is the largest model voxtype ships (~3 GB int8); use `voxtype setup model` to download it
 
 ---
@@ -2026,6 +2029,30 @@ language = "en"
 
 ---
 
+## [deepgram]
+
+Configuration for the Deepgram cloud engine. This section is only used when `engine = "deepgram"`.
+
+Deepgram is a paid cloud STT provider. No model runs on your machine. With `streaming = true` (the default), dictation streams to Deepgram's realtime API over WebSocket while you speak, and each phrase is typed when Deepgram finalizes it at a pause. A finished recording (`voxtype transcribe`, meeting chunks, and dictation with `streaming = false`) goes to Deepgram's pre-recorded API in one request.
+
+**Privacy:** Audio is sent to a third-party service. Use the local engines (Whisper, Parakeet, etc.) if you cannot send dictation off-device.
+
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `api_key` | `VOXTYPE_DEEPGRAM_API_KEY`, `DEEPGRAM_API_KEY` (read in that order) | none (required) | Deepgram API key. Either variable takes precedence over the config value |
+| `model` | - | `"nova-3"` | Deepgram model |
+| `language` | - | `"en"` | BCP-47 code, `"auto"` (finished recordings only; a streamed dictation is English), or `"multi"` |
+| `smart_format` | - | `true` | Punctuation, numerals, dates and related formatting |
+| `mip_opt_out` | - | `true` | Exclude the audio from Deepgram's Model Improvement Program |
+| `streaming` | - | `true` | Stream while recording; `false` sends the finished recording |
+| `endpointing_ms` | - | unset | Streaming only: milliseconds of silence that end a segment |
+| `timeout_secs` | - | `30` | Wait for Deepgram: the whole request for a finished recording; the connection and the last transcript when streaming |
+| `endpoint` | - | `"https://api.deepgram.com/v1/listen"` | `/v1/listen` endpoint; streaming uses the same URL over `wss://`. HTTPS is required except for localhost |
+
+Profile vocabulary reaches Deepgram as `keyterm` (nova-3) or `keywords` (older models). See [DEEPGRAM.md](DEEPGRAM.md) for credentials and request behavior.
+
+---
+
 ## [soniox]
 
 Configuration for the Soniox cloud streaming WebSocket STT engine. This section is only used when `engine = "soniox"`.
@@ -3512,9 +3539,10 @@ post_process_timeout_ms = 45000
 Canonical spellings for product names, people, acronyms, and jargon used by
 this profile. Voxtype sends the terms through each backend's native vocabulary
 mechanism when one exists: the local Whisper and whisper-cli prompts, the
-OpenAI-compatible remote `prompt` field, and Soniox `context.terms`. An
-explicit `[whisper] initial_prompt` or `[soniox] terms` list is preserved and
-the profile terms are appended.
+OpenAI-compatible remote `prompt` field, Soniox `context.terms`, and Deepgram
+`keyterm` (nova-3) or `keywords` (older models). An explicit
+`[whisper] initial_prompt` or `[soniox] terms` list is preserved and the
+profile terms are appended.
 
 When text becomes final, Voxtype also corrects only unambiguous phonetic
 near-matches. Provisional streaming text is not corrected. Exact
@@ -5407,6 +5435,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
+| `VOXTYPE_DEEPGRAM_API_KEY` | string | `deepgram.api_key` (also read from `DEEPGRAM_API_KEY`) |
 
 **Streaming recovery:**
 

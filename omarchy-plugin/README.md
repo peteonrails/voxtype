@@ -334,6 +334,14 @@ Inside the panel:
   with it, so it stays reachable while you are looking down the model list, and
   the engine in effect is stated in full instead of only being a dropdown's
   selected row.
+- An engine with no model to download (Deepgram, which runs in the cloud) has
+  no model list. Browsing it shows a **Use Deepgram** button instead, which
+  runs `voxtype config set engine deepgram`, and a line saying it reads its API
+  key from `DEEPGRAM_API_KEY` in the daemon's environment, or `[deepgram]
+  api_key`, and that without one the daemon will not start. Once it is the
+  configured engine, the row says "configured" and its settings appear below.
+  If the switch fails, the error above the card says it could not switch to
+  this engine.
 - The panel re-reads the config file whenever it changes on disk, so an edit from
   the CLI, the TUI, or the Edit config button lands in an already-open panel
   without needing to close and re-summon it.
@@ -539,6 +547,29 @@ for an ONNX one, and shown by a schema without the flag.
 model is missing, shows nothing without one, and clears it when the model is
 installed behind an open panel.
 Terminal launches are logged by a stand-in, never opened.
+
+### Engine switching tests
+
+```bash
+python3 omarchy-plugin/tests/test-engine-switch-back.py [--evidence DIR] [--scenario NAME]
+python3 omarchy-plugin/tests/test-cloud-engine.py [--evidence DIR] [--scenario NAME]
+```
+
+Same harness and isolation rules as the tests above. `test-engine-switch-back.py`
+browses another engine's catalog and clicks **Use** on one of its models: the
+fake CLI must receive exactly one `config select-model <engine> <model>` (or
+`config set parakeet.model` on the configured engine), and the panel must then
+show that engine and model configured. `test-cloud-engine.py` covers an engine
+with no model to download: the fake CLI reports Deepgram compiled in `info
+engines --json` and leaves it out of `info models --json`, as the real one
+does. Browsing Deepgram must offer **Use Deepgram** and say it has no model to
+download; the click must send exactly one `config set engine deepgram` and
+leave Deepgram marked configured with its settings shown. Further scenarios
+start on Deepgram (marked configured, no button), check that engines with
+models keep their model rows and get no engine button, that the button is
+still offered and works when `info engines` fails, and that a failed switch
+says "Could not switch to this engine" while a failed model pick keeps "Could
+not use this model".
 
 ### Meeting view tests
 

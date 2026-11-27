@@ -145,6 +145,18 @@ pub struct AllFields {
     pub ov_threads: Option<i64>,
     pub ov_on_demand_loading: bool,
     pub ov_section_existed: bool,
+
+    // Deepgram (cloud STT)
+    pub dg_model: String,
+    pub dg_language: String,
+    pub dg_smart_format: bool,
+    pub dg_mip_opt_out: bool,
+    pub dg_streaming: bool,
+    pub dg_timeout_secs: i64,
+    pub dg_endpoint: String,
+    pub dg_api_key_in_config: bool,
+    pub dg_api_key_in_environment: bool,
+    pub dg_section_existed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +243,16 @@ pub enum FieldId {
     OvLanguage,
     OvThreads,
     OvOnDemandLoading,
+
+    // Deepgram
+    DgModel,
+    DgLanguage,
+    DgSmartFormat,
+    DgMipOptOut,
+    DgStreaming,
+    DgTimeout,
+    DgEndpoint,
+    DgCredential,
 }
 
 /// Cohere Transcribe officially supports these 14 languages. Token IDs are
@@ -277,6 +299,9 @@ fn whisper_cli_save_warning(engine: &str, mode: &str, cli_path: Option<&str>) ->
 }
 const LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
+];
+const DEEPGRAM_LANG_CHOICES: &[&str] = &[
+    "en", "auto", "multi", "es", "fr", "de", "it", "pt", "nl", "hi", "ja", "ru",
 ];
 const SV_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
@@ -374,6 +399,16 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::OvThreads,
             FieldId::OvOnDemandLoading,
         ]),
+        "deepgram" => rows.extend_from_slice(&[
+            FieldId::DgModel,
+            FieldId::DgLanguage,
+            FieldId::DgSmartFormat,
+            FieldId::DgMipOptOut,
+            FieldId::DgStreaming,
+            FieldId::DgTimeout,
+            FieldId::DgEndpoint,
+            FieldId::DgCredential,
+        ]),
         _ => {}
     }
     rows
@@ -391,6 +426,7 @@ impl EngineState {
         let engine = ed
             .get_string("", "engine")
             .unwrap_or_else(|| "whisper".to_string());
+        let dg = crate::config::DeepgramConfig::default();
         let fields = AllFields {
             // Whisper
             w_model: ed
@@ -517,6 +553,28 @@ impl EngineState {
                 .get_bool("openvino", "on_demand_loading")
                 .unwrap_or(false),
             ov_section_existed: ed.get_string("openvino", "model").is_some(),
+
+            // Deepgram
+            dg_model: ed.get_string("deepgram", "model").unwrap_or(dg.model),
+            dg_language: ed.get_string("deepgram", "language").unwrap_or(dg.language),
+            dg_smart_format: ed
+                .get_bool("deepgram", "smart_format")
+                .unwrap_or(dg.smart_format),
+            dg_mip_opt_out: ed
+                .get_bool("deepgram", "mip_opt_out")
+                .unwrap_or(dg.mip_opt_out),
+            dg_streaming: ed.get_bool("deepgram", "streaming").unwrap_or(dg.streaming),
+            dg_timeout_secs: ed
+                .get_int("deepgram", "timeout_secs")
+                .unwrap_or(dg.timeout_secs as i64),
+            dg_endpoint: ed.get_string("deepgram", "endpoint").unwrap_or(dg.endpoint),
+            dg_api_key_in_config: ed
+                .get_string("deepgram", "api_key")
+                .is_some_and(|key| !key.trim().is_empty()),
+            dg_api_key_in_environment: crate::config::DEEPGRAM_API_KEY_ENV_VARS
+                .iter()
+                .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty())),
+            dg_section_existed: ed.get_string("deepgram", "model").is_some(),
         };
         let mut state = Self {
             engine,
@@ -552,6 +610,12 @@ impl EngineState {
     fn refresh_binary_match_with_inventory(&mut self, inv: &binary::Inventory) {
         self.pending_variant_switch = None;
         self.binary_switch_blocked = None;
+
+        // Cloud engines are compiled into every binary and do not require a
+        // local model family or variant switch.
+        if matches!(self.engine.as_str(), "deepgram" | "soniox") {
+            return;
+        }
 
         // A GGUF client can run in the Vulkan/Whisper binary. Engine family
         // alone is not enough: explicit ONNX models still need ONNX binaries.
@@ -841,6 +905,18 @@ impl EngineState {
             ed.set_bool("openvino", "on_demand_loading", f.ov_on_demand_loading);
         }
 
+        // Deepgram. Never rewrite api_key: the TUI reports credential source
+        // but intentionally does not expose or edit the secret.
+        if self.engine == "deepgram" || f.dg_section_existed {
+            ed.set_string("deepgram", "model", &f.dg_model);
+            ed.set_string("deepgram", "language", &f.dg_language);
+            ed.set_bool("deepgram", "smart_format", f.dg_smart_format);
+            ed.set_bool("deepgram", "mip_opt_out", f.dg_mip_opt_out);
+            ed.set_bool("deepgram", "streaming", f.dg_streaming);
+            ed.set_int("deepgram", "timeout_secs", f.dg_timeout_secs);
+            ed.set_string("deepgram", "endpoint", &f.dg_endpoint);
+        }
+
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
@@ -967,6 +1043,8 @@ impl EngineState {
                 | FieldId::GgModel
                 | FieldId::GgArchitecture
                 | FieldId::GgLanguage
+                | FieldId::DgModel
+                | FieldId::DgEndpoint
         )
     }
 
@@ -983,6 +1061,8 @@ impl EngineState {
             FieldId::GgModel => self.fields.gg_model.clone(),
             FieldId::GgArchitecture => self.fields.gg_architecture.clone(),
             FieldId::GgLanguage => self.fields.gg_language.clone(),
+            FieldId::DgModel => self.fields.dg_model.clone(),
+            FieldId::DgEndpoint => self.fields.dg_endpoint.clone(),
             _ => String::new(),
         };
         self.editing = Some(TextEdit {
@@ -1007,6 +1087,16 @@ impl EngineState {
             FieldId::GgModel => self.fields.gg_model = buffer,
             FieldId::GgArchitecture => self.fields.gg_architecture = buffer,
             FieldId::GgLanguage => self.fields.gg_language = buffer,
+            FieldId::DgModel => {
+                if let Some(value) = opt {
+                    self.fields.dg_model = value;
+                }
+            }
+            FieldId::DgEndpoint => {
+                if let Some(value) = opt {
+                    self.fields.dg_endpoint = value;
+                }
+            }
             _ => {}
         }
         self.dirty_since_load = true;
@@ -1166,6 +1256,21 @@ impl EngineState {
             FieldId::OvLanguage => f.ov_language = cycle_str(LANG_CHOICES, &f.ov_language, delta),
             FieldId::OvThreads => f.ov_threads = cycle_threads(f.ov_threads, delta),
             FieldId::OvOnDemandLoading => f.ov_on_demand_loading = !f.ov_on_demand_loading,
+
+            FieldId::DgModel | FieldId::DgEndpoint => {
+                self.start_edit_if_text_field();
+                return;
+            }
+            FieldId::DgLanguage => {
+                f.dg_language = cycle_str(DEEPGRAM_LANG_CHOICES, &f.dg_language, delta)
+            }
+            FieldId::DgSmartFormat => f.dg_smart_format = !f.dg_smart_format,
+            FieldId::DgMipOptOut => f.dg_mip_opt_out = !f.dg_mip_opt_out,
+            FieldId::DgStreaming => f.dg_streaming = !f.dg_streaming,
+            FieldId::DgTimeout => {
+                f.dg_timeout_secs = (f.dg_timeout_secs + delta as i64 * 5).clamp(1, 300)
+            }
+            FieldId::DgCredential => return,
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -1180,7 +1285,7 @@ impl EngineState {
 /// skip the on-disk check for Whisper. Returns None for unknown engines.
 fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
     match engine {
-        "whisper" => None,
+        "whisper" | "deepgram" | "soniox" => None,
         "parakeet" => Some(f.pk_model.clone()),
         "moonshine" => Some(f.mn_model.clone()),
         "sensevoice" => Some(f.sv_model.clone()),
@@ -1237,9 +1342,11 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
     // Also include engines the running binary itself was compiled with —
     // covers pure source builds with no /usr/lib/voxtype/. The
     // no-features cargo default still ships the Whisper engine, so
-    // Whisper is always present.
+    // Whisper is always present, and Deepgram is a cloud client built
+    // into every binary.
     let inv = binary::inventory();
     out.insert("whisper");
+    out.insert("deepgram");
     for f in &inv.compiled_features {
         for engine in [
             "parakeet",
@@ -1604,6 +1711,39 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "OpenVINO · on-demand model load",
             yesno(f.ov_on_demand_loading),
         ),
+
+        FieldId::DgModel => (
+            "Deepgram · model",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::DgModel => e.input.caret_string(),
+                _ => f.dg_model.clone(),
+            },
+        ),
+        FieldId::DgLanguage => ("Deepgram · language", f.dg_language.clone()),
+        FieldId::DgSmartFormat => ("Deepgram · smart format", yesno(f.dg_smart_format)),
+        FieldId::DgMipOptOut => (
+            "Deepgram · model improvement opt-out",
+            yesno(f.dg_mip_opt_out),
+        ),
+        FieldId::DgStreaming => ("Deepgram · streaming", yesno(f.dg_streaming)),
+        FieldId::DgTimeout => ("Deepgram · timeout", format!("{}s", f.dg_timeout_secs)),
+        FieldId::DgEndpoint => (
+            "Deepgram · endpoint",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::DgEndpoint => e.input.caret_string(),
+                _ => f.dg_endpoint.clone(),
+            },
+        ),
+        FieldId::DgCredential => (
+            "Deepgram · credentials",
+            if f.dg_api_key_in_environment {
+                "set in the environment".to_string()
+            } else if f.dg_api_key_in_config {
+                "set in config (plain text)".to_string()
+            } else {
+                "missing".to_string()
+            },
+        ),
     }
 }
 
@@ -1704,6 +1844,12 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
             "OpenVINO GenAI Whisper (Intel NPU/GPU/CPU). Included in the \
              x86_64 ONNX release binaries; its runtime and device drivers \
              are loaded only when this engine is selected.",
+        ),
+        (
+            "deepgram",
+            "Deepgram cloud speech-to-text. Streams while you speak, or \
+             sends the finished recording; built into every binary. Needs \
+             DEEPGRAM_API_KEY and sends audio off-device.",
         ),
     ] {
         lines.push(Line::from(Span::styled(
@@ -2207,6 +2353,60 @@ fn field_guidance(state: &EngineState) -> Vec<Line<'_>> {
         ],
         FieldId::OvOnDemandLoading => on_demand_guidance("OpenVINO"),
 
+        FieldId::DgModel => vec![
+            heading("Deepgram · model"),
+            Line::from(""),
+            Line::from("Deepgram model identifier. nova-3 is the recommended general-purpose model."),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press Enter to edit.",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
+        FieldId::DgLanguage => vec![
+            heading("Deepgram · language"),
+            Line::from(""),
+            Line::from("Use a BCP-47 language code, auto to detect one language per recording, or multi for code-switching. Deepgram detects the language of finished recordings only: a streamed dictation with auto is English."),
+            Line::from(""),
+            Line::from("A fixed language such as en usually improves latency and short-utterance accuracy."),
+        ],
+        FieldId::DgSmartFormat => vec![
+            heading("Deepgram · smart format"),
+            Line::from(""),
+            Line::from("Adds punctuation, capitalization, paragraphs, numerals, dates, and other readable formatting."),
+        ],
+        FieldId::DgMipOptOut => vec![
+            heading("Deepgram · model improvement opt-out"),
+            Line::from(""),
+            Line::from("When enabled, each request sends mip_opt_out=true so dictation is excluded from Deepgram's Model Improvement Program."),
+        ],
+        FieldId::DgStreaming => vec![
+            heading("Deepgram · streaming"),
+            Line::from(""),
+            Line::from("When enabled, audio streams to Deepgram's realtime API while you speak, so the transcript is ready when you stop."),
+            Line::from(""),
+            Line::from("When disabled, the finished recording is sent to the pre-recorded API after you stop."),
+        ],
+        FieldId::DgTimeout => vec![
+            heading("Deepgram · timeout"),
+            Line::from(""),
+            Line::from("How long to wait for Deepgram: the whole request for a finished recording, and the connection and last transcript when streaming. Five-second steps; default 30 seconds."),
+        ],
+        FieldId::DgEndpoint => vec![
+            heading("Deepgram · endpoint"),
+            Line::from(""),
+            Line::from("Deepgram's /v1/listen endpoint; streaming uses the same URL over wss://. HTTPS is required except for localhost testing."),
+            Line::from(""),
+            Line::from("Use api.eu.deepgram.com or api.au.deepgram.com here when regional processing is required."),
+        ],
+        FieldId::DgCredential => vec![
+            heading("Deepgram · credentials"),
+            Line::from(""),
+            Line::from("Set DEEPGRAM_API_KEY (or VOXTYPE_DEEPGRAM_API_KEY) in the daemon environment (recommended). The secret is never displayed here."),
+            Line::from(""),
+            Line::from("An api_key value in [deepgram] is supported as a plain-text fallback."),
+        ],
+
         FieldId::WRemoteEndpoint => vec![
             heading("Whisper · remote endpoint"),
             Line::from(""),
@@ -2381,6 +2581,7 @@ fn display_engine(engine: &str) -> &'static str {
         "cohere" => "Cohere",
         "gguf" => "GGUF",
         "openvino" => "OpenVINO",
+        "deepgram" => "Deepgram",
         _ => "Engine",
     }
 }
@@ -2756,6 +2957,45 @@ mod tests {
         state.fields.pk_model = "/models/parakeet-migraphx".to_string();
         state.refresh_binary_match_with_inventory(&inv);
         assert!(state.binary_switch_blocked.is_some());
+    }
+
+    /// Cloud engines need no ONNX binary: selecting one on a binary with no
+    /// ONNX variant asks for no switch.
+    #[test]
+    fn cloud_engines_need_no_binary_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        let mut inv = binary::inventory();
+        inv.install_kind = InstallKind::Package;
+        inv.active_variant = Some(Variant::WhisperVulkan);
+        inv.variants.clear();
+        for engine in ["deepgram", "soniox"] {
+            state.engine = engine.to_string();
+            state.refresh_binary_match_with_inventory(&inv);
+            assert!(state.pending_variant_switch.is_none(), "{engine}");
+            assert!(state.binary_switch_blocked.is_none(), "{engine}");
+        }
+    }
+
+    /// The screen never shows the Deepgram key, so it must never write one:
+    /// a key in the config survives opening and saving the Engine section.
+    #[test]
+    fn deepgram_key_survives_tui_open_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "engine = \"deepgram\"\n[deepgram]\nmodel = \"nova-3\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        state.fields.dg_streaming = false;
+        state.save_to_editor(&mut ed);
+        let after: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["deepgram"]["api_key"].as_str(), Some("k"));
+        assert_eq!(after["deepgram"]["streaming"].as_bool(), Some(false));
     }
 
     #[test]

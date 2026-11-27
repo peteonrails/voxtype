@@ -13,8 +13,11 @@
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
+//! - Deepgram cloud transcription, streamed over WebSocket or sent whole over HTTPS (available in every binary)
 
+pub mod audio;
 pub mod cli;
+pub mod deepgram;
 pub mod lines;
 mod metadata;
 pub use metadata::RuntimeMetadata;
@@ -444,6 +447,11 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "OpenVINO engine requested but voxtype was not compiled with --features openvino-whisper"
                 .to_string(),
         )),
+        // Every [deepgram] field has a default and the key can come from
+        // the environment, so a missing table means the defaults.
+        TranscriptionEngine::Deepgram => Ok(Box::new(deepgram::DeepgramTranscriber::new(
+            config.deepgram.clone().unwrap_or_default(),
+        )?)),
     }
 }
 

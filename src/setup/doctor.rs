@@ -147,7 +147,8 @@ pub fn path_check(id: &'static str, label: &str, path: &Path, exists: bool) -> C
 /// Is the configured transcription model on disk and intact?
 ///
 /// `soniox_env_key` says whether `SONIOX_API_KEY` is set, the alternative to
-/// `[soniox] api_key`.
+/// `[soniox] api_key`. Deepgram's key is read here through
+/// `DeepgramConfig::resolve_api_key`, as the engine reads it.
 pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bool) -> Check {
     const ID: &str = "transcription.model";
     let engine = config.engine;
@@ -165,6 +166,8 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bo
         TranscriptionEngine::Gguf => config.gguf.is_none(),
         TranscriptionEngine::OpenVino => config.openvino.is_none(),
         TranscriptionEngine::Soniox => config.soniox.is_none(),
+        // A missing [deepgram] table means the defaults.
+        TranscriptionEngine::Deepgram => false,
     };
     if section_missing {
         return Check::error(
@@ -187,6 +190,19 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bo
                 "Soniox engine selected but no API key is configured",
                 "Set [soniox] api_key in config.toml or export SONIOX_API_KEY",
             )
+        };
+    }
+
+    if engine == TranscriptionEngine::Deepgram {
+        // The check the engine runs at startup: endpoint, settings and key.
+        let deepgram = config.deepgram.clone().unwrap_or_default();
+        return match crate::transcribe::deepgram::check_config(&deepgram) {
+            Ok(_) => Check::ok(ID, "Deepgram cloud engine: API key configured"),
+            Err(error) => Check::error(
+                ID,
+                format!("Deepgram engine cannot start: {error}"),
+                "Fix the [deepgram] setting named above; the API key goes in DEEPGRAM_API_KEY or [deepgram] api_key",
+            ),
         };
     }
 
@@ -1508,6 +1524,51 @@ mod tests {
             engine_model_check(&config, dir, true).severity,
             Severity::Ok
         );
+    }
+
+    /// The doctor decides about Deepgram as the engine does at startup: a
+    /// missing table is the defaults, a blank key is no key, a key that
+    /// cannot be a header or a plain-HTTP endpoint is refused, and either
+    /// environment variable counts. Runs alone: it reads the environment.
+    #[test]
+    fn deepgram_key_check_matches_the_transcriber() {
+        let test = "setup::doctor::tests::deepgram_key_check_matches_the_transcriber";
+        if !crate::test_support::own_process(test, |command| {
+            for var in crate::config::DEEPGRAM_API_KEY_ENV_VARS {
+                command.env_remove(var);
+            }
+        }) {
+            return;
+        }
+        let dir = Path::new("/nonexistent");
+        let severity = |deepgram: Option<crate::config::DeepgramConfig>| {
+            let config = Config {
+                engine: TranscriptionEngine::Deepgram,
+                deepgram,
+                ..Default::default()
+            };
+            engine_model_check(&config, dir, false).severity
+        };
+        let with_key = |key: &str| crate::config::DeepgramConfig {
+            api_key: Some(key.into()),
+            ..Default::default()
+        };
+        assert_eq!(severity(None), Severity::Error);
+        assert_eq!(severity(Some(with_key(" "))), Severity::Error);
+        assert_eq!(severity(Some(with_key("key"))), Severity::Ok);
+        // A trailing `\r` is trimmed, as the engine trims it; a quote is not.
+        assert_eq!(severity(Some(with_key("abc\r"))), Severity::Ok);
+        assert_eq!(
+            severity(Some(with_key("\u{201c}abc\u{201d}"))),
+            Severity::Error
+        );
+        let insecure = crate::config::DeepgramConfig {
+            endpoint: "http://example.com/v1/listen".into(),
+            ..with_key("key")
+        };
+        assert_eq!(severity(Some(insecure)), Severity::Error);
+        std::env::set_var("DEEPGRAM_API_KEY", "key");
+        assert_eq!(severity(None), Severity::Ok);
     }
 
     #[test]
