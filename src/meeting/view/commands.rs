@@ -33,7 +33,7 @@ impl Cli {
     }
 
     /// Run `args` to completion, feeding `stdin` if given.
-    pub fn run(&self, request: &Request) -> Outcome {
+    fn execute(&self, request: &Request) -> std::io::Result<std::process::Output> {
         let mut cmd = self.command(&request.args);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd.stdin(if request.stdin.is_some() {
@@ -41,13 +41,27 @@ impl Cli {
         } else {
             Stdio::null()
         });
-        let result = cmd.spawn().and_then(|mut child| {
+        cmd.spawn().and_then(|mut child| {
             if let (Some(text), Some(mut stdin)) = (&request.stdin, child.stdin.take()) {
                 let _ = stdin.write_all(text.as_bytes());
             }
             child.wait_with_output()
-        });
-        match result {
+        })
+    }
+
+    /// Run `request` for everything it prints, such as an export; the
+    /// error is the first line of what it said instead.
+    pub fn output(&self, request: &Request) -> Result<String, String> {
+        match self.execute(request) {
+            Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(o) => Err(first_line(&String::from_utf8_lossy(&o.stderr))),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Run `request` for how it went, in one line.
+    pub fn run(&self, request: &Request) -> Outcome {
+        match self.execute(request) {
             Ok(o) => {
                 let ok = o.status.success();
                 let text = String::from_utf8_lossy(if ok { &o.stdout } else { &o.stderr });
@@ -219,6 +233,46 @@ pub fn label(meeting_id: &str, speaker: &str, name: &str) -> Request {
     }
 }
 
+/// Give the meeting a new title.
+pub fn title(meeting_id: &str, title: &str) -> Request {
+    Request {
+        what: "Rename meeting".into(),
+        args: args(["meeting", "title", meeting_id, title.trim()]),
+        stdin: None,
+        reload: true,
+    }
+}
+
+/// Delete the meeting with its folder, audio included. The view asks first,
+/// so this passes `--force`.
+pub fn delete(meeting_id: &str) -> Request {
+    Request {
+        what: "Delete".into(),
+        args: args(["meeting", "delete", meeting_id, "--force"]),
+        stdin: None,
+        reload: false,
+    }
+}
+
+/// The transcript as plain text with times and speakers, as
+/// `meeting export` writes it: what Copy transcript puts on the clipboard.
+pub fn transcript_text(meeting_id: &str) -> Request {
+    Request {
+        what: "Copy transcript".into(),
+        args: args([
+            "meeting",
+            "export",
+            meeting_id,
+            "--format",
+            "text",
+            "--timestamps",
+            "--speakers",
+        ]),
+        stdin: None,
+        reload: false,
+    }
+}
+
 /// Replace the meeting's notes with `text`.
 pub fn set_notes(meeting_id: &str, text: &str) -> Request {
     Request {
@@ -311,6 +365,10 @@ mod tests {
         assert_eq!(notes.stdin.as_deref(), Some("agenda"));
         assert_eq!(ask("m1", "q"), ["meeting", "ask", "m1", "q", "--json"]);
         assert!(stop().args.ends_with(&["stop".to_string()]));
+        let t = title("m1", " Q4 retro ");
+        assert_eq!(t.args, ["meeting", "title", "m1", "Q4 retro"]);
+        assert!(t.reload, "a past meeting is read again for its new title");
+        assert_eq!(delete("m1").args, ["meeting", "delete", "m1", "--force"]);
     }
 
     #[test]
@@ -358,6 +416,40 @@ mod tests {
         let out = cli.run(&label("m1", "fail", "x"));
         assert!(!out.ok);
         assert_eq!(out.status_line(), "Rename failed: no such meeting");
+    }
+
+    #[test]
+    fn output_is_everything_printed_or_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("fake-voxtype");
+        crate::test_support::write_script(
+            &exe,
+            "#!/bin/sh\nif [ \"$3\" = gone ]; then echo 'Error: Meeting not found' >&2; exit 1; fi\nprintf '[00:00] You:\\nHello\\n\\n[00:02] Remote:\\nHi\\n'\n",
+        );
+        let cli = Cli {
+            exe,
+            global_args: vec![],
+        };
+        assert_eq!(
+            transcript_text("m1").args,
+            [
+                "meeting",
+                "export",
+                "m1",
+                "--format",
+                "text",
+                "--timestamps",
+                "--speakers"
+            ]
+        );
+        assert_eq!(
+            cli.output(&transcript_text("m1")).unwrap(),
+            "[00:00] You:\nHello\n\n[00:02] Remote:\nHi\n"
+        );
+        assert_eq!(
+            cli.output(&transcript_text("gone")).unwrap_err(),
+            "Meeting not found"
+        );
     }
 
     #[test]

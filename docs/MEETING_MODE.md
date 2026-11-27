@@ -378,14 +378,14 @@ voxtype config set meeting.show_view_on_start false
 
 On GNOME, KDE Plasma, Sway, X11 and other desktops without Quickshell, the meeting opens in an ordinary window, `voxtype-meetings-gtk4`, which you can move, resize and alt-tab to like any other. It opens by itself when a meeting starts (`show_view_on_start`, as above), and `voxtype meeting view` opens it or brings it forward. It shows the meeting as the Quickshell view's Transcript tab does:
 
-- the state, title and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar, and a level meter for your microphone and the call while the daemon sends levels;
+- the state, title and elapsed time, with **Pause**/**Resume** and **Stop** (which asks first) in the title bar, and a level meter for your microphone and the call while the daemon sends levels. Click the title to rename the meeting (`voxtype meeting title`); a rename made elsewhere shows up at once. Once the daemon is done with a meeting, recording it and writing its summary, **Delete…** in the title bar deletes it (`voxtype meeting delete`, after asking);
 - the transcript, one colored line per utterance in the order it was spoken, following new lines until you scroll up (**Follow new lines** goes back). A corrected line is marked "(edited)", a moved line says who the diarizer gave it to ("(was Remote 1)"), highlighted lines are tinted, notes sit under their lines, deleted lines disappear, and while the meeting's audio plays (`voxtype meeting play`) the line being heard has a ▶;
-- a button per speaker that renames them (`voxtype meeting label`, once for each speaker merged under that name); **Move line to…** and **Note on line…** for the selected line; your **Notes** with **Save notes**; an **Ask** box whose answer streams in under it; and the **Summary** once it is written;
-- with no meeting running, **Start meeting** with an optional title, and your recent meetings. **Meetings** in the title bar goes back to that list.
+- a button per speaker that renames them (`voxtype meeting label`, once for each speaker merged under that name); **Move line to…** and **Note on line…** for the selected line; **Copy transcript**, which puts the whole transcript on the clipboard as `voxtype meeting export --format text --timestamps --speakers` writes it, and Ctrl+C for the selected line; once the meeting is over and its audio was kept, a button with the audio file (`mixed.opus`) that you drag into another app to hand it the file, and that opens the meeting's folder, with each side's track, when clicked; your **Notes** with **Save notes**; an **Ask** box whose answer streams in under it; and the **Summary** once it is written;
+- with no meeting running, **Start meeting** with an optional title, and your recent meetings, each with a delete button that asks first. **Meetings** in the title bar goes back to that list.
 
 The window has no waveform: the waveform, and with it the bars in each speaker's colour and the transcript following the audio, is in the Quickshell view only.
 
-A past meeting opened from the list is read-only: its transcript, speakers and notes, and its summary as saved in `summary.md`. Ask still works on it. To fix a past meeting, use the `voxtype meeting` commands, the Quickshell view or `voxtype meeting watch`. A meeting that starts while you are reading one takes over the window.
+A past meeting opened from the list is read-only: its transcript, speakers and notes, and its summary as saved in `summary.md`. Ask and Copy transcript still work on it, and its title can still be changed and the meeting deleted. To fix the rest of a past meeting, use the `voxtype meeting` commands, the Quickshell view or `voxtype meeting watch`. A meeting that starts while you are reading one takes over the window.
 
 Every button runs the matching `voxtype meeting` command, so it behaves as the command line does. A second `voxtype meeting view` brings the open window forward instead of opening another. A window the daemon opened at the start of a meeting closes if the daemon is stopped or restarted (it runs as part of the voxtype service); one you opened yourself reconnects.
 
@@ -896,6 +896,8 @@ voxtype meeting delete <meeting-id> --force
 ```
 
 Permanently deletes the meeting: its record, its folder and everything in it, audio included. Without `--force` it refuses and deletes nothing.
+
+In the [meeting window](#without-quickshell-the-meeting-window) on desktops without Quickshell, each meeting in the list has a delete button, and an open meeting has **Delete…** in its title bar. Both ask first. A meeting that is still recording, finishing or being summarized cannot be deleted there.
 
 ### Recovering an Interrupted Meeting
 
