@@ -100,6 +100,7 @@
           "dolphin"
           "omnilingual"
           "cohere"
+          "ml-diarization"
         ];
 
         onnxCudaFeatures = [
@@ -111,6 +112,7 @@
           "dolphin-cuda"
           "omnilingual-cuda"
           "cohere-cuda"
+          "ml-diarization"
         ];
 
         # Only Parakeet has AMD GPU support (via MIGraphX); other engines run on CPU
@@ -122,6 +124,7 @@
           "paraformer"
           "dolphin"
           "omnilingual"
+          "ml-diarization"
         ];
 
         runtimePathArgs = ''
