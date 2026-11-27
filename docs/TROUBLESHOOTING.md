@@ -1825,6 +1825,16 @@ Use `voxtype -vv` to see why Voxtype rejected the response. Tighten the LLM
 prompt or script so it prints no text outside the JSON array. If the same target
 appears more than once, have the command return a larger, unique `find` string.
 
+### The word "quote" is typed as a quotation mark
+
+**Cause:** With `spoken_punctuation` enabled, the bare words "quote" and
+"unquote" open and close a quotation, in the same way that "period" and
+"comma" become symbols.
+
+**Solution:** Say "double quote" for a lone `"` character. If you dictate the
+noun "quote" often, disable `spoken_punctuation` and let the engine's own
+punctuation stand.
+
 ---
 
 ## Performance Issues
