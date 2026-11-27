@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use tokio::signal::unix::{signal, SignalKind};
 
 /// Runtime-directory marker holding the last model-load failure notified at
-/// startup, so a systemd restart loop doesn't repeat the same notice.
+/// startup, so restarting into the same failure doesn't repeat the notice.
 const STARTUP_FAILURE_MARKER: &str = "startup_failure_notice";
 
 /// Send a desktop notification with optional engine icon
@@ -142,6 +142,18 @@ fn cap_warning_due(elapsed: Duration, max_duration: Duration) -> Option<Duration
 /// panic warrants discarding cached engine instances (#643).
 fn join_error_poisons_engine(e: &tokio::task::JoinError) -> bool {
     !e.is_cancelled()
+}
+
+/// The tray state for a daemon state. "Ready" would be untrue while the
+/// model the startup preload failed on has not loaded since, so idle shows
+/// the tray's error state until a recording loads it.
+#[cfg(target_os = "linux")]
+fn tray_state_for(state_name: &str, model_failed_at_startup: bool) -> crate::tray::TrayState {
+    use crate::tray::TrayState;
+    match TrayState::from_state_name(state_name) {
+        TrayState::Idle if model_failed_at_startup => TrayState::Error,
+        state => state,
+    }
 }
 
 /// Write state to file for external integrations (e.g., Waybar)
@@ -1292,6 +1304,9 @@ pub struct Daemon {
     capture_notices: crate::failure_notice::NoticeGate,
     // Same for a model that won't load.
     model_notices: crate::failure_notice::NoticeGate,
+    // The startup preload failed and no recording has loaded the model since.
+    // The tray shows its error state while this holds.
+    model_failed_at_startup: bool,
     // Background task for loading model on-demand
     model_load_task: Option<
         tokio::task::JoinHandle<
@@ -1619,6 +1634,7 @@ impl Daemon {
             model_manager: None,
             capture_notices: Default::default(),
             model_notices: Default::default(),
+            model_failed_at_startup: false,
             model_load_task: None,
             override_cache: None,
             override_load_task: None,
@@ -1924,7 +1940,7 @@ impl Daemon {
         self.note_idle_transition(state_name);
         #[cfg(target_os = "linux")]
         if let Some(tray) = &self.tray {
-            tray.update(crate::tray::TrayState::from_state_name(state_name));
+            tray.update(tray_state_for(state_name, self.model_failed_at_startup));
         }
         if let Some(ref path) = self.state_file_path {
             write_state_file(path, state_name);
@@ -3842,6 +3858,15 @@ impl Daemon {
         if result.is_ok() {
             self.recording_engine = self.recording_engine_and_model(model_override).0;
             self.model_notices.clear();
+            if self.model_failed_at_startup && model_override.is_none() {
+                // The model the startup preload could not load has loaded
+                // now, so the next startup failure is news again.
+                self.model_failed_at_startup = false;
+                let _ = std::fs::remove_file(Config::runtime_dir().join(STARTUP_FAILURE_MARKER));
+                let _ = std::fs::remove_file(
+                    Config::runtime_dir().join(crate::status_json::MODEL_UNAVAILABLE_FILE),
+                );
+            }
         } else {
             self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
         }
@@ -6456,10 +6481,44 @@ impl Daemon {
         Ok(())
     }
 
-    /// The model failed to load at startup and the daemon is about to exit.
-    /// Under systemd it is restarted every few seconds and fails the same
-    /// way, so the notice is posted once per distinct failure: a marker in
-    /// the runtime directory remembers the last one until a start succeeds.
+    /// Load the model at startup, and keep running when that fails.
+    ///
+    /// A daemon that exited here took the tray, status, OSD, meetings and
+    /// history down with it, and systemd restarted it into the same failure
+    /// every few seconds. Running on leaves all of that working, and the
+    /// first recording loads the model again the way on-demand loading
+    /// does, so a model downloaded since recovers without a restart. That
+    /// recording reports its own failure through the per-recording notice.
+    /// Sets `model_failed_at_startup` when the model did not load.
+    async fn preload_at_startup(
+        &mut self,
+        model_manager: &mut ModelManager,
+        variant_mismatch_notified: bool,
+    ) {
+        let Err(e) = self.preload_transcriber(model_manager) else {
+            tracing::info!("Model loaded, ready for voice input");
+            return;
+        };
+        self.model_failed_at_startup = true;
+        let _ = std::fs::write(
+            Config::runtime_dir().join(crate::status_json::MODEL_UNAVAILABLE_FILE),
+            format!("{e}\n"),
+        );
+        tracing::error!("Failed to preload model: {}", e);
+        tracing::warn!(
+            "Voxtype keeps running without a loaded model; the next recording tries to load it again"
+        );
+        // A variant mismatch was already explained; this failure is its
+        // consequence, and a second notice would replace the fix.
+        if !variant_mismatch_notified {
+            self.notify_startup_model_failure(&e).await;
+        }
+    }
+
+    /// The model failed to load at startup. Each restart (a config edit, a
+    /// login, `systemctl --user restart voxtype`) fails the same way, so
+    /// the notice is posted once per distinct failure: a marker in the
+    /// runtime directory remembers the last one until a model loads.
     async fn notify_startup_model_failure(&self, err: &crate::error::TranscribeError) {
         let model = self.config.model_name();
         let key = format!("{}|{}|{}", self.config.engine.name(), model, err);
@@ -6477,12 +6536,15 @@ impl Daemon {
     /// the configured engine (e.g. `engine = "parakeet"` but the wrapper
     /// dispatches to a CPU Whisper variant — the Ryan case from #450).
     /// Logged at WARN regardless, so journalctl users see it too.
+    /// Also covers a GGUF model whose `gguf_backend` this build's worker
+    /// lacks (`gguf_backend = "vulkan"` on voxtype-avx512), which otherwise
+    /// surfaces only as a worker "backend error" in the journal.
     /// Returns whether it notified.
     fn warn_on_variant_mismatch(&self) -> bool {
         let inventory = crate::setup::binary::inventory();
         let Some(mismatch) = crate::setup::variant_check::detect_mismatch(&self.config, &inventory)
         else {
-            return false;
+            return self.warn_on_gguf_backend_mismatch();
         };
 
         let active = mismatch
@@ -6497,6 +6559,26 @@ impl Daemon {
             feature = mismatch.required_feature,
             active = active,
             "Variant mismatch at daemon startup: {}",
+            body
+        );
+        crate::notification::send_sync(&title, &body);
+        true
+    }
+
+    /// The GGUF half of [`Self::warn_on_variant_mismatch`]. Returns whether
+    /// it notified.
+    fn warn_on_gguf_backend_mismatch(&self) -> bool {
+        let Some(mismatch) = crate::setup::variant_check::gguf_backend_mismatch(&self.config)
+        else {
+            return false;
+        };
+        let title = format!("Voxtype: {} unavailable", mismatch.backend_label());
+        let body = mismatch.explanation();
+        tracing::warn!(
+            section = mismatch.section,
+            backend = %mismatch.requested,
+            worker = %mismatch.worker,
+            "GGUF backend mismatch at daemon startup: {}",
             body
         );
         crate::notification::send_sync(&title, &body);
@@ -6822,23 +6904,22 @@ impl Daemon {
         // Initialize model manager for multi-model support (Whisper only)
         let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
 
+        // A previous daemon's verdict on the model is not this one's.
+        let _ = std::fs::remove_file(
+            Config::runtime_dir().join(crate::status_json::MODEL_UNAVAILABLE_FILE),
+        );
+
         // Pre-load transcription model if on_demand_loading is disabled
         if !self.config.on_demand_loading() {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
-            if let Err(e) = self.preload_transcriber(&mut model_manager) {
-                tracing::error!("Failed to preload model: {}", e);
-                // A variant mismatch was already explained; this failure is
-                // its consequence, and a second notice would replace the fix.
-                if !variant_mismatch_notified {
-                    self.notify_startup_model_failure(&e).await;
-                }
-                return Err(crate::error::VoxtypeError::Transcribe(e));
-            }
-            tracing::info!("Model loaded, ready for voice input");
+            self.preload_at_startup(&mut model_manager, variant_mismatch_notified)
+                .await;
         } else {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
         }
-        let _ = std::fs::remove_file(Config::runtime_dir().join(STARTUP_FAILURE_MARKER));
+        if !self.model_failed_at_startup {
+            let _ = std::fs::remove_file(Config::runtime_dir().join(STARTUP_FAILURE_MARKER));
+        }
 
         // Log secondary model if configured
         if let Some(ref secondary) = self.config.whisper.secondary_model {
@@ -8256,6 +8337,129 @@ while True:
         assert!(daemon.override_cache.is_none());
         assert!(daemon.model_manager.is_some());
         assert!(!daemon.apply_pending_language(true));
+    }
+
+    /// The startup preload failing used to end the daemon, and systemd
+    /// restarted it into the same failure, so the tray, status, meetings and
+    /// history went with it. It keeps running now, marked as failed so the
+    /// tray does not claim to be ready.
+    #[tokio::test]
+    async fn a_model_that_fails_to_preload_leaves_the_daemon_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.whisper.model = dir.path().join("missing.bin").to_string_lossy().into();
+        config.whisper.on_demand_loading = false;
+        config.audio.feedback.enabled = false;
+        let mut daemon = super::Daemon::new(config.clone(), None);
+        let mut manager = ModelManager::new(&config.whisper, None);
+        // A variant mismatch already explained the failure, so no desktop
+        // notice is posted from a unit test.
+        daemon.preload_at_startup(&mut manager, true).await;
+        assert!(daemon.model_failed_at_startup);
+        assert!(daemon.transcriber_preloaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_model_that_preloads_is_not_flagged() {
+        let mut config = crate::config::Config::default();
+        // On-demand loading makes preload a no-op that succeeds.
+        config.whisper.on_demand_loading = true;
+        let mut daemon = super::Daemon::new(config.clone(), None);
+        let mut manager = ModelManager::new(&config.whisper, None);
+        daemon.preload_at_startup(&mut manager, true).await;
+        assert!(!daemon.model_failed_at_startup);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_tray_does_not_say_ready_while_the_startup_model_is_broken() {
+        use crate::tray::TrayState;
+        assert_eq!(super::tray_state_for("idle", false), TrayState::Idle);
+        assert_eq!(super::tray_state_for("idle", true), TrayState::Error);
+        // Busy states are still shown as they are.
+        assert_eq!(
+            super::tray_state_for("recording", true),
+            TrayState::Recording
+        );
+        assert_eq!(
+            super::tray_state_for("transcribing", true),
+            TrayState::Transcribing
+        );
+    }
+
+    /// After a failed startup preload, the first recording loads the model
+    /// again, so a model fixed since then works without a restart, and the
+    /// startup marker is cleared so the next startup failure notifies.
+    #[cfg(all(target_os = "linux", feature = "cohere-gguf"))]
+    #[tokio::test]
+    async fn a_model_that_failed_at_startup_loads_on_the_next_recording() {
+        if std::env::var_os("VOXTYPE_PRELOAD_RECOVERY_CHILD").is_none() {
+            let fixture = tempfile::tempdir().unwrap();
+            let worker = fixture.path().join("worker.py");
+            let python = std::process::Command::new("python3")
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output()
+                .expect("python3 is required for the isolated protocol fixture");
+            assert!(python.status.success());
+            crate::test_support::write_script(
+                &worker,
+                &format!(
+                    "#!{}\n{}",
+                    String::from_utf8(python.stdout).unwrap().trim(),
+                    r#"import sys,json,struct
+print('READY',flush=True)
+while True:
+    count=sys.stdin.buffer.read(4)
+    if not count: break
+    size=struct.unpack('<I',count)[0]*4
+    data=b''
+    while len(data)<size: data+=sys.stdin.buffer.read(size-len(data))
+    print(json.dumps({'ok':True,'text':'RECOVERED'}),flush=True)
+"#
+                ),
+            );
+            let runtime = fixture.path().join("runtime");
+            std::fs::create_dir_all(&runtime).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::a_model_that_failed_at_startup_loads_on_the_next_recording",
+                    "--nocapture",
+                ])
+                .env("VOXTYPE_PRELOAD_RECOVERY_CHILD", "1")
+                .env("VOXTYPE_GGUF_WORKER", &worker)
+                .env("XDG_RUNTIME_DIR", &runtime)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("cohere-transcribe-03-2026-Q4_K_M.gguf");
+        let mut cfg = crate::config::Config::default();
+        cfg.set_model_for(
+            crate::config::TranscriptionEngine::Cohere,
+            model.to_str().unwrap(),
+        );
+        cfg.cohere.as_mut().unwrap().on_demand_loading = false;
+        cfg.audio.feedback.enabled = false;
+        let marker = Config::runtime_dir().join(super::STARTUP_FAILURE_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "earlier failure").unwrap();
+
+        let mut daemon = super::Daemon::new(cfg.clone(), None);
+        let mut manager = ModelManager::new(&cfg.whisper, None);
+        // The model file does not exist yet.
+        daemon.preload_at_startup(&mut manager, true).await;
+        assert!(daemon.model_failed_at_startup);
+        assert!(daemon.transcriber_preloaded.is_none());
+
+        std::fs::write(&model, b"protocol fixture, not a model").unwrap();
+        daemon.prepare_for_recording(None);
+        let transcriber = daemon.get_transcriber_for_recording(None).await.unwrap();
+        assert_eq!(transcriber.transcribe(&[0.0; 16]).unwrap(), "RECOVERED");
+        assert!(!daemon.model_failed_at_startup);
+        assert!(!marker.exists());
     }
 
     use super::*;

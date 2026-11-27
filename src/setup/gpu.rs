@@ -290,7 +290,19 @@ pub struct GpuInfo {
 
 /// Detect if we're in tiered mode (pre-built packages) or simple mode (source build)
 fn is_tiered_mode() -> bool {
-    Path::new(VOXTYPE_LIB_DIR).join("voxtype-avx2").exists()
+    is_tiered_layout(Path::new(VOXTYPE_LIB_DIR))
+}
+
+/// A packaged install ships one or more CPU builds side by side. The AUR
+/// package installs only the variants a machine can run, so a CPU without
+/// AVX2 gets `baseline` and `vulkan` and no `voxtype-avx2`; looking for
+/// that one file alone took such an install for a source build and
+/// skipped the AVX2 check before switching to Vulkan.
+fn is_tiered_layout(lib_dir: &Path) -> bool {
+    ["voxtype-baseline", "voxtype-avx2", "voxtype-avx512"]
+        .iter()
+        .any(|b| lib_dir.join(b).exists())
+        || lib_dir.join("package-variants").exists()
 }
 
 /// Detect which backend is currently active
@@ -1634,6 +1646,26 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     use super::pick_cpu_backend;
+
+    /// The AUR package installs only what the CPU can run: `baseline` and
+    /// `vulkan` without AVX2. That is still a packaged install.
+    #[test]
+    fn any_cpu_build_or_the_variant_file_marks_a_packaged_install() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_tiered_layout(dir.path()), "empty dir is not a package");
+        std::fs::write(dir.path().join("voxtype-vulkan"), "").unwrap();
+        assert!(!is_tiered_layout(dir.path()), "vulkan alone is not tiered");
+        for cpu in [
+            "voxtype-baseline",
+            "voxtype-avx2",
+            "voxtype-avx512",
+            "package-variants",
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(d.path().join(cpu), "").unwrap();
+            assert!(is_tiered_layout(d.path()), "{cpu}");
+        }
+    }
     use super::{cpu_fallback_hint, Backend};
 
     /// `setup gpu --disable` on a pre-AVX2 machine used to pick voxtype-avx2.

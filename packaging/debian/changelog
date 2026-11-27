@@ -42,6 +42,15 @@ voxtype (1.3.2-1) unstable; urgency=medium
   * Release .deb and .rpm, the source .rpm and install-arch.sh lead their
     setup steps with compositor keybindings; the input group is only the
     fallback for the built-in hotkey
+  * A model that fails to load at startup no longer stops the daemon and
+    restart-loops it: the tray, status, meetings and history keep working,
+    the tray shows an error, and the next recording loads the model again
+  * config validate-selection, doctor and the daemon's startup check catch
+    a GGUF gguf_backend the active build's worker lacks, such as vulkan on
+    the avx512 build, and name the fix
+  * Packaged installs that ship only baseline or avx512 (the AUR package on
+    a CPU without AVX2) are no longer taken for a source build, so setup gpu
+    --enable refuses Vulkan there too
 
  -- Peter Jackson <pete@peteonrails.com>  Sat, 21 Nov 2026 18:00:00 +0000
 

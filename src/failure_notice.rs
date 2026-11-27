@@ -88,7 +88,8 @@ fn is_remote(config: &Config) -> bool {
 ///
 /// `model` is the model that was being loaded (the configured one, or the
 /// secondary model chosen for this recording). `at_startup` says the daemon
-/// is exiting because of it, rather than skipping one recording.
+/// started without it and every recording will fail until it is fixed,
+/// rather than one recording having been skipped.
 pub fn model_load_failed(
     config: &Config,
     model: &str,
@@ -99,7 +100,7 @@ pub fn model_load_failed(
     let engine = config.engine.name();
     let label = format!("{:?}", config.engine);
     let consequence = if at_startup {
-        "Voxtype could not start."
+        "Voxtype is running, but dictation will fail until this is fixed."
     } else {
         "Nothing was transcribed."
     };
@@ -289,7 +290,9 @@ mod tests {
         let n = model_load_failed(&config, "/models/x.bin", &err, true);
         assert!(n.body.contains("Fix the [whisper] model path"));
         assert!(!n.body.contains("--download"));
-        assert!(n.body.contains("Voxtype could not start."));
+        assert!(n
+            .body
+            .contains("Voxtype is running, but dictation will fail until this is fixed."));
     }
 
     #[test]
