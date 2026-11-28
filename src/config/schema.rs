@@ -957,7 +957,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::String,
         "Engine",
         "Model",
-        "Soniox model name.",
+        "Soniox model name. Unset picks stt-rt-v6 for live dictation and stt-async-v6 for the async API and meetings.",
     )
     .for_engine("soniox"),
     spec(
@@ -3467,7 +3467,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "soniox.api_key" => opt_str(so().api_key.as_ref()),
         "soniox.region" => json!(so().region),
-        "soniox.model" => json!(so().model),
+        // Unset resolves per mode, so report the model the daemon would
+        // send rather than null.
+        "soniox.model" => json!(so().resolved_model()),
         "soniox.language_hints_strict" => json!(so().language_hints_strict),
         "soniox.streaming" => json!(so().streaming),
         "soniox.type_partials" => json!(so().type_partials),
@@ -4756,5 +4758,23 @@ mod tests {
             missing.is_empty(),
             "config fields with no schema key: {missing:?}"
         );
+    }
+
+    #[test]
+    fn unset_soniox_model_resolves_to_the_model_for_the_mode() {
+        let mut cfg = Config::default();
+        assert_eq!(resolve("soniox.model", &cfg), Some(json!("stt-rt-v6")));
+
+        cfg.soniox = Some(crate::config::SonioxConfig {
+            async_api: true,
+            ..Default::default()
+        });
+        assert_eq!(resolve("soniox.model", &cfg), Some(json!("stt-async-v6")));
+
+        cfg.soniox = Some(crate::config::SonioxConfig {
+            model: Some("stt-rt-preview".into()),
+            ..Default::default()
+        });
+        assert_eq!(resolve("soniox.model", &cfg), Some(json!("stt-rt-preview")));
     }
 }
