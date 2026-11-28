@@ -362,7 +362,7 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
-* Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.2-1
+* Fri Nov 27 2026 Peter Jackson <pete@peteonrails.com> - 1.3.2-1
 - Soniox sends the API key in the WebSocket handshake, ahead of Soniox's
   2027-01-15 cutoff, and [soniox] region selects US, EU, Japan or India
   hosts (#864, #871)
