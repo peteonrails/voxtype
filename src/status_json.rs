@@ -389,6 +389,18 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// Run the calling test in a process of its own with an empty runtime
+    /// directory. The idle tooltip depends on `model_unavailable` in the
+    /// runtime directory, so a marker in the session's real one (from a
+    /// daemon whose model failed to load) would change the output these
+    /// tests pin. Returns false in the parent: `if !...{ return; }`.
+    fn in_scratch_runtime(test: &str) -> bool {
+        let scratch = tempfile::tempdir().unwrap();
+        crate::test_support::own_process(test, |child| {
+            child.env("XDG_RUNTIME_DIR", scratch.path());
+        })
+    }
+
     /// Regression for #563: the daemon runs a packaged variant, so its label
     /// wins no matter where /usr/bin/voxtype points. This covers both the
     /// systemd `ExecStart=` override to a different installed variant and the
@@ -477,6 +489,9 @@ mod tests {
 
     #[test]
     fn format_state_json_pins_byte_exact_output() {
+        if !in_scratch_runtime("status_json::tests::format_state_json_pins_byte_exact_output") {
+            return;
+        }
         // Deterministic icons so the test doesn't depend on which theme is
         // currently the default. Use ASCII placeholders to keep the literal
         // strings readable.
@@ -541,6 +556,11 @@ mod tests {
     /// #518 (no meeting data in `voxtype status --format json`).
     #[test]
     fn format_state_json_appends_meeting_fields_when_extended() {
+        if !in_scratch_runtime(
+            "status_json::tests::format_state_json_appends_meeting_fields_when_extended",
+        ) {
+            return;
+        }
         let icons = config::ResolvedIcons {
             idle: "I".to_string(),
             recording: "R".to_string(),
@@ -659,6 +679,11 @@ mod tests {
     /// appended, and the tooltip gains one line only while an offer is open.
     #[test]
     fn model_upgrade_is_appended_and_flagged_in_the_tooltip() {
+        if !in_scratch_runtime(
+            "status_json::tests::model_upgrade_is_appended_and_flagged_in_the_tooltip",
+        ) {
+            return;
+        }
         let icons = config::ResolvedIcons {
             idle: "I".to_string(),
             recording: "R".to_string(),
