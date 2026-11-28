@@ -728,6 +728,28 @@ mod tests {
     }
 
     #[test]
+    fn luddite_example_package_resolves_custom_qml_with_shell_chrome() {
+        let package_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/osd-packages/luddite");
+        let qml_entry = package_dir.join("LudditeOsd.qml");
+
+        assert!(package_dir.join(PACKAGE_MANIFEST).is_file());
+        assert!(qml_entry.is_file());
+        assert!(package_dir.join("LudditeIcon.qml").is_file());
+        assert!(package_dir.join("LudditeEdge.qml").is_file());
+
+        let style_name = package_dir.to_string_lossy().to_string();
+        let style = resolve_runtime_style(&OsdConfig::default(), Some(&style_name)).unwrap();
+
+        assert_eq!(style.palette, OsdPaletteSource::Omarchy);
+        assert_eq!(style.layout, OsdLayout::Shell);
+        assert_eq!(style.custom_qml.as_deref(), Some(qml_entry.as_path()));
+        // The QML reads the popup chrome from the shell tokens, which only
+        // the shell layout resolves.
+        assert!(style.shell.is_some());
+    }
+
+    #[test]
     fn minimal_manifest_preserves_user_layout_frame_and_visual() {
         let tmp = tempdir().unwrap();
         fs::write(

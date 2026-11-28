@@ -1,0 +1,9 @@
+name = "luddite"
+version = "0.1.0"
+description = "Luddite: a compact Omarchy Shell popup with a mute-aware mic, level meter, quiet-input warning and timer."
+palette = "omarchy"
+# The shell layout makes the launcher resolve Omarchy's popup chrome
+# (border gradient, alpha, width, spacing scale, font size, rounding),
+# which the custom QML reads from theme.config.shell.
+layout = "shell"
+qml_entry = "LudditeOsd.qml"

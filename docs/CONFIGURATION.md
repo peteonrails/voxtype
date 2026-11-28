@@ -6056,7 +6056,8 @@ Voxtype ships working examples to copy from. Packaged installs place style
 packages under `/usr/share/voxtype/osd/` and recipe presets under
 `/usr/share/voxtype/osd-recipes/`; in the source tree they live in
 [`examples/osd-packages/`](../examples/osd-packages/) (full packages,
-including the `aegis-hud` custom-QML showcase) and
+including the `aegis-hud` custom-QML showcase and `luddite`, a custom-QML
+popup in Omarchy Shell chrome with a mute-aware mic and quiet-input warning) and
 [`examples/osd-recipes/`](../examples/osd-recipes/) (recipe presets).
 Recipes are plain `[osd]` config snippets, not packages. Apply one with
 `voxtype setup osd --recipe <name>` rather than copying its keys by hand: the
