@@ -52,7 +52,7 @@ voxtype (1.3.2-1) unstable; urgency=medium
     a CPU without AVX2) are no longer taken for a source build, so setup gpu
     --enable refuses Vulkan there too
 
- -- Peter Jackson <pete@peteonrails.com>  Sat, 21 Nov 2026 18:00:00 +0000
+ -- Peter Jackson <pete@peteonrails.com>  Fri, 27 Nov 2026 18:00:00 +0000
 
 voxtype (1.3.1-1) unstable; urgency=medium
 
