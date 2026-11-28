@@ -5961,6 +5961,19 @@ impl Daemon {
                         );
                     }
 
+                    // Text processing left nothing (a take of only "um" or
+                    // "uh"): the take ends like an empty one instead of
+                    // running the command on nothing. A bare "submit" still
+                    // presses Enter.
+                    if processed_text.trim().is_empty() && !smart_submit {
+                        tracing::debug!(
+                            "Nothing left after text processing, skipping post-processing"
+                        );
+                        self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
+                        self.reset_to_idle(state).await;
+                        return;
+                    }
+
                     // Get context from last dictation if within 60 seconds
                     let recent_context = self.last_dictation.as_ref().and_then(|(text, when)| {
                         if when.elapsed() < Duration::from_secs(60) {
@@ -8490,6 +8503,61 @@ while True:
         fn name(&self) -> &'static str {
             "recording"
         }
+    }
+
+    /// A take of only filler words does not run the post-process command.
+    #[tokio::test]
+    async fn a_take_of_only_filler_words_skips_post_processing() {
+        let scratch = TempDir::new().unwrap();
+        if !crate::test_support::own_process(
+            "daemon::tests::a_take_of_only_filler_words_skips_post_processing",
+            |child| {
+                child
+                    .env("HOME", scratch.path())
+                    .env("XDG_RUNTIME_DIR", scratch.path().join("runtime"))
+                    .env("XDG_STATE_HOME", scratch.path().join("state"))
+                    .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+                    .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                    .env_remove("WAYLAND_DISPLAY")
+                    .env_remove("DISPLAY");
+            },
+        ) {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let ran = dir.path().join("post-process-ran");
+        let target = dir.path().join("dictation.txt");
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        config.text.filter_filler_words = true;
+        config.output.mode = OutputMode::File;
+        config.output.file_path = Some(target.clone());
+        config.output.fallback_to_clipboard = false;
+        config.output.post_process = Some(crate::config::PostProcessConfig {
+            command: format!("touch '{}'; cat", ran.display()),
+            timeout_ms: 5000,
+            ..Default::default()
+        });
+
+        let mut daemon = Daemon::new(config, None);
+        let mut state = State::Transcribing { audio: Vec::new() };
+        daemon
+            .handle_transcription_result(&mut state, Ok(Ok("um uh".to_string())))
+            .await;
+
+        assert!(state.is_idle());
+        assert!(
+            !ran.exists(),
+            "the post-process command ran for a take of only fillers"
+        );
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "nothing was output"
+        );
     }
 
     /// The dictation path end to end (text cleanup, post-processing, file
