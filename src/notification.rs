@@ -127,6 +127,14 @@ mod linux {
     /// stalling the daemon's event loop.
     const DBUS_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// Upper bound on one notify-send run. notify-send has no timeout of its
+    /// own: against a wedged server it waited 155 s, and the daemon with it.
+    const NOTIFY_SEND_TIMEOUT: Duration = Duration::from_secs(3);
+
+    /// What a timed-out run reports; a server that wedged notify-send is not
+    /// asked again over D-Bus for the same notification.
+    const TIMED_OUT: &str = "timed out";
+
     /// The hicolor theme name of voxtype's own icon, installed system-wide by
     /// the packages and per user by `voxtype setup icons`.
     const ICON_NAME: &str = "voxtype";
@@ -301,6 +309,8 @@ mod linux {
         Missing,
         /// Could not be started for another reason.
         Failed(String),
+        /// Started, but the server never answered in time.
+        TimedOut,
     }
 
     /// Which route delivered a notification.
@@ -393,6 +403,13 @@ mod linux {
                 Err(e) => e,
             }
         };
+        if notify_send_error == TIMED_OUT {
+            state.report_undeliverable(
+                &notify_send_error,
+                "not tried: the server did not answer notify-send",
+            );
+            return None;
+        }
 
         match transport
             .dbus_notify(msg, state.last_id.load(Ordering::Relaxed))
@@ -436,6 +453,7 @@ mod linux {
                     return Ok(Route::NotifySend);
                 }
                 Attempt::Missing => return Err(mark_missing(state)),
+                Attempt::TimedOut => return Err(TIMED_OUT.to_string()),
                 // Either a libnotify too old for --print-id, or no server.
                 // The plain invocation below tells the two apart.
                 Attempt::Rejected | Attempt::Failed(_) => {}
@@ -460,6 +478,7 @@ mod linux {
             Attempt::Missing => Err(mark_missing(state)),
             Attempt::Rejected => Err("exited with an error".to_string()),
             Attempt::Failed(e) => Err(e),
+            Attempt::TimedOut => Err(TIMED_OUT.to_string()),
         }
     }
 
@@ -475,13 +494,16 @@ mod linux {
 
     impl Transport for System {
         async fn notify_send(&self, args: Vec<String>) -> Attempt {
-            match tokio::process::Command::new("notify-send")
+            let run = tokio::process::Command::new("notify-send")
                 .args(&args)
                 .stdin(Stdio::null())
                 .stderr(Stdio::null())
-                .output()
-                .await
-            {
+                .kill_on_drop(true)
+                .output();
+            let Ok(result) = tokio::time::timeout(NOTIFY_SEND_TIMEOUT, run).await else {
+                return Attempt::TimedOut;
+            };
+            match result {
                 Ok(out) if out.status.success() => Attempt::Delivered(parse_id(&out.stdout)),
                 Ok(_) => Attempt::Rejected,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Attempt::Missing,
@@ -713,6 +735,17 @@ mod linux {
             );
             assert!(!state.replace_unsupported.load(Ordering::Relaxed));
             assert!(!state.notify_send_missing.load(Ordering::Relaxed));
+        }
+
+        #[tokio::test]
+        async fn a_wedged_server_is_given_up_on_after_one_timed_out_run() {
+            let state = Delivery::new();
+            let fake = Fake::new(vec![Attempt::TimedOut], Ok(5));
+            let route = deliver(&fake, &state, &msg(Lifetime::Millis(2000))).await;
+            assert_eq!(route, None);
+            assert_eq!(fake.calls(), vec!["notify-send -p"]);
+            assert!(state.warned_undeliverable.load(Ordering::Relaxed));
+            assert!(!state.replace_unsupported.load(Ordering::Relaxed));
         }
 
         #[tokio::test]
