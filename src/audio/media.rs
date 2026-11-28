@@ -27,6 +27,9 @@
 pub struct DuckedMediaStream {
     index: u32,
     volumes: Vec<String>,
+    /// Lowercase identities of the app behind the stream (process binary,
+    /// application name): how a stream the app re-creates is recognized.
+    app: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -217,7 +220,13 @@ mod imp {
     pub async fn duck_playing_audio(
         volume_percent: u8,
         fade_ms: u32,
+        paused_apps: &[String],
     ) -> (Vec<DuckedMediaStream>, Option<JoinHandle<()>>) {
+        // A watch from the last restore must not see this duck's levels, nor
+        // fix a stream while its originals are being read here.
+        if let Some(watch) = RESPAWN_WATCH.lock().ok().and_then(|mut w| w.take()) {
+            watch.abort();
+        }
         let streams = match list_active_sink_inputs().await {
             Ok(streams) => streams,
             Err(e) => {
@@ -225,6 +234,14 @@ mod imp {
                 return (Vec::new(), None);
             }
         };
+        // A paused player's stream is about to go quiet (or away) by itself.
+        // Ducking it too is what left music at the ducked level: the player
+        // re-creates its stream on resume and PipeWire's stream-restore hands
+        // the new one the volume we set, under an index restore never sees.
+        let streams: Vec<DuckedMediaStream> = streams
+            .into_iter()
+            .filter(|s| !same_app(&s.app, paused_apps))
+            .collect();
 
         if streams.is_empty() {
             debug!("No active audio streams found for media ducking");
@@ -250,6 +267,7 @@ mod imp {
         if streams.is_empty() {
             return;
         }
+        let streams_snapshot = streams.clone();
 
         ramp_streams(&streams, ducked_percent.min(150), 100, fade_ms).await;
 
@@ -277,9 +295,149 @@ mod imp {
         }
 
         debug!("Restored {restored}/{total} ducked media stream(s)");
+        // Watched in the background: the next take must not wait on it.
+        let pct = ducked_percent.min(150);
+        let watch =
+            tokio::spawn(async move { restore_recreated_streams(&streams_snapshot, pct).await });
+        if let Ok(mut slot) = RESPAWN_WATCH.lock() {
+            if let Some(previous) = slot.replace(watch.abort_handle()) {
+                previous.abort();
+            }
+        }
+    }
+
+    static RESPAWN_WATCH: std::sync::Mutex<Option<tokio::task::AbortHandle>> =
+        std::sync::Mutex::new(None);
+
+    /// Streams an app re-created while ducked come back at the ducked level
+    /// (stream-restore remembered it). Watch briefly for them and put them
+    /// back at the app's original volume.
+    async fn restore_recreated_streams(ducked: &[DuckedMediaStream], ducked_percent: u8) {
+        let known: Vec<u32> = ducked.iter().map(|s| s.index).collect();
+        let mut fixed: Vec<u32> = Vec::new();
+        for _ in 0..RESPAWN_WATCH_STEPS {
+            let Ok(current) = list_sink_inputs(true).await else {
+                return;
+            };
+            let gone: Vec<&DuckedMediaStream> = ducked
+                .iter()
+                .filter(|d| !current.iter().any(|c| c.index == d.index))
+                .collect();
+            // Nothing gone yet: a player re-creates its stream a moment
+            // after Play, so keep watching for the whole window.
+            if gone.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(RESPAWN_WATCH_STEP_MS)).await;
+                continue;
+            }
+            let fresh: Vec<&DuckedMediaStream> = current
+                .iter()
+                .filter(|c| !known.contains(&c.index) && !fixed.contains(&c.index))
+                .collect();
+            for stream in fresh {
+                // Same app and at that stream's ducked level: two streams of
+                // one app can have different volumes.
+                let Some(original) = gone.iter().find(|d| {
+                    same_app(&stream.app, &d.app)
+                        && volumes_near(
+                            &stream.volumes,
+                            &scaled_volumes(&d.volumes, ducked_percent),
+                        )
+                }) else {
+                    continue;
+                };
+                debug!(stream = stream.index, "Restoring a re-created media stream");
+                let ok = Command::new("pactl")
+                    .arg("set-sink-input-volume")
+                    .arg(stream.index.to_string())
+                    .args(&original.volumes)
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    fixed.push(stream.index);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(RESPAWN_WATCH_STEP_MS)).await;
+        }
+    }
+
+    /// How long restore keeps watching for re-created streams (4 s): a
+    /// resumed player opens its new stream a moment after `Play`.
+    const RESPAWN_WATCH_STEPS: u32 = 20;
+    const RESPAWN_WATCH_STEP_MS: u64 = 200;
+
+    fn volumes_near(a: &[String], b: &[String]) -> bool {
+        let num = |v: &String| v.trim().trim_end_matches('%').parse::<f32>().ok();
+        !a.is_empty()
+            && a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| match (num(x), num(y)) {
+                (Some(x), Some(y)) => (x - y).abs() <= 2.0,
+                _ => false,
+            })
+    }
+
+    /// Whether two identity lists name the same app ("spotify" vs
+    /// "Spotify", "chromium" vs "Chromium").
+    fn same_app(a: &[String], b: &[String]) -> bool {
+        a.iter().any(|x| b.iter().any(|y| x.len() >= 3 && x == y))
+    }
+
+    /// Identities of the apps behind MPRIS players (process binary and the
+    /// player's Identity / DesktopEntry), for leaving their streams alone.
+    pub async fn player_apps(players: &[String]) -> Vec<String> {
+        if players.is_empty() {
+            return Vec::new();
+        }
+        let Ok(conn) = Connection::session().await else {
+            return Vec::new();
+        };
+        let Ok(dbus) = DBusProxy::new(&conn).await else {
+            return Vec::new();
+        };
+        let mut apps = Vec::new();
+        for name in players {
+            if let Ok(bus) = zbus::names::BusName::try_from(name.as_str()) {
+                if let Ok(pid) = dbus.get_connection_unix_process_id(bus).await {
+                    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                        apps.push(app_key(comm.trim()));
+                    }
+                    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+                        if let Some(base) = exe.file_name().and_then(|b| b.to_str()) {
+                            apps.push(app_key(base));
+                        }
+                    }
+                }
+            }
+            if let Ok(proxy) =
+                Proxy::new(&conn, name.as_str(), MPRIS_PATH, "org.mpris.MediaPlayer2").await
+            {
+                for prop in ["Identity", "DesktopEntry"] {
+                    if let Ok(v) = proxy.get_property::<String>(prop).await {
+                        apps.push(app_key(&v));
+                    }
+                }
+            }
+        }
+        apps.retain(|a| !a.is_empty());
+        apps.sort();
+        apps.dedup();
+        apps
+    }
+
+    fn app_key(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
     }
 
     async fn list_active_sink_inputs() -> Result<Vec<DuckedMediaStream>, String> {
+        list_sink_inputs(false).await
+    }
+
+    /// Sink inputs other than voxtype's own, playing ones only unless
+    /// `include_inactive` (the re-created-stream watch also sees paused ones).
+    async fn list_sink_inputs(include_inactive: bool) -> Result<Vec<DuckedMediaStream>, String> {
         // The client list only helps recognise voxtype's own streams, so it
         // is fetched alongside the streams, not after them, and recording
         // start waits no longer than it did for one `pactl` call.
@@ -288,7 +446,12 @@ mod imp {
             debug!("Failed to list audio clients, matching own streams by name only: {e}");
             Value::Null
         });
-        Ok(parse_sink_inputs(&streams?, &clients, std::process::id()))
+        Ok(parse_sink_inputs(
+            &streams?,
+            &clients,
+            std::process::id(),
+            include_inactive,
+        ))
     }
 
     async fn pactl_list(what: &str) -> Result<Value, String> {
@@ -305,10 +468,15 @@ mod imp {
         serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
     }
 
-    /// Active sink inputs that ducking may lower: everything playing except
-    /// voxtype's own streams. `clients` is `pactl -f json list clients`, or
-    /// `Value::Null` when that could not be read.
-    fn parse_sink_inputs(value: &Value, clients: &Value, own_pid: u32) -> Vec<DuckedMediaStream> {
+    /// Sink inputs that ducking may lower: everything except voxtype's own
+    /// streams, playing ones only unless `include_inactive`. `clients` is
+    /// `pactl -f json list clients`, or `Value::Null` when that could not be read.
+    fn parse_sink_inputs(
+        value: &Value,
+        clients: &Value,
+        own_pid: u32,
+        include_inactive: bool,
+    ) -> Vec<DuckedMediaStream> {
         let Some(streams) = value.as_array() else {
             return Vec::new();
         };
@@ -316,11 +484,12 @@ mod imp {
         streams
             .iter()
             .filter(|stream| {
-                !stream.get("mute").and_then(Value::as_bool).unwrap_or(false)
-                    && !stream
-                        .get("corked")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
+                include_inactive
+                    || (!stream.get("mute").and_then(Value::as_bool).unwrap_or(false)
+                        && !stream
+                            .get("corked")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false))
             })
             .filter(|stream| {
                 let own = is_voxtype_stream(stream, clients, own_pid);
@@ -334,12 +503,29 @@ mod imp {
             })
             .filter_map(|stream| {
                 let index = value_as_u32(stream.get("index")?)?;
+                let prop = |k: &str| {
+                    stream
+                        .get("properties")
+                        .and_then(|p| p.get(k))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                };
                 let volumes = stream_volumes(stream);
                 if volumes.is_empty() {
-                    None
-                } else {
-                    Some(DuckedMediaStream { index, volumes })
+                    return None;
                 }
+                let mut app: Vec<String> =
+                    [prop("application.process.binary"), prop("application.name")]
+                        .into_iter()
+                        .map(app_key)
+                        .filter(|a| !a.is_empty())
+                        .collect();
+                app.dedup();
+                Some(DuckedMediaStream {
+                    index,
+                    volumes,
+                    app,
+                })
             })
             .collect()
     }
@@ -593,7 +779,7 @@ mod imp {
                 }
             ]);
 
-            let streams = parse_sink_inputs(&value, &Value::Null, 1);
+            let streams = parse_sink_inputs(&value, &Value::Null, 1, false);
             assert_eq!(streams.len(), 1);
             assert_eq!(streams[0].index, 42);
             assert_eq!(streams[0].volumes, vec!["75%", "80%"]);
@@ -612,7 +798,7 @@ mod imp {
         }
 
         fn ducked_indexes(streams: &Value, clients: &Value, own_pid: u32) -> Vec<u32> {
-            parse_sink_inputs(streams, clients, own_pid)
+            parse_sink_inputs(streams, clients, own_pid, false)
                 .iter()
                 .map(|stream| stream.index)
                 .collect()
@@ -718,6 +904,37 @@ mod imp {
         }
 
         #[test]
+        fn own_streams_are_never_media_and_apps_are_named() {
+            let value: Value = serde_json::json!([
+                {
+                    "index": 7, "mute": false, "corked": false,
+                    "properties": { "application.process.id": "99", "application.process.binary": "voxtype" },
+                    "volume": { "mono": { "value_percent": "100%" } }
+                },
+                {
+                    "index": 8, "mute": false, "corked": true,
+                    "properties": { "application.process.binary": "spotify", "application.name": "Spotify" },
+                    "volume": { "mono": { "value_percent": "90%" } }
+                }
+            ]);
+            assert!(parse_sink_inputs(&value, &Value::Null, 99, false).is_empty());
+            let all = parse_sink_inputs(&value, &Value::Null, 99, true);
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].app, vec!["spotify".to_string()]);
+            assert!(same_app(&all[0].app, &["spotify".into()]));
+            assert!(!same_app(&all[0].app, &["mpv".into()]));
+            // Too short to name an app on its own.
+            assert!(!same_app(&["vl".into()], &["vl".into()]));
+        }
+
+        #[test]
+        fn a_recreated_stream_is_recognized_by_its_ducked_volume() {
+            let ducked = scaled_volumes(&["90%".into()], 20);
+            assert!(volumes_near(&ducked, &scaled_volumes(&["90%".into()], 20)));
+            assert!(!volumes_near(&["90%".into()], &ducked));
+        }
+
+        #[test]
         fn scales_stream_volumes_relative_to_current_values() {
             // 70% of the amplitude = cube root of 0.7 on the cubic
             // percentage scale, applied per channel.
@@ -755,7 +972,9 @@ mod imp {
 }
 
 #[cfg(target_os = "linux")]
-pub use imp::{duck_playing_audio, pause_playing_players, restore_ducked_audio, resume_players};
+pub use imp::{
+    duck_playing_audio, pause_playing_players, player_apps, restore_ducked_audio, resume_players,
+};
 
 // On non-Linux targets MPRIS doesn't apply. Keep the public API stable
 // so the daemon doesn't need to cfg-gate every call site.
@@ -771,8 +990,14 @@ pub async fn resume_players(_players: Vec<String>) {}
 pub async fn duck_playing_audio(
     _volume_percent: u8,
     _fade_ms: u32,
+    _paused_apps: &[String],
 ) -> (Vec<DuckedMediaStream>, Option<tokio::task::JoinHandle<()>>) {
     (Vec::new(), None)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn player_apps(_players: &[String]) -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(not(target_os = "linux"))]
