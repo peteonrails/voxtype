@@ -747,9 +747,10 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
 # Voxtype post-installation script
 #
 # Binary variants (x86_64):
-#   voxtype-avx2:   CPU - Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
-#   voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
-#   voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
+#   voxtype-baseline: CPU - x86-64-v2, for CPUs without AVX2 (Ivy Bridge and older)
+#   voxtype-avx2:     CPU - Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
+#   voxtype-avx512:   CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
+#   voxtype-vulkan:   GPU - Vulkan acceleration (NVIDIA, AMD, Intel); needs AVX2
 #
 # The /usr/bin/voxtype wrapper automatically selects the best binary for your CPU.
 
@@ -758,10 +759,15 @@ if command -v restorecon >/dev/null 2>&1; then
     restorecon /usr/bin/voxtype 2>/dev/null || true
 fi
 
-# Detect CPU variant that will be used
-VARIANT="avx2"
-if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+# The CPU variant the wrapper will pick. Keep in step with voxtype-wrapper.sh.
+NO_AVX2=""
+if grep -qw avx512f /proc/cpuinfo 2>/dev/null; then
     VARIANT="avx512"
+elif grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
+    VARIANT="avx2"
+else
+    VARIANT="baseline"
+    NO_AVX2=1
 fi
 
 # Detect GPU for Vulkan acceleration recommendation
@@ -788,7 +794,8 @@ echo "=== Voxtype Post-Installation ==="
 echo ""
 echo "CPU backend: $VARIANT (auto-detected)"
 
-if [ -n "$GPU_DETECTED" ]; then
+# The Vulkan build needs AVX2, and `setup gpu --enable` refuses it without.
+if [ -n "$GPU_DETECTED" ] && [ -z "$NO_AVX2" ]; then
     echo ""
     echo "GPU detected: $GPU_DETECTED"
     echo ""
@@ -801,15 +808,20 @@ fi
 echo ""
 echo "To complete setup:"
 echo ""
-echo "  1. Add your user to the 'input' group:"
-echo "     sudo usermod -aG input \$USER"
+echo "  1. Bind push-to-talk in your compositor (no special permissions):"
+echo "       voxtype setup compositor hyprland   (or sway, river)"
+echo "     or bind 'voxtype record toggle' in your desktop's keyboard shortcuts,"
+echo "     then set enabled = false under [hotkey] in ~/.config/voxtype/config.toml"
 echo ""
-echo "  2. Log out and back in for group changes to take effect"
+echo "     If you can't bind keys in your desktop, the built-in hotkey can"
+echo "     read the keyboard instead if you join the 'input' group, but that"
+echo "     lets every program read every keystroke:"
+echo "       sudo usermod -aG input \$USER   (then log out and back in)"
 echo ""
-echo "  3. Download a model (Whisper or Parakeet):"
+echo "  2. Download a model (Whisper or Parakeet):"
 echo "     voxtype setup model"
 echo ""
-echo "  4. Start voxtype:"
+echo "  3. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
 echo ""
 echo "  Optional: Switch to Parakeet engine (faster, lower memory):"
@@ -836,15 +848,20 @@ echo "=== Voxtype Post-Installation ==="
 echo ""
 echo "To complete setup:"
 echo ""
-echo "  1. Add your user to the 'input' group:"
-echo "     sudo usermod -aG input \$USER"
+echo "  1. Bind push-to-talk in your compositor (no special permissions):"
+echo "       voxtype setup compositor hyprland   (or sway, river)"
+echo "     or bind 'voxtype record toggle' in your desktop's keyboard shortcuts,"
+echo "     then set enabled = false under [hotkey] in ~/.config/voxtype/config.toml"
 echo ""
-echo "  2. Log out and back in for group changes to take effect"
+echo "     If you can't bind keys in your desktop, the built-in hotkey can"
+echo "     read the keyboard instead if you join the 'input' group, but that"
+echo "     lets every program read every keystroke:"
+echo "       sudo usermod -aG input \$USER   (then log out and back in)"
 echo ""
-echo "  3. Download a whisper model:"
+echo "  2. Download a whisper model:"
 echo "     voxtype setup --download"
 echo ""
-echo "  4. Start voxtype:"
+echo "  3. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
 echo ""
 echo "Using a coding agent (Claude Code, Codex, Gemini CLI, ...)? Run"

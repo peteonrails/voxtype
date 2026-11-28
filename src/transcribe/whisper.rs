@@ -13,7 +13,9 @@ use crate::error::TranscribeError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
@@ -40,6 +42,9 @@ pub struct WhisperTranscriber {
     runtime: RuntimeMetadata,
     cpu_context: bool,
     decoded: AtomicBool,
+    /// Kept between transcriptions, since creating one allocates the KV
+    /// caches and compute buffers again.
+    state: Mutex<Option<WhisperState>>,
 }
 
 impl WhisperTranscriber {
@@ -121,6 +126,7 @@ impl WhisperTranscriber {
             runtime,
             cpu_context,
             decoded: AtomicBool::new(false),
+            state: Mutex::new(None),
         })
     }
 
@@ -216,10 +222,6 @@ impl WhisperTranscriber {
         retry: bool,
         timed: bool,
     ) -> Result<Vec<RawSegment>, TranscribeError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
         let vocabulary = self
             .active_vocabulary
             .lock()
@@ -234,23 +236,40 @@ impl WhisperTranscriber {
             prompt.as_deref(),
         );
 
-        state
-            .full(params, samples)
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-        self.decoded.store(true, Ordering::Relaxed);
+        self.with_state(|state| {
+            state
+                .full(params, samples)
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+            self.decoded.store(true, Ordering::Relaxed);
 
-        let mut segments = Vec::new();
-        for segment in state.as_iter() {
-            segments.push(RawSegment {
-                start_cs: segment.start_timestamp(),
-                end_cs: segment.end_timestamp(),
-                text: segment
-                    .to_str()
-                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
-                    .to_string(),
-            });
-        }
-        Ok(segments)
+            let mut segments = Vec::new();
+            for segment in state.as_iter() {
+                segments.push(RawSegment {
+                    start_cs: segment.start_timestamp(),
+                    end_cs: segment.end_timestamp(),
+                    text: segment
+                        .to_str()
+                        .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
+                        .to_string(),
+                });
+            }
+            Ok(segments)
+        })
+    }
+
+    fn with_state<R>(
+        &self,
+        f: impl FnOnce(&mut WhisperState) -> Result<R, TranscribeError>,
+    ) -> Result<R, TranscribeError> {
+        with_cached(
+            &self.state,
+            || {
+                self.ctx
+                    .create_state()
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))
+            },
+            f,
+        )
     }
 
     /// The language to decode in, per the configured mode, recorded for
@@ -261,18 +280,12 @@ impl WhisperTranscriber {
             tracing::debug!("Using unconstrained language auto-detection");
             None
         } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only.
-            // The detection state is scoped to this branch so it is freed
-            // before run_full() allocates its own. Each state carries its own
-            // GPU compute buffers, so creating one up front for every request
-            // doubled per-request GPU allocations for no use (#814).
+            // Constrained auto-detection: detect from allowed set only
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
-            let mut state = self
-                .ctx
-                .create_state()
-                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+            let lang = self
+                .with_state(|state| self.select_language_from_allowed(state, samples, &allowed))?;
+            Some(lang)
         } else {
             // Single language: use it directly
             let lang = self.language.primary().to_string();
@@ -353,6 +366,20 @@ impl WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    /// Creates the Whisper state while the user speaks. A state in use
+    /// already exists, so a busy lock is left alone.
+    fn prepare(&self) {
+        let Ok(mut state) = self.state.try_lock() else {
+            return;
+        };
+        if state.is_none() {
+            match self.ctx.create_state() {
+                Ok(created) => *state = Some(created),
+                Err(e) => tracing::warn!("Failed to create the Whisper state: {}", e),
+            }
+        }
+    }
+
     fn set_vocabulary(&self, terms: &[String]) {
         if let Ok(mut active) = self.active_vocabulary.lock() {
             active.clear();
@@ -387,7 +414,28 @@ impl Transcriber for WhisperTranscriber {
         let mut result =
             self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
 
-        if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
+        if self.context_window_optimization && calculate_audio_ctx(duration_secs).is_some() {
+            if let Some(trimmed) = drop_restarted_copy(&result) {
+                tracing::warn!(
+                    "Whisper repeated the transcript for {:.2}s audio; keeping the first copy",
+                    duration_secs
+                );
+                result = trimmed;
+            }
+        }
+
+        if duration_secs >= 1.0 && has_repetition_loop(&result) {
+            tracing::warn!(
+                "Whisper looped on a phrase for {:.2}s audio; retrying with beam search",
+                duration_secs
+            );
+            let retry_result =
+                self.run_full(samples, selected_language.as_deref(), duration_secs, true)?;
+            if !is_degenerate_transcript(&retry_result) {
+                result = retry_result;
+            }
+            result = collapse_repetition_loops(&result);
+        } else if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
             tracing::warn!(
                 "Whisper returned degenerate transcript {:?} for {:.2}s audio; retrying with beam search",
                 result,
@@ -496,6 +544,91 @@ pub(super) fn timed_segments(raw: &[RawSegment], duration_secs: f32) -> Vec<Time
             })
         })
         .collect()
+}
+
+/// Runs `f` on the value in `slot`, creating it first if the slot is empty.
+/// A caller that finds the slot in use, as parallel eager chunks do, gets a
+/// fresh value instead of waiting. The value is dropped if `f` fails, since a
+/// failed run can leave it half-updated.
+fn with_cached<T, R>(
+    slot: &Mutex<Option<T>>,
+    create: impl FnOnce() -> Result<T, TranscribeError>,
+    f: impl FnOnce(&mut T) -> Result<R, TranscribeError>,
+) -> Result<R, TranscribeError> {
+    let Ok(mut cached) = slot.try_lock() else {
+        return f(&mut create()?);
+    };
+    if cached.is_none() {
+        *cached = Some(create()?);
+    }
+    let result = f(cached.as_mut().unwrap());
+    if result.is_err() {
+        *cached = None;
+    }
+    result
+}
+
+/// Shortest phrase, in words, whose back-to-back repeats count as a decoder loop.
+/// Shorter repeats ("no no no") are often what was said.
+const LOOP_MIN_WORDS: usize = 3;
+
+fn loop_key(word: &str) -> String {
+    word.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Finds a phrase of at least LOOP_MIN_WORDS words repeated three or more
+/// times in a row. Returns (start, phrase length, copies) in words.
+fn find_repetition_loop(words: &[&str]) -> Option<(usize, usize, usize)> {
+    let keys: Vec<String> = words.iter().map(|w| loop_key(w)).collect();
+    for len in LOOP_MIN_WORDS..=keys.len() / 3 {
+        for start in 0..=keys.len() - 3 * len {
+            let mut copies = 1;
+            while start + (copies + 1) * len <= keys.len()
+                && keys[start..start + len]
+                    == keys[start + copies * len..start + (copies + 1) * len]
+            {
+                copies += 1;
+            }
+            if copies >= 3 {
+                return Some((start, len, copies));
+            }
+        }
+    }
+    None
+}
+
+/// How many opening words a copy at the end must repeat to count as a restart
+const RESTART_MIN_WORDS: usize = 6;
+
+/// With a reduced audio context, Whisper sometimes reaches the end of the
+/// speech and transcribes the clip again from the start. If the text ends with
+/// a copy of its own opening, returns the text before that copy.
+fn drop_restarted_copy(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 2 * RESTART_MIN_WORDS {
+        return None;
+    }
+    let keys: Vec<String> = words.iter().map(|w| loop_key(w)).collect();
+    (RESTART_MIN_WORDS..=keys.len() - RESTART_MIN_WORDS)
+        .find(|&start| keys[start..] == keys[..keys.len() - start])
+        .map(|start| words[..start].join(" "))
+}
+
+fn has_repetition_loop(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    find_repetition_loop(&words).is_some()
+}
+
+/// Keeps one copy of each phrase Whisper looped on
+fn collapse_repetition_loops(text: &str) -> String {
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    while let Some((start, len, copies)) = find_repetition_loop(&words) {
+        words.drain(start + len..start + copies * len);
+    }
+    words.join(" ")
 }
 
 fn is_degenerate_transcript(text: &str) -> bool {
@@ -794,6 +927,125 @@ mod tests {
         }
     }
 
+    /// What keeping the state saves, measured on a real model. Ignored by
+    /// default because it needs one:
+    ///
+    /// VOXTYPE_BENCH_MODEL=/path/ggml-base.en.bin VOXTYPE_BENCH_WAV=/path/clip.wav \
+    ///   cargo test --release --lib whisper_state_reuse_timing -- --ignored --nocapture
+    ///
+    /// Each "fresh" run drops the cached state first, which is what every
+    /// transcription paid before the state was kept.
+    #[test]
+    #[ignore]
+    fn whisper_state_reuse_timing() {
+        let model = std::env::var("VOXTYPE_BENCH_MODEL").expect("VOXTYPE_BENCH_MODEL");
+        let wav = std::env::var("VOXTYPE_BENCH_WAV").expect("VOXTYPE_BENCH_WAV");
+        let runs: usize = std::env::var("VOXTYPE_BENCH_RUNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(5);
+        let reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.sample_rate, spec.channels),
+            (16_000, 1),
+            "16 kHz mono WAV"
+        );
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => {
+                let max = (1_i64 << (spec.bits_per_sample - 1)) as f32;
+                reader
+                    .into_samples::<i32>()
+                    .map(|s| s.unwrap() as f32 / max)
+                    .collect()
+            }
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+            }
+        };
+        let config = WhisperConfig {
+            model,
+            ..Default::default()
+        };
+        let t = WhisperTranscriber::new(&config).unwrap();
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let time = |f: &dyn Fn()| {
+            let start = std::time::Instant::now();
+            f();
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        // Warm up once so file caches and the first allocation are paid.
+        t.transcribe(&samples).unwrap();
+        let mut fresh = Vec::new();
+        let mut reused = Vec::new();
+        let mut create = Vec::new();
+        for _ in 0..runs {
+            *t.state.lock().unwrap() = None;
+            fresh.push(time(&|| {
+                t.transcribe(&samples).unwrap();
+            }));
+            reused.push(time(&|| {
+                t.transcribe(&samples).unwrap();
+            }));
+            *t.state.lock().unwrap() = None;
+            create.push(time(&|| t.prepare()));
+        }
+        eprintln!(
+            "whisper state timing ({} runs, {:.2}s clip): fresh state median {:.1} ms, \
+             reused state median {:.1} ms, state creation median {:.1} ms",
+            runs,
+            samples.len() as f32 / 16_000.0,
+            median(fresh),
+            median(reused),
+            median(create),
+        );
+    }
+
+    #[test]
+    fn with_cached_reuses_the_value() {
+        let slot = Mutex::new(None);
+        let mut created = 0;
+        for _ in 0..3 {
+            with_cached(
+                &slot,
+                || {
+                    created += 1;
+                    Ok(0)
+                },
+                |n: &mut i32| {
+                    *n += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(created, 1);
+        assert_eq!(*slot.lock().unwrap(), Some(3));
+    }
+
+    #[test]
+    fn with_cached_drops_the_value_after_an_error() {
+        let slot = Mutex::new(Some(1));
+        let result: Result<(), _> = with_cached(
+            &slot,
+            || Ok(0),
+            |_| Err(TranscribeError::InferenceFailed("failed".into())),
+        );
+        assert!(result.is_err());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn with_cached_uses_a_fresh_value_while_the_slot_is_busy() {
+        let slot = Mutex::new(Some(1));
+        let _busy = slot.lock().unwrap();
+        let value = with_cached(&slot, || Ok(7), |n: &mut i32| Ok(*n)).unwrap();
+        assert_eq!(value, 7);
+    }
+
     #[test]
     fn whisper_segments_become_timed_segments() {
         let got = timed_segments(
@@ -879,6 +1131,60 @@ mod tests {
         .unwrap();
         assert!(bad.contains("gpu_device = 3"));
         assert!(bad.contains("only 1 GPU(s)"));
+    }
+
+    #[test]
+    fn test_drop_restarted_copy() {
+        // Transcripts Whisper returned with the reduced audio context
+        assert_eq!(
+            drop_restarted_copy(
+                "It has required my password to login. It has required my password to login."
+            )
+            .as_deref(),
+            Some("It has required my password to login.")
+        );
+        assert_eq!(
+            drop_restarted_copy(
+                "Can you look into fixing that bug then in the original 654 PR driver? \
+                 We can make another PR that fixes that to their branch. \
+                 Can you look into fixing that bug then in the original 654 PR driver?"
+            )
+            .as_deref(),
+            Some(
+                "Can you look into fixing that bug then in the original 654 PR driver? \
+                 We can make another PR that fixes that to their branch."
+            )
+        );
+        // An opening said twice with different words after it is kept
+        assert_eq!(
+            drop_restarted_copy(
+                "It has required my password to login. It has required my password to unlock it."
+            ),
+            None
+        );
+        assert_eq!(drop_restarted_copy("It has required my password."), None);
+        assert_eq!(drop_restarted_copy(""), None);
+    }
+
+    #[test]
+    fn test_repetition_loops() {
+        let looped = "I mean, what's the status of the project? ".repeat(15);
+        assert!(has_repetition_loop(&looped));
+        assert_eq!(
+            collapse_repetition_loops(&looped),
+            "I mean, what's the status of the project?"
+        );
+        assert_eq!(
+            collapse_repetition_loops("So, go on. Go on. Go on. Go on. Then stop."),
+            "So, go on. Go on. Go on. Go on. Then stop."
+        );
+        assert_eq!(
+            collapse_repetition_loops("Fine. It works now. It works now. It works now. Done."),
+            "Fine. It works now. Done."
+        );
+        assert!(!has_repetition_loop("no no no, not that one"));
+        assert!(!has_repetition_loop("one two three one two three"));
+        assert!(!has_repetition_loop(""));
     }
 
     #[test]

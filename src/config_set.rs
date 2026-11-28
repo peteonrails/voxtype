@@ -384,6 +384,39 @@ fn lard_warning(
     }
 }
 
+/// The whisper-cli problem a write to the Whisper mode, the cli path or the
+/// engine leaves behind, with its fix (Omarchy #18694). The value is still
+/// written, as with LARD: a script may set the mode before installing.
+fn whisper_cli_warning(key: &str, editor: &ConfigEditor) -> Option<String> {
+    if !matches!(key, "engine" | "whisper.mode" | "whisper.whisper_cli_path") {
+        return None;
+    }
+    let candidate = editor.candidate_config().ok()?;
+    if candidate.engine != crate::config::TranscriptionEngine::Whisper {
+        return None;
+    }
+    let problem = crate::transcribe::cli::cli_mode_problem(&candidate.whisper)?;
+    Some(format!(
+        "{problem}. {}",
+        crate::transcribe::cli::MISSING_CLI_FIX
+    ))
+}
+
+/// Both write warnings, joined.
+fn write_warning(
+    key: &str,
+    lard_before: Option<crate::setup::lard::Problem>,
+    editor: &ConfigEditor,
+) -> Option<String> {
+    match (
+        lard_warning(key, lard_before, editor),
+        whisper_cli_warning(key, editor),
+    ) {
+        (Some(a), Some(b)) => Some(format!("{a}. {b}")),
+        (a, b) => a.or(b),
+    }
+}
+
 /// The LARD problem of the config an editor holds, before it is edited.
 fn lard_problem(editor: &ConfigEditor) -> Option<crate::setup::lard::Problem> {
     crate::setup::lard::problem(&editor.candidate_config().ok()?)
@@ -412,12 +445,15 @@ fn lookup(key: &str) -> Result<Found, ConfigSetError> {
 pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, ConfigSetError> {
     if key == "engine" {
         let written = set_engine(path, raw)?;
+        let warning = ConfigEditor::load_from_path(written.clone())
+            .ok()
+            .and_then(|editor| whisper_cli_warning("engine", &editor));
         return Ok(SetOutcome {
             key: "engine".to_string(),
             value: TypedValue::Str(raw.to_string()),
             path: written,
             restart_required: true,
-            warning: None,
+            warning,
             changed: true,
         });
     }
@@ -482,7 +518,7 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
         value,
         path: editor.path().to_path_buf(),
         restart_required: spec.restart_required,
-        warning: lard_warning(spec.key, lard_before, &editor),
+        warning: write_warning(spec.key, lard_before, &editor),
         changed: true,
     })
 }
@@ -511,7 +547,7 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
         path: editor.path().to_path_buf(),
         restart_required: changed && spec.restart_required,
         warning: if changed {
-            lard_warning(spec.key, lard_before, &editor)
+            write_warning(spec.key, lard_before, &editor)
         } else {
             None
         },
@@ -1059,6 +1095,44 @@ gguf_backend = "cpu"
 
     /// Turning LARD on with no model still writes the key (scripts set it
     /// before installing the model) but says what is wrong and how to fix it.
+    /// Omarchy #18694: `config set whisper.mode cli` without whisper-cli
+    /// writes the value but says how to get out of it.
+    #[test]
+    fn cli_mode_without_whisper_cli_warns_and_still_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[whisper]\nwhisper_cli_path = \"/nonexistent/voxtype-test/whisper-cli\"\n",
+        )
+        .unwrap();
+
+        let out = set_key(path.clone(), "whisper.mode", "cli").unwrap();
+        let warning = out.warning.expect("cli mode without the binary must warn");
+        assert!(warning.contains("whisper-cpp"), "{warning}");
+        assert!(
+            warning.contains("voxtype config set whisper.mode local"),
+            "{warning}"
+        );
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("mode = \"cli\""));
+
+        // Pointing the path at a real file clears it.
+        let cli = dir.path().join("whisper-cli");
+        fs::write(&cli, "").unwrap();
+        let out = set_key(
+            path.clone(),
+            "whisper.whisper_cli_path",
+            cli.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out.warning, None);
+
+        let out = set_key(path, "whisper.mode", "local").unwrap();
+        assert_eq!(out.warning, None);
+    }
+
     #[test]
     fn enabling_lard_without_a_model_warns_and_still_writes() {
         let (_dir, path) = full_config();

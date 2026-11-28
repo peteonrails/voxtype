@@ -4,7 +4,11 @@
 //! This approach works on all Wayland compositors because it
 //! operates at the Linux input subsystem level.
 //!
-//! Requires the user to be in the 'input' group.
+//! Requires read access to /dev/input, which in practice means the `input`
+//! group, and that lets every program the user runs read every keystroke.
+//! Compositor keybindings calling `voxtype record` are the recommended path;
+//! this listener is the fallback (docs/USER_MANUAL.md, "The input group
+//! trade-off").
 
 pub mod access;
 pub mod evdev_listener;

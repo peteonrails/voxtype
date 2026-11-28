@@ -36,6 +36,10 @@
 //!   extension)"; `--no-mcp`: "no servers connect and no MCP tools";
 //!   `--no-extensions`, `--no-skills`, `--no-prompt-templates`: none of
 //!   those load either.
+//! - `--extension, -e <path>`: "Load an extension file"; `--no-extensions`
+//!   disables discovery, but "explicit -e paths still work". Voxtype passes
+//!   exactly one, Omarchy's `omarchy-local.ts`, and only when pi's default
+//!   provider is `omarchy-local` (see [`omarchy_pi_extension`]).
 //! - `--no-context-files`: no AGENTS.md or CLAUDE.md; `--no-approve`:
 //!   "Ignore project-local files"; `--no-session`: "Don't save session".
 //! - `--system-prompt`: replaces the coding-assistant prompt.
@@ -50,7 +54,7 @@
 use super::agent::ResolvedAgent;
 use super::AssistantError;
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -96,8 +100,46 @@ pub fn claude_args() -> Vec<String> {
     .collect()
 }
 
+/// Omarchy's standing pi extension, under pi's agent directory. It
+/// registers the `omarchy-local` provider for the models Omarchy runs
+/// (omarchy-local-ai's engine.md, "Client integration").
+pub const OMARCHY_PI_EXTENSION: &str = "extensions/omarchy-local.ts";
+
+/// The provider Omarchy's extension registers for this machine's models.
+pub const OMARCHY_PI_PROVIDER: &str = "omarchy-local";
+
+/// pi's agent directory: `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+pub fn pi_agent_dir() -> Option<PathBuf> {
+    std::env::var_os("PI_CODING_AGENT_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".pi/agent")))
+}
+
+/// The one extension voxtype lets pi load: Omarchy's, and only when pi's
+/// default model is on this machine's Omarchy provider (`defaultProvider`
+/// in pi's `settings.json`, or a `defaultModel` of `omarchy-local/<recipe>`)
+/// and Omarchy has written the file. Without it, `--no-extensions` leaves
+/// pi with no such provider and the ask fails. Paired machines' providers
+/// (`omarchy-local-<host>`) are not enabled this way.
+pub fn omarchy_pi_extension(agent_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(agent_dir.join("settings.json")).ok()?;
+    let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let provider = settings["defaultProvider"].as_str().map(str::trim);
+    let model = settings["defaultModel"].as_str().map(str::trim);
+    let on_omarchy = provider == Some(OMARCHY_PI_PROVIDER)
+        || (provider.is_none()
+            && model.is_some_and(|m| m.starts_with(&format!("{OMARCHY_PI_PROVIDER}/"))));
+    if !on_omarchy {
+        return None;
+    }
+    let ext = agent_dir.join(OMARCHY_PI_EXTENSION);
+    ext.is_file().then_some(ext)
+}
+
 /// Arguments for `pi`, with the prompt attached from `prompt_file`.
-pub fn pi_args(prompt_file: &Path) -> Vec<String> {
+/// `omarchy_extension` is [`omarchy_pi_extension`]'s answer.
+pub fn pi_args(prompt_file: &Path, omarchy_extension: Option<&Path>) -> Vec<String> {
     let mut args: Vec<String> = [
         "--print",
         "--mode",
@@ -105,17 +147,27 @@ pub fn pi_args(prompt_file: &Path) -> Vec<String> {
         "--no-tools",
         "--no-mcp",
         "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-context-files",
-        "--no-approve",
-        "--no-session",
-        "--system-prompt",
-        SYSTEM_PROMPT,
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
+    if let Some(ext) = omarchy_extension {
+        args.push("--extension".into());
+        args.push(ext.display().to_string());
+    }
+    args.extend(
+        [
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-context-files",
+            "--no-approve",
+            "--no-session",
+            "--system-prompt",
+            SYSTEM_PROMPT,
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
     args.push(format!("@{}", prompt_file.display()));
     args.push("--".into());
     args.push(PI_INSTRUCTION.into());
@@ -189,7 +241,11 @@ pub fn run_agent(
             std::fs::create_dir_all(&run_dir)
                 .map_err(|e| agent_err(agent, format!("cannot create a working directory: {e}")))?;
             // spawn_and_collect writes the prompt beside the cwd.
-            let args = pi_args(&workdir.path().join("prompt.txt"));
+            let omarchy = pi_agent_dir().and_then(|d| omarchy_pi_extension(&d));
+            if let Some(ext) = &omarchy {
+                tracing::debug!("pi's default model is Omarchy's; loading {}", ext.display());
+            }
+            let args = pi_args(&workdir.path().join("prompt.txt"), omarchy.as_deref());
             let out = spawn_and_collect(
                 agent,
                 &agent.path,
@@ -487,7 +543,7 @@ mod tests {
 
     #[test]
     fn pi_args_turn_every_tool_off_and_attach_the_prompt() {
-        let args = pi_args(Path::new("/w/prompt.txt"));
+        let args = pi_args(Path::new("/w/prompt.txt"), None);
         assert_eq!(args[0], "--print");
         for flag in [
             "--no-tools",
@@ -504,6 +560,57 @@ mod tests {
         assert!(!args
             .iter()
             .any(|a| a == "--tools" || a == "-t" || a == "--approve"));
+        assert!(!args.iter().any(|a| a == "--extension" || a == "-e"));
+    }
+
+    #[test]
+    fn pi_loads_only_omarchys_extension_and_keeps_the_rest_off() {
+        let ext = Path::new("/home/u/.pi/agent/extensions/omarchy-local.ts");
+        let args = pi_args(Path::new("/w/prompt.txt"), Some(ext));
+        let at = args.iter().position(|a| a == "--extension").unwrap();
+        assert_eq!(args[at + 1], ext.display().to_string());
+        assert_eq!(args.iter().filter(|a| *a == "--extension").count(), 1);
+        // Discovery, tools and MCP stay off: only the explicit path loads,
+        // and no tool it could register is enabled.
+        for flag in ["--no-extensions", "--no-tools", "--no-mcp", "--no-skills"] {
+            assert!(args.iter().any(|a| a == flag), "{flag}");
+        }
+        let at = args.iter().position(|a| a == "@/w/prompt.txt").unwrap();
+        assert_eq!(args[at + 1], "--");
+    }
+
+    #[test]
+    fn omarchys_pi_extension_only_for_an_omarchy_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path();
+        std::fs::create_dir_all(agent.join("extensions")).unwrap();
+        let settings = |json: &str| std::fs::write(agent.join("settings.json"), json).unwrap();
+
+        // No extension written by Omarchy: nothing to load.
+        settings(r#"{"defaultProvider":"omarchy-local","defaultModel":"qwen3.8-27b-gufo"}"#);
+        assert_eq!(omarchy_pi_extension(agent), None);
+
+        std::fs::write(agent.join(OMARCHY_PI_EXTENSION), "// generated").unwrap();
+        assert_eq!(
+            omarchy_pi_extension(agent),
+            Some(agent.join(OMARCHY_PI_EXTENSION))
+        );
+        settings(r#"{"defaultModel":"omarchy-local/qwen3.8-27b-gufo"}"#);
+        assert!(omarchy_pi_extension(agent).is_some());
+
+        // Any other default, a paired machine, or no settings: nothing.
+        for other in [
+            r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet"}"#,
+            r#"{"defaultProvider":"omarchy-local-spark","defaultModel":"qwen"}"#,
+            r#"{"defaultProvider":"anthropic","defaultModel":"omarchy-local/qwen"}"#,
+            r#"{}"#,
+            "not json",
+        ] {
+            settings(other);
+            assert_eq!(omarchy_pi_extension(agent), None, "{other}");
+        }
+        std::fs::remove_file(agent.join("settings.json")).unwrap();
+        assert_eq!(omarchy_pi_extension(agent), None);
     }
 
     #[test]

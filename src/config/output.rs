@@ -37,9 +37,10 @@ pub struct OutputConfig {
     ///
     /// Paste mode (`mode = "paste"`) also honours this for its keystroke
     /// step, filtered to the drivers that can simulate a keystroke (wtype,
-    /// eitype, ydotool); dotool/clipboard/xclip entries are ignored there.
-    /// If the order contains none of those three, paste mode falls back to
-    /// wtype -> eitype -> ydotool. See #750: wtype's keymap remapping makes
+    /// eitype, ydotool, hyprland); dotool/clipboard/xclip entries are ignored
+    /// there. If the order contains none of wtype, eitype and ydotool, paste
+    /// mode appends wtype -> eitype -> ydotool after any `hyprland` entry.
+    /// `hyprland` is paste-only and skipped in type mode (#938). See #750: wtype's keymap remapping makes
     /// keycode-based XWayland clients (xfreerdp and similar) receive Escape
     /// instead of the paste keystroke, so putting ydotool first here is the
     /// workaround for that class of client.
@@ -190,9 +191,9 @@ pub struct OutputConfig {
     /// with held modifiers and triggering compositor or application
     /// keybindings (e.g. Super+X, Ctrl+W).
     ///
-    /// Requires `/dev/input` access (typically `input` group membership).
-    /// Silently disabled when access is unavailable; output proceeds as
-    /// before in that case.
+    /// Needs to read `/dev/input` (the `input` group); without it the guard
+    /// is skipped and output proceeds as before. Compositor submaps
+    /// (`voxtype setup compositor`) avoid the problem without that access.
     #[serde(default = "default_true")]
     pub wait_for_modifier_release: bool,
 
@@ -296,12 +297,11 @@ pub fn default_language_to_layout() -> std::collections::HashMap<String, String>
 }
 
 impl OutputConfig {
-    /// The post-process table, when it names a command to run. A table with
-    /// an empty command is only holding options, and post-processing is off.
+    /// The post-process table, when it names a command to run or a model
+    /// backend. A table with an empty command and the default backend is
+    /// only holding options, and post-processing is off.
     pub fn active_post_process(&self) -> Option<&PostProcessConfig> {
-        self.post_process
-            .as_ref()
-            .filter(|p| !p.command.trim().is_empty())
+        self.post_process.as_ref().filter(|p| p.is_active())
     }
 
     /// Apply per-language XKB layout/variant hints to eitype and dotool.
@@ -391,12 +391,25 @@ pub enum OutputDriver {
     Eitype,
     /// dotool - Works on X11/Wayland/TTY, supports keyboard layouts
     Dotool,
+    /// xdotool - X11 via XTEST, no daemon required
+    Xdotool,
     /// ydotool - Works on X11/Wayland/TTY, requires daemon
     Ydotool,
     /// Clipboard via wl-copy (Wayland)
     Clipboard,
     /// Clipboard via xclip (X11)
     Xclip,
+    /// Hyprland's own `send_shortcut` dispatcher via hyprctl. Paste mode
+    /// only: it sends the paste keystroke and the auto-submit Enter, never
+    /// text. Opt-in; never part of a default order.
+    Hyprland,
+}
+
+impl OutputDriver {
+    /// Whether the driver can type text in `mode = "type"`.
+    pub fn types_text(self) -> bool {
+        !matches!(self, OutputDriver::Hyprland)
+    }
 }
 
 impl std::fmt::Display for OutputDriver {
@@ -405,9 +418,11 @@ impl std::fmt::Display for OutputDriver {
             OutputDriver::Wtype => write!(f, "wtype"),
             OutputDriver::Eitype => write!(f, "eitype"),
             OutputDriver::Dotool => write!(f, "dotool"),
+            OutputDriver::Xdotool => write!(f, "xdotool"),
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
             OutputDriver::Xclip => write!(f, "xclip"),
+            OutputDriver::Hyprland => write!(f, "hyprland"),
         }
     }
 }
@@ -420,11 +435,13 @@ impl std::str::FromStr for OutputDriver {
             "wtype" => Ok(OutputDriver::Wtype),
             "eitype" => Ok(OutputDriver::Eitype),
             "dotool" => Ok(OutputDriver::Dotool),
+            "xdotool" => Ok(OutputDriver::Xdotool),
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
+            "hyprland" => Ok(OutputDriver::Hyprland),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, xdotool, ydotool, clipboard, xclip, hyprland",
                 s
             )),
         }
@@ -519,6 +536,10 @@ mod tests {
             OutputDriver::Dotool
         );
         assert_eq!(
+            "xdotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xdotool
+        );
+        assert_eq!(
             "ydotool".parse::<OutputDriver>().unwrap(),
             OutputDriver::Ydotool
         );
@@ -551,6 +572,7 @@ mod tests {
     fn test_output_driver_display() {
         assert_eq!(OutputDriver::Wtype.to_string(), "wtype");
         assert_eq!(OutputDriver::Dotool.to_string(), "dotool");
+        assert_eq!(OutputDriver::Xdotool.to_string(), "xdotool");
         assert_eq!(OutputDriver::Ydotool.to_string(), "ydotool");
         assert_eq!(OutputDriver::Clipboard.to_string(), "clipboard");
         assert_eq!(OutputDriver::Xclip.to_string(), "xclip");

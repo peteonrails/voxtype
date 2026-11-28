@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        1.3.1
+Version:        1.3.2
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -233,6 +233,19 @@ export CARGO_HOME=%{_builddir}/cargo
 %post
 %systemd_user_post voxtype.service
 
+# Both builds in this package are compiled for Haswell (AVX2). The x86-64-v2
+# baseline build that runs without AVX2 ships only in the prebuilt release
+# packages.
+if [ "$(uname -m)" = "x86_64" ] && [ -r /proc/cpuinfo ] \
+    && ! grep -qw avx2 /proc/cpuinfo; then
+    echo ""
+    echo "WARNING: This CPU has no AVX2, and the voxtype builds in this"
+    echo "package need it: they stop with an illegal instruction error."
+    echo "Install the prebuilt .rpm from"
+    echo "https://github.com/peteonrails/voxtype/releases instead; it"
+    echo "includes voxtype-baseline, which runs on this CPU."
+fi
+
 if [ "$1" -eq 1 ]; then
     # Detect GPU for Vulkan acceleration recommendation
     GPU_DETECTED=""
@@ -263,15 +276,20 @@ if [ "$1" -eq 1 ]; then
     echo ""
     echo "To complete setup:"
     echo ""
-    echo "  1. Add your user to the 'input' group:"
-    echo "     sudo usermod -aG input \$USER"
+    echo "  1. Bind push-to-talk in your compositor (no special permissions):"
+    echo "       voxtype setup compositor hyprland   (or sway, river)"
+    echo "     or bind 'voxtype record toggle' in your desktop's keyboard shortcuts,"
+    echo "     then set enabled = false under [hotkey] in ~/.config/voxtype/config.toml"
     echo ""
-    echo "  2. Log out and back in for group changes to take effect"
+    echo "     If you can't bind keys in your desktop, the built-in hotkey can"
+    echo "     read the keyboard instead if you join the 'input' group, but that"
+    echo "     lets every program read every keystroke:"
+    echo "       sudo usermod -aG input \$USER   (then log out and back in)"
     echo ""
-    echo "  3. Download a whisper model:"
+    echo "  2. Download a whisper model:"
     echo "     voxtype setup --download"
     echo ""
-    echo "  4. Start voxtype:"
+    echo "  3. Start voxtype:"
     echo "     systemctl --user enable --now voxtype"
     echo ""
 fi
@@ -344,6 +362,59 @@ fi
 %{vt_libdir}/voxtype-meetings-gtk4
 
 %changelog
+* Fri Nov 27 2026 Peter Jackson <pete@peteonrails.com> - 1.3.2-1
+- Soniox sends the API key in the WebSocket handshake, ahead of Soniox's
+  2027-01-15 cutoff, and [soniox] region selects US, EU, Japan or India
+  hosts (#864, #871)
+- A recording from an input that delivers only digital zero for 5 s stops
+  with a notice that names the source (dead_input guard)
+- A failed or stalled streaming session is recovered through batch
+  transcription; the stop timeout is 30 s ([streaming_recovery])
+- Paste mode bounds clipboard reads at 2 s and restores the clipboard
+  in the background, so the result shows as soon as the paste lands
+  (#1003, #1079)
+- A record start sent while output was still running is ignored (#1004)
+- Opt-in hyprland paste driver for XWayland and Electron apps (#938)
+- Opt-in xdotool output driver for X11 sessions
+- Whisper keeps one state between transcriptions and creates it when
+  recording starts (#1022)
+- Feedback cues open an output stream per sound, fixing silence after
+  resume and a spinning core (#848, #859)
+- Quickshell OSD animates on the frame clock (#1078)
+- A meeting pill dragged to the left edge stays there
+- macOS keeps runtime files in $TMPDIR/voxtype per user, and a background
+  user session ignores the hotkey
+- setup gpu --enable refuses machines where the Vulkan build would crash
+- Below x86-64-v2, every binary says so instead of pointing at baseline
+- Input device docs and messages lead with compositor keybindings, not
+  the input group
+- whisper-cli mode is offered only when whisper-cli is installed, and a
+  bare whisper on PATH is never used as whisper-cli
+- Meeting summaries, Ask and dictation cleanup can use Omarchy's local
+  model or any OpenAI-compatible server
+- Dictation history works on atomic Fedora, where /home is a link to
+  /var/home and history recorded nothing before
+- Whisper retries with beam search when the decoder loops on a phrase,
+  and drops the repeated copy when a reduced audio context restarts
+  the transcript (#827, #898)
+- info variants recommends the baseline build on a CPU without AVX2, and
+  no longer the AVX2, Vulkan or ONNX builds that crash there
+- The /usr/bin/voxtype wrapper in the release .deb and .rpm runs
+  voxtype-baseline on a CPU without AVX2 instead of crashing in the AVX2
+  build, and source package installs warn on such a CPU
+- Release .deb and .rpm, the source .rpm and install-arch.sh lead their
+  setup steps with compositor keybindings; the input group is only the
+  fallback for the built-in hotkey
+- A model that fails to load at startup no longer stops the daemon and
+  restart-loops it: the tray, status, meetings and history keep working,
+  the tray shows an error, and the next recording loads the model again
+- config validate-selection, doctor and the daemon's startup check catch
+  a GGUF gguf_backend the active build's worker lacks, such as vulkan on
+  the avx512 build, and name the fix
+- Packaged installs that ship only baseline or avx512 (the AUR package on
+  a CPU without AVX2) are no longer taken for a source build, so setup gpu
+  --enable refuses Vulkan there too
+
 * Sat Nov 21 2026 Peter Jackson <pete@peteonrails.com> - 1.3.1-1
 - Dictation history: a private, local record of each dictation, including
   failed and cancelled ones, with the history command, search alongside

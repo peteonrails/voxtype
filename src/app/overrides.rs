@@ -60,6 +60,18 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(enabled) = cli.omarchy_link_settings_plugin {
         config.omarchy.link_settings_plugin = enabled;
     }
+    if let Some(enabled) = cli.streaming_recovery {
+        config
+            .streaming_recovery
+            .get_or_insert_with(Default::default)
+            .enabled = enabled;
+    }
+    if let Some(timeout_secs) = cli.streaming_stop_timeout_secs {
+        config
+            .streaming_recovery
+            .get_or_insert_with(Default::default)
+            .stop_timeout_secs = timeout_secs;
+    }
 
     let history = config::HistoryOverrides {
         enabled: cli.history,
@@ -282,6 +294,12 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             .get_or_insert_with(config::SonioxConfig::default)
             .api_key = Some(key.clone());
     }
+    if let Some(ref region) = cli.soniox_region {
+        config
+            .soniox
+            .get_or_insert_with(config::SonioxConfig::default)
+            .region = region.clone();
+    }
 
     // Audio overrides
     if let Some(ref device) = cli.audio_device {
@@ -311,6 +329,17 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     }
     if let Some(fade_ms) = cli.duck_media_fade_ms {
         config.audio.duck_media_fade_ms = fade_ms;
+    }
+    apply_bool_override(
+        &mut config.audio.dead_input.enabled,
+        cli.dead_input_check,
+        cli.no_dead_input_check,
+    );
+    if let Some(window_ms) = cli.dead_input_window {
+        config.audio.dead_input.window_ms = window_ms;
+    }
+    if let Some(threshold) = cli.dead_input_threshold {
+        config.audio.dead_input.threshold_dbfs = threshold;
     }
 
     // Output overrides
@@ -455,6 +484,8 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.output.modifier_release_timeout_ms = ms;
     }
 
+    apply_llm_overrides(config, cli);
+
     // VAD overrides
     if cli.vad {
         config.vad.enabled = true;
@@ -481,4 +512,50 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     }
 
     top_level_model
+}
+
+/// `--post-process-*` and `--summary-*` (and their VOXTYPE_ variables).
+fn apply_llm_overrides(config: &mut config::Config, cli: &Cli) {
+    let any_post_process = cli.post_process_backend.is_some()
+        || cli.post_process_model.is_some()
+        || cli.post_process_url.is_some()
+        || cli.post_process_api_key_file.is_some()
+        || cli.post_process_prompt.is_some();
+    if any_post_process {
+        let pp = config
+            .output
+            .post_process
+            .get_or_insert_with(Default::default);
+        if let Some(backend) = &cli.post_process_backend {
+            pp.backend = backend.clone();
+        }
+        if let Some(model) = &cli.post_process_model {
+            pp.model = Some(model.clone());
+        }
+        if let Some(url) = &cli.post_process_url {
+            pp.url = Some(url.clone());
+        }
+        if let Some(file) = &cli.post_process_api_key_file {
+            pp.api_key_file = Some(file.clone());
+        }
+        if let Some(prompt) = &cli.post_process_prompt {
+            pp.prompt = Some(prompt.clone());
+        }
+    }
+    let summary = &mut config.meeting.summary;
+    if let Some(backend) = &cli.summary_backend {
+        summary.backend = backend.clone();
+    }
+    if let Some(model) = &cli.summary_omarchy_model {
+        summary.omarchy_model = Some(model.clone());
+    }
+    if let Some(url) = &cli.summary_openai_url {
+        summary.openai_url = Some(url.clone());
+    }
+    if let Some(model) = &cli.summary_openai_model {
+        summary.openai_model = Some(model.clone());
+    }
+    if let Some(file) = &cli.summary_openai_api_key_file {
+        summary.openai_api_key_file = Some(file.clone());
+    }
 }

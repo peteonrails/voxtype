@@ -45,7 +45,7 @@ async fn history_real_whisper_inflight_eager_chunks_preserve_selected_fidelity()
     *observed.gate.0.lock().unwrap() = true;
     observed.gate.1.notify_all();
     let mut eager_selected = Some(selected);
-    tokio::time::timeout(Duration::from_secs(120), daemon.stop_active_recording(&mut state, &mut None, &mut None, &mut None, &mut eager_selected)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(120), daemon.stop_active_recording(&mut state, &mut None, &mut None, &mut eager_selected)).await.unwrap();
     assert!(daemon.eager_chunk_tasks.is_empty());
     assert!(eager_selected.is_none());
     let entries = wait_for_entries(root.path(),1).await;

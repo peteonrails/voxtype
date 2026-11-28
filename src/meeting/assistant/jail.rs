@@ -288,6 +288,10 @@ mod tests {
         assert!(err.contains("bubblewrap"), "{err}");
     }
 
+    // Linux only: the jail is bubblewrap, so `real_codex` accepts only ELF
+    // binaries, and the stand-in here is the host's /bin/sh, which macOS
+    // builds as Mach-O.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_mise_shim_resolves_to_the_real_binary() {
         let dir = tempfile::tempdir().unwrap();

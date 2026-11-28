@@ -116,7 +116,8 @@ pub enum Commands {
     /// your config, so features you have not enabled are not checked.
     ///
     /// Covered: CPU compatibility, config and models directories, the config
-    /// file, the installed binary variant against the configured engine, GPU
+    /// file, the installed binary variant against the configured engine, a
+    /// GGUF model's gguf_backend against the build's GGUF worker, GPU
     /// runtime libraries (Vulkan, CUDA, MIGraphX), the configured engine's
     /// model (and the Whisper secondary model), the VAD model when VAD is on,
     /// the audio input device, WAYLAND_DISPLAY/DISPLAY in the systemd user

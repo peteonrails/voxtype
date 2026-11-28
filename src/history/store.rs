@@ -265,14 +265,21 @@ pub(super) fn observe_next_lock(dir: &Path) -> std::sync::mpsc::Receiver<()> {
 
 /// Create private directories without following pre-planted directory links.
 /// Existing ancestors are inspected but never chmodded.
+///
+/// A link owned by root above the directory itself is the system's own
+/// layout, not a planted one: only root can make it. macOS links `/var` and
+/// `/tmp` into `/private`, and atomic Fedora links `/home` to `/var/home`, so
+/// a history under those is accepted. Any other link is refused.
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
     let absolute = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
         std::env::current_dir()?.join(dir)
     };
+    let last = absolute.components().count();
     let mut current = PathBuf::new();
-    for component in absolute.components() {
+    for (index, component) in absolute.components().enumerate() {
         if component == std::path::Component::ParentDir {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -282,6 +289,11 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(meta)
+                if meta.file_type().is_symlink()
+                    && meta.uid() == 0
+                    && index + 1 < last
+                    && fs::metadata(&current).is_ok_and(|target| target.is_dir()) => {}
             Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -767,6 +779,29 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         HistoryStore::open(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
+    }
+
+    /// A link the user (or anyone but root) made is refused wherever it
+    /// sits in the path, so history never writes through a planted one.
+    /// Root's links, such as macOS's `/var`, are covered by every other
+    /// test there: a temporary directory lives under one.
+    #[test]
+    fn a_link_that_root_did_not_make_is_refused_anywhere_in_the_path() {
+        // Run as root, the test's own link is a root link.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        for dir in [link.clone(), link.join("history")] {
+            let error = HistoryStore::open(&dir).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{dir:?}");
+        }
+        assert!(!real.join("history").exists());
     }
 
     #[test]

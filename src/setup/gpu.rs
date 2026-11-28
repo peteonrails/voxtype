@@ -18,6 +18,7 @@
 //! This sets VK_LOADER_DRIVERS_SELECT internally to filter Vulkan ICDs.
 
 use super::binary::{install_active_binary, resolve_active_binary};
+use super::vulkan_check;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -188,17 +189,19 @@ fn describe_onnx_variant(name: &str) -> &'static str {
 /// Available backend variants
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Backend {
-    Cpu,    // Legacy: voxtype-cpu (deprecated, kept for compatibility)
-    Native, // Simple mode: source-built native CPU binary (voxtype-native)
-    Avx2,   // Tiered mode: AVX2 binary
-    Avx512, // Tiered mode: AVX-512 binary
-    Vulkan, // GPU acceleration
+    Cpu,      // Legacy: voxtype-cpu (deprecated, kept for compatibility)
+    Baseline, // Tiered mode: x86-64-v2 binary for CPUs without AVX2
+    Native,   // Simple mode: source-built native CPU binary (voxtype-native)
+    Avx2,     // Tiered mode: AVX2 binary
+    Avx512,   // Tiered mode: AVX-512 binary
+    Vulkan,   // GPU acceleration
 }
 
 impl Backend {
     fn binary_name(&self) -> &'static str {
         match self {
             Backend::Cpu => "voxtype-cpu",
+            Backend::Baseline => "voxtype-baseline",
             Backend::Native => "voxtype-native",
             Backend::Avx2 => "voxtype-avx2",
             Backend::Avx512 => "voxtype-avx512",
@@ -209,6 +212,7 @@ impl Backend {
     fn display_name(&self) -> &'static str {
         match self {
             Backend::Cpu => "CPU (legacy)",
+            Backend::Baseline => "CPU (baseline x86-64-v2)",
             Backend::Native => "CPU (native)",
             Backend::Avx2 => "CPU (AVX2)",
             Backend::Avx512 => "CPU (AVX-512)",
@@ -286,7 +290,19 @@ pub struct GpuInfo {
 
 /// Detect if we're in tiered mode (pre-built packages) or simple mode (source build)
 fn is_tiered_mode() -> bool {
-    Path::new(VOXTYPE_LIB_DIR).join("voxtype-avx2").exists()
+    is_tiered_layout(Path::new(VOXTYPE_LIB_DIR))
+}
+
+/// A packaged install ships one or more CPU builds side by side. The AUR
+/// package installs only the variants a machine can run, so a CPU without
+/// AVX2 gets `baseline` and `vulkan` and no `voxtype-avx2`; looking for
+/// that one file alone took such an install for a source build and
+/// skipped the AVX2 check before switching to Vulkan.
+fn is_tiered_layout(lib_dir: &Path) -> bool {
+    ["voxtype-baseline", "voxtype-avx2", "voxtype-avx512"]
+        .iter()
+        .any(|b| lib_dir.join(b).exists())
+        || lib_dir.join("package-variants").exists()
 }
 
 /// Detect which backend is currently active
@@ -297,6 +313,7 @@ fn is_tiered_mode() -> bool {
 fn backend_from_binary_name(name: &str) -> Option<Backend> {
     match name {
         "voxtype-cpu" => Some(Backend::Cpu),
+        "voxtype-baseline" => Some(Backend::Baseline),
         "voxtype-native" => Some(Backend::Native),
         "voxtype-avx2" => Some(Backend::Avx2),
         "voxtype-avx512" => Some(Backend::Avx512),
@@ -317,14 +334,7 @@ pub fn detect_current_backend() -> Option<Backend> {
     // Check if the voxtype binary is a symlink
     if let Ok(link_target) = fs::read_link(active_bin) {
         let target_name = link_target.file_name()?.to_str()?;
-        return match target_name {
-            "voxtype-cpu" => Some(Backend::Cpu),
-            "voxtype-native" => Some(Backend::Native),
-            "voxtype-avx2" => Some(Backend::Avx2),
-            "voxtype-avx512" => Some(Backend::Avx512),
-            "voxtype-vulkan" => Some(Backend::Vulkan),
-            _ => None,
-        };
+        return backend_from_binary_name(target_name);
     }
 
     // Not a symlink - check if it's a regular file (simple mode with CPU active)
@@ -341,8 +351,13 @@ pub fn detect_available_backends() -> Vec<Backend> {
     let active_bin = get_active_binary_path();
 
     if is_tiered_mode() {
-        // Tiered mode: check for avx2, avx512, vulkan
-        for backend in [Backend::Avx2, Backend::Avx512, Backend::Vulkan] {
+        // Tiered mode: check for baseline, avx2, avx512, vulkan
+        for backend in [
+            Backend::Baseline,
+            Backend::Avx2,
+            Backend::Avx512,
+            Backend::Vulkan,
+        ] {
             let path = Path::new(VOXTYPE_LIB_DIR).join(backend.binary_name());
             if path.exists() {
                 available.push(backend);
@@ -731,6 +746,71 @@ fn switch_backend_tiered(backend: Backend) -> anyhow::Result<()> {
     install_active_binary(active_bin, &binary_path, "setup gpu --enable")
 }
 
+/// Facts for [`vulkan_check::blocker`] on this machine. A packaged
+/// (tiered) voxtype-vulkan is built for the Haswell floor; a source build's
+/// is built for the machine itself, so only the former needs AVX2.
+fn detect_vulkan_facts(tiered: bool) -> vulkan_check::VulkanFacts {
+    vulkan_check::detect(tiered && cfg!(target_arch = "x86_64"))
+}
+
+/// What to tell someone whose machine cannot run the Vulkan build: stay on
+/// the CPU build, or get back to one that runs.
+fn cpu_fallback_hint(
+    tiered: bool,
+    current: Option<Backend>,
+    cpu_has_avx2: bool,
+    baseline_installed: bool,
+) -> String {
+    if current == Some(Backend::Vulkan) {
+        return "The Vulkan build is already active and will keep failing. Switch back to \
+                the CPU build:\n  sudo voxtype setup gpu --disable\n  \
+                systemctl --user restart voxtype"
+            .to_string();
+    }
+    let needs_baseline = tiered && cfg!(target_arch = "x86_64") && !cpu_has_avx2;
+    if needs_baseline && current != Some(Backend::Baseline) {
+        return if baseline_installed {
+            "Use the baseline CPU build, which runs without AVX2:\n  \
+             sudo voxtype setup variant --to voxtype-baseline"
+                .to_string()
+        } else {
+            "Use the baseline CPU build, which runs without AVX2: download \
+             voxtype-<version>-linux-x86_64-baseline from the release."
+                .to_string()
+        };
+    }
+    match current {
+        Some(backend) => format!("Keep using {}.", backend.display_name()),
+        None => "Keep using the CPU build.".to_string(),
+    }
+}
+
+/// Refuse to switch to Vulkan when it would crash here. Called before any
+/// path that points /usr/bin/voxtype at voxtype-vulkan.
+fn refuse_unrunnable_vulkan(tiered: bool) -> anyhow::Result<()> {
+    let facts = detect_vulkan_facts(tiered);
+    if facts.storage16 == vulkan_check::Storage16::Unknown {
+        tracing::debug!(
+            "Could not tell whether the GPU has 16-bit storage (vulkaninfo missing or silent)"
+        );
+    }
+    if let Some(blocker) = vulkan_check::blocker(&facts) {
+        let hint = cpu_fallback_hint(
+            tiered,
+            detect_current_backend(),
+            facts.cpu_has_avx2,
+            Path::new(VOXTYPE_LIB_DIR)
+                .join(Backend::Baseline.binary_name())
+                .exists(),
+        );
+        anyhow::bail!(
+            "{}",
+            blocker.refusal(&format!("Nothing was changed. {hint}"))
+        );
+    }
+    Ok(())
+}
+
 /// Enable GPU in simple mode (switch symlink from native to vulkan)
 fn enable_simple_mode() -> anyhow::Result<()> {
     let vulkan_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-vulkan");
@@ -986,6 +1066,42 @@ pub fn show_status(config: &crate::config::Config) {
     println!("\nAvailable backends:");
     let available = detect_available_backends();
     let current = detect_current_backend();
+    // Only worth a vulkaninfo run when the Whisper Vulkan build is in play.
+    let vulkan_blocker = (!is_parakeet && available.contains(&Backend::Vulkan))
+        .then(|| vulkan_check::blocker(&detect_vulkan_facts(tiered)))
+        .flatten();
+    let cpu_has_avx2 = crate::cpu::cpu_has_avx2();
+    let cpu_has_avx512 = crate::cpu::cpu_has_avx512f();
+    let not_on_this_cpu = |backend: Backend| -> Option<&'static str> {
+        if !cfg!(target_arch = "x86_64") {
+            return None;
+        }
+        match backend {
+            Backend::Avx2 if !cpu_has_avx2 => Some("needs AVX2, which this CPU lacks"),
+            Backend::Avx512 if !cpu_has_avx512 => Some("needs AVX-512, which this CPU lacks"),
+            _ => None,
+        }
+    };
+    let describe = |backend: Backend| -> String {
+        let installed = available.contains(&backend);
+        let mut status = if current == Some(backend) {
+            "active".to_string()
+        } else if installed {
+            "installed".to_string()
+        } else {
+            "not installed".to_string()
+        };
+        if installed {
+            if backend == Backend::Vulkan {
+                if let Some(b) = &vulkan_blocker {
+                    status = format!("{status}, {}", b.summary());
+                }
+            } else if let Some(why) = not_on_this_cpu(backend) {
+                status = format!("{status}, not usable here: {why}");
+            }
+        }
+        format!("  {} - {}", backend.display_name(), status)
+    };
 
     if is_parakeet {
         // Show ONNX backends (check both new and legacy names)
@@ -1040,34 +1156,24 @@ pub fn show_status(config: &crate::config::Config) {
             println!("  {} - {}", display, status);
         }
     } else if tiered {
-        for backend in [Backend::Avx2, Backend::Avx512, Backend::Vulkan] {
-            let installed = available.contains(&backend);
-            let active = current == Some(backend);
-
-            let status = if active {
-                "active"
-            } else if installed {
-                "installed"
-            } else {
-                "not installed"
-            };
-
-            println!("  {} - {}", backend.display_name(), status);
+        // Older packages have no baseline build; only list it where it
+        // exists or where it is the one this CPU needs.
+        let show_baseline = available.contains(&Backend::Baseline)
+            || (cfg!(target_arch = "x86_64") && !cpu_has_avx2);
+        for backend in [
+            Backend::Baseline,
+            Backend::Avx2,
+            Backend::Avx512,
+            Backend::Vulkan,
+        ] {
+            if backend == Backend::Baseline && !show_baseline {
+                continue;
+            }
+            println!("{}", describe(backend));
         }
     } else {
         for backend in [Backend::Native, Backend::Vulkan] {
-            let installed = available.contains(&backend);
-            let active = current == Some(backend);
-
-            let status = if active {
-                "active"
-            } else if installed {
-                "installed"
-            } else {
-                "not installed"
-            };
-
-            println!("  {} - {}", backend.display_name(), status);
+            println!("{}", describe(backend));
         }
     }
 
@@ -1128,6 +1234,17 @@ pub fn show_status(config: &crate::config::Config) {
             println!("To switch back to CPU:");
             println!("  sudo voxtype setup gpu --disable");
         }
+    } else if let Some(blocker) = &vulkan_blocker {
+        let hint = cpu_fallback_hint(
+            tiered,
+            current,
+            cpu_has_avx2,
+            available.contains(&Backend::Baseline),
+        );
+        if current == Some(Backend::Vulkan) {
+            println!("WARNING: the active Vulkan build cannot run on this machine.");
+        }
+        println!("{}", blocker.refusal(&hint));
     } else if current != Some(Backend::Vulkan) && available.contains(&Backend::Vulkan) {
         println!("To enable GPU acceleration:");
         println!("  sudo voxtype setup gpu --enable");
@@ -1362,7 +1479,12 @@ pub fn enable() -> anyhow::Result<()> {
             println!();
         }
 
-        if is_tiered_mode() {
+        // A Vulkan build that cannot run here crash-loops under systemd
+        // (Omarchy #11370), so refuse before touching the symlink.
+        let tiered = is_tiered_mode();
+        refuse_unrunnable_vulkan(tiered)?;
+
+        if tiered {
             switch_backend_tiered(Backend::Vulkan)?;
         } else {
             enable_simple_mode()?;
@@ -1440,16 +1562,27 @@ pub fn disable() -> anyhow::Result<()> {
 
 /// Detect the best CPU backend for this system (tiered mode)
 fn detect_best_cpu_backend() -> Backend {
-    // Check for AVX-512 support
-    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
-        if cpuinfo.contains("avx512f") {
-            let avx512_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-avx512");
-            if avx512_path.exists() {
-                return Backend::Avx512;
-            }
-        }
-    }
+    pick_cpu_backend(
+        crate::cpu::cpu_has_avx2(),
+        crate::cpu::cpu_has_avx512f(),
+        |b| Path::new(VOXTYPE_LIB_DIR).join(b.binary_name()).exists(),
+    )
+}
 
+/// The CPU build to fall back to. Without AVX2 only the baseline build
+/// runs; sending such a machine to voxtype-avx2 trades a GPU crash for a
+/// SIGILL.
+pub(crate) fn pick_cpu_backend(
+    has_avx2: bool,
+    has_avx512: bool,
+    installed: impl Fn(Backend) -> bool,
+) -> Backend {
+    if cfg!(target_arch = "x86_64") && !has_avx2 && installed(Backend::Baseline) {
+        return Backend::Baseline;
+    }
+    if has_avx512 && installed(Backend::Avx512) {
+        return Backend::Avx512;
+    }
     Backend::Avx2
 }
 
@@ -1509,6 +1642,67 @@ mod tests {
 
     fn installed(names: &'static [&'static str]) -> impl Fn(&str) -> bool {
         move |n| names.contains(&n)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    use super::pick_cpu_backend;
+
+    /// The AUR package installs only what the CPU can run: `baseline` and
+    /// `vulkan` without AVX2. That is still a packaged install.
+    #[test]
+    fn any_cpu_build_or_the_variant_file_marks_a_packaged_install() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_tiered_layout(dir.path()), "empty dir is not a package");
+        std::fs::write(dir.path().join("voxtype-vulkan"), "").unwrap();
+        assert!(!is_tiered_layout(dir.path()), "vulkan alone is not tiered");
+        for cpu in [
+            "voxtype-baseline",
+            "voxtype-avx2",
+            "voxtype-avx512",
+            "package-variants",
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(d.path().join(cpu), "").unwrap();
+            assert!(is_tiered_layout(d.path()), "{cpu}");
+        }
+    }
+    use super::{cpu_fallback_hint, Backend};
+
+    /// `setup gpu --disable` on a pre-AVX2 machine used to pick voxtype-avx2.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn cpu_fallback_is_baseline_without_avx2() {
+        let all = |_: Backend| true;
+        assert_eq!(pick_cpu_backend(false, false, all), Backend::Baseline);
+        assert_eq!(pick_cpu_backend(true, false, all), Backend::Avx2);
+        assert_eq!(pick_cpu_backend(true, true, all), Backend::Avx512);
+        // An older package without a baseline build keeps the old answer.
+        let no_baseline = |b: Backend| b != Backend::Baseline;
+        assert_eq!(pick_cpu_backend(false, false, no_baseline), Backend::Avx2);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn refusal_hint_points_pre_avx2_machines_at_baseline() {
+        let hint = cpu_fallback_hint(true, Some(Backend::Avx2), false, true);
+        assert!(
+            hint.contains("setup variant --to voxtype-baseline"),
+            "{hint}"
+        );
+        let hint = cpu_fallback_hint(true, Some(Backend::Avx2), false, false);
+        assert!(hint.contains("linux-x86_64-baseline"), "{hint}");
+        let hint = cpu_fallback_hint(true, Some(Backend::Baseline), false, true);
+        assert_eq!(hint, "Keep using CPU (baseline x86-64-v2).");
+        // A source build compiles voxtype-vulkan for the machine itself.
+        let hint = cpu_fallback_hint(false, Some(Backend::Native), false, false);
+        assert_eq!(hint, "Keep using CPU (native).");
+    }
+
+    /// The Haswell crash loop: Vulkan already active must say how to get out.
+    #[test]
+    fn refusal_hint_when_vulkan_is_already_active_says_disable() {
+        let hint = cpu_fallback_hint(true, Some(Backend::Vulkan), true, true);
+        assert!(hint.contains("sudo voxtype setup gpu --disable"), "{hint}");
     }
 
     /// #917: NVIDIA dGPU + AMD iGPU with both binaries installed got MIGraphX.

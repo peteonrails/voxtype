@@ -75,6 +75,14 @@ enum VoxtypeCLI {
         return status == "idle" || status == "recording" || status == "transcribing"
     }
 
+    /// Mirrors `Config::runtime_dir()` in the Rust daemon: $XDG_RUNTIME_DIR/voxtype,
+    /// else the per-user temp dir. A fixed directory under /tmp is shared by every
+    /// account on the Mac, so one user's files would block the others.
+    static var runtimeDir: String {
+        let base = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? NSTemporaryDirectory()
+        return (base as NSString).appendingPathComponent("voxtype")
+    }
+
     /// Restart the daemon (stop, clean up, start fresh)
     static func restartDaemon(completion: (() -> Void)? = nil) {
         DispatchQueue.global().async {
@@ -93,7 +101,7 @@ enum VoxtypeCLI {
             // Clean up lock and state files
             let rmTask = Process()
             rmTask.launchPath = "/bin/rm"
-            rmTask.arguments = ["-rf", "/tmp/voxtype"]
+            rmTask.arguments = ["-rf", runtimeDir]
             rmTask.standardOutput = FileHandle.nullDevice
             rmTask.standardError = FileHandle.nullDevice
             try? rmTask.run()

@@ -63,7 +63,7 @@ async fn history_streaming_cleanup_preserves_original_engine_text() {
     assert_eq!(got.lock().unwrap().as_deref(), Some(processed.as_str()));
     let mut session = Some(session);
     let mut chain = Some(chain);
-    daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain).await;
+    daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain, StreamingEndReason::Completed).await;
     tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(5)).unwrap()).await.unwrap();
     let entries = crate::history::HistoryStore::at(root.path().join("history")).all().unwrap();
     assert_eq!(entries.len(), 1);
@@ -94,7 +94,7 @@ async fn streaming_output_failure(name: &str, prior_delivery: bool) {
     assert!(session.type_partial_delta(&failure, "recoverable tail".into(), None, None).await.is_err());
     let mut session = Some(session);
     let mut chain = Some(failure);
-    daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain).await;
+    daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain, StreamingEndReason::Completed).await;
     tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(5)).unwrap()).await.unwrap();
     let entries = crate::history::HistoryStore::at(root.path().join("history")).all().unwrap();
     assert_eq!(entries.len(), 1);
@@ -194,7 +194,7 @@ async fn streaming_delivered_unfinished_tail(name: &str, prior_final: bool) {
     let writes_before_end = writes.lock().unwrap().clone();
     let mut session = Some(session);
     let mut chain = Some(chain);
-    daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain).await;
+    daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain, StreamingEndReason::Completed).await;
     tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(5)).unwrap()).await.unwrap();
     assert_eq!(*writes.lock().unwrap(), writes_before_end, "Ending must not retype or clean up already delivered partial text");
     let entries = crate::history::HistoryStore::at(root.path().join("history")).all().unwrap();
@@ -277,7 +277,7 @@ async fn streaming_revised_tail(name: &str, output_failure: bool, backend_failur
         let error = crate::error::TranscribeError::InferenceFailed("synthetic backend failure after revised partial".into());
         daemon.end_streaming_with_error(error, &mut state, &mut None, &mut None, &mut session, &mut chain).await;
     } else {
-        daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain).await;
+        daemon.end_streaming(&mut state, &mut None, &mut None, &mut session, &mut chain, StreamingEndReason::Completed).await;
     }
     tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(5)).unwrap()).await.unwrap();
     assert_eq!(*text.lock().unwrap(), actually_delivered, "Completion must not send another output or erase prior delivery");

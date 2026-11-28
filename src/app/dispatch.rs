@@ -106,8 +106,9 @@ pub(crate) async fn dispatch(
             let _ = std::process::Command::new("pkill")
                 .args(["-9", "-f", "voxtype-bin menubar"])
                 .status();
-            let _ = std::fs::remove_file("/tmp/voxtype/voxtype.lock");
-            let _ = std::fs::remove_file("/tmp/voxtype/menubar.lock");
+            let runtime_dir = config::Config::runtime_dir();
+            let _ = std::fs::remove_file(runtime_dir.join("voxtype.lock"));
+            let _ = std::fs::remove_file(runtime_dir.join("menubar.lock"));
 
             // Start daemon as a child process with logging
             let exe = std::env::current_exe()?;
@@ -339,8 +340,13 @@ pub(crate) async fn dispatch(
                     }
                 }
                 Some(SetupAction::Variant { to }) => {
-                    let variant =
-                        setup::binary::Variant::from_binary_name(&to).ok_or_else(|| {
+                    // Accept the short name too ("baseline"): the SIGILL
+                    // handler and the startup CPU check advise `--to baseline`.
+                    let variant = setup::binary::Variant::from_binary_name(&to)
+                        .or_else(|| {
+                            setup::binary::Variant::from_binary_name(&format!("voxtype-{to}"))
+                        })
+                        .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "Unknown variant '{}'. Expected one of: {}",
                                 to,
@@ -544,6 +550,8 @@ pub(crate) async fn dispatch(
                 voxtype::model_selection::validate_config_backend(&config)
                     .map_err(anyhow::Error::msg)?;
                 voxtype::model_selection::validate_ready(config.engine.name(), config.model_name())
+                    .map_err(anyhow::Error::msg)?;
+                voxtype::model_selection::validate_gguf_backend(&config)
                     .map_err(anyhow::Error::msg)?;
                 if require_idle {
                     voxtype::model_selection::validate_idle_for_restart(&config)

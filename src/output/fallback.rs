@@ -156,6 +156,13 @@ fn method_line(skip: &SkippedMethod, env: &FixEnv) -> Option<String> {
                     "dotool: not installed. Fix: install it from https://sr.ht/~geb/dotool/"
                         .to_string()
                 }
+                "xdotool" if env.session != DisplaySession::X11 => {
+                    "xdotool: needs an X display (DISPLAY is unset)".to_string()
+                }
+                "xdotool" => format!(
+                    "xdotool: not installed. Fix: {}",
+                    install_command(os, "xdotool")
+                ),
                 "ydotool" if env.ydotool_installed => {
                     "ydotool: ydotoold is not running. Fix: systemctl --user enable --now ydotool"
                         .to_string()
@@ -192,7 +199,10 @@ fn method_line(skip: &SkippedMethod, env: &FixEnv) -> Option<String> {
             if matches!(skip.name, "dotool" | "ydotool")
                 && (lower.contains("uinput") || lower.contains("permission denied"))
             {
-                line.push_str(". Fix: sudo usermod -aG input $USER, then log out and back in");
+                line.push_str(
+                    ". Fix: give your user write access to /dev/uinput (a dedicated uinput \
+                     group; see TROUBLESHOOTING), or use wtype/eitype",
+                );
             }
             Some(line)
         }
@@ -710,7 +720,7 @@ mod tests {
         ));
         assert!(!notice.body.contains("more"));
         assert!(notice.body.contains(
-            "dotool: Text injection failed: /dev/uinput: Permission denied. Fix: sudo usermod -aG input $USER"
+            "dotool: Text injection failed: /dev/uinput: Permission denied. Fix: give your user write access to /dev/uinput (a dedicated uinput group"
         ));
         assert_eq!(notice.key, "wtype:failed,dotool:failed");
     }

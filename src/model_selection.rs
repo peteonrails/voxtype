@@ -187,6 +187,16 @@ pub fn validate_worker(engine: &str, model: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A GGUF model asking for a `gguf_backend` the worker of the running build
+/// was not built with (`vulkan` on a CPU-only build) installs and validates
+/// fine, then fails when the worker loads it. Catch that before.
+pub fn validate_gguf_backend(config: &Config) -> Result<(), String> {
+    match crate::setup::variant_check::gguf_backend_mismatch(config) {
+        Some(mismatch) => Err(mismatch.explanation()),
+        None => Ok(()),
+    }
+}
+
 /// The installed-model check `validate_ready_in` leaves to the GGUF-capable
 /// engines, for every other engine an explicit selection can name. Kept out
 /// of `validate_ready_in` because restart validation runs that for whatever

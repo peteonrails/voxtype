@@ -42,7 +42,9 @@
 //! ## Requirements
 //!
 //! - dotool installed (https://sr.ht/~geb/dotool/)
-//! - User in 'input' group for uinput access
+//! - Write access to /dev/uinput, preferably through a dedicated `uinput`
+//!   group rather than `input`, which would also expose every keystroke
+//!   (docs/USER_MANUAL.md, "Giving dotool and ydotool access to uinput")
 //! - DOTOOL_XKB_LAYOUT set (on dotoold for the fixed-layout fast path, or in
 //!   voxtype config for direct dotool fallback) for non-US keyboard layouts,
 //!   with the matching desktop layout active
@@ -310,7 +312,8 @@ impl TextOutput for DotoolOutput {
             // Check for common errors
             if stderr.contains("uinput") || stderr.contains("permission") {
                 return Err(OutputError::InjectionFailed(format!(
-                    "{}: uinput permission denied. Is user in 'input' group?",
+                    "{}: no write access to /dev/uinput. Grant it with a dedicated uinput \
+                     group (docs/USER_MANUAL.md, \"Giving dotool and ydotool access to uinput\").",
                     invocation.binary
                 )));
             }

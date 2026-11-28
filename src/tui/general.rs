@@ -122,7 +122,12 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "unknown (symlink missing or unrecognized)".to_string());
 
     let rec = &inv.recommendation;
-    let recommended = format!("{}  /  {}", rec.whisper.display(), rec.onnx.display());
+    let recommended = format!(
+        "{}  /  {}",
+        rec.whisper.display(),
+        rec.onnx
+            .map_or("no ONNX build (needs AVX2)", |v| v.display())
+    );
 
     let lines = vec![
         Line::from(vec![
@@ -244,7 +249,7 @@ fn render_cell(app: &App, row: usize, col: usize) -> String {
 }
 
 fn is_recommended(v: Variant, r: &crate::setup::binary::Recommendation) -> bool {
-    v == r.whisper || v == r.onnx
+    v == r.whisper || r.onnx == Some(v)
 }
 
 fn render_hint(f: &mut Frame, area: Rect, app: &App) {
@@ -308,7 +313,7 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
         )));
         lines.push(Line::from(""));
     }
-    if variant == rec.onnx {
+    if rec.onnx == Some(variant) {
         lines.push(Line::from(Span::styled(
             "★ Recommended for ONNX engines on this hardware",
             Style::default()
@@ -346,7 +351,7 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
     // Only show concrete model picks on the recommended cells, where the user
     // is most likely to act on them. On non-recommended cells the static
     // `models:` line above is enough.
-    if variant == rec.whisper || variant == rec.onnx {
+    if variant == rec.whisper || rec.onnx == Some(variant) {
         let models = recommended_models(variant);
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(

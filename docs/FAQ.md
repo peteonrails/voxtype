@@ -40,8 +40,8 @@ No. All speech recognition is done locally using whisper.cpp. The only time netw
 All of them! Voxtype is optimized for Wayland compositors with native keybinding support:
 
 - **Hyprland, Sway, River** - Full push-to-talk via compositor keybindings (no special permissions needed)
-- **GNOME, KDE Plasma** - Works with built-in evdev hotkey (requires `input` group)
-- **X11 desktops (i3, etc.)** - Works with built-in evdev hotkey (requires `input` group)
+- **niri, GNOME, KDE Plasma** - Toggle mode via a custom shortcut that runs `voxtype record toggle` (no special permissions needed)
+- **X11 desktops (i3, etc.)** - Bind `voxtype record toggle` with your window manager or `xbindkeys`. The built-in evdev hotkey also works, but it needs the `input` group, which lets any program read every keystroke (see [the trade-off](USER_MANUAL.md#the-input-group-trade-off))
 
 For text output, Voxtype uses:
 - **wtype** on Wayland (best CJK/Unicode support, no daemon needed)
@@ -71,14 +71,9 @@ For **clipboard mode**: Works universally (you just need to paste manually).
 
 No. KDE Plasma and GNOME (on Wayland) do not support the virtual keyboard protocol that wtype requires. You'll see the error: "Compositor does not support the virtual keyboard protocol."
 
-**Solution:** Install dotool (recommended) or use ydotool. Voxtype automatically falls back to dotool, then ydotool, when wtype fails.
+**Solution:** Install eitype (needs no extra permissions), or dotool for non-US keyboard layouts. Voxtype automatically falls back to eitype, then dotool, then ydotool, when wtype fails.
 
-For dotool (recommended, supports keyboard layouts):
-```bash
-# Install dotool and add user to input group
-sudo usermod -aG input $USER
-# Log out and back in
-```
+dotool and ydotool need write access to `/dev/uinput`. Grant it through a dedicated group rather than the `input` group, which would also let your programs read every keystroke. See [Giving dotool and ydotool access to uinput](USER_MANUAL.md#giving-dotool-and-ydotool-access-to-uinput).
 
 For ydotool (requires daemon):
 ```bash
@@ -179,11 +174,11 @@ You can also override individual icons or create custom theme files. See the [Wa
 
 ## Technical
 
-### Why do I need to be in the 'input' group?
+### Do I need to be in the 'input' group?
 
-**Most Wayland users don't need this.** If you use compositor keybindings (Hyprland, Sway, River), voxtype doesn't need any special permissions.
+**Usually not, and you should avoid it.** With compositor or desktop keybindings (Hyprland, Sway, River, niri, KDE Plasma, GNOME), voxtype needs no special permissions.
 
-The `input` group is only required if you use voxtype's built-in evdev hotkey (e.g., on X11 or GNOME/KDE). The evdev subsystem requires read access to `/dev/input/event*` devices, which is restricted to the `input` group for security reasons.
+Only voxtype's built-in evdev hotkey needs the `input` group, because it reads `/dev/input/event*` directly. Membership applies to every program you run, so all of them can then read every key you press, passwords included. Some distributions, Omarchy among them, remove users from the group for that reason. Use the built-in hotkey only where nothing else can run `voxtype record`, and read [The `input` group trade-off](USER_MANUAL.md#the-input-group-trade-off) first.
 
 ### Why does it need wtype/dotool/ydotool?
 
@@ -245,12 +240,11 @@ No. All processing happens locally on your machine. No audio or text is sent to 
 2. Check that voxtype is running: `pgrep voxtype`
 3. Test manually: `voxtype record start` then `voxtype record stop`
 
-**Using built-in evdev hotkey:**
+**Using built-in evdev hotkey** (a fallback; prefer a keybinding):
 1. Make sure `enabled = true` in your config's `[hotkey]` section
-2. Verify you're in the `input` group: `groups | grep input`
-3. Log out and back in after adding to the group
-4. Check the key name with `evtest`
-5. Try running with debug: `voxtype -vv`
+2. Run `voxtype doctor`: it says whether the daemon can open a keyboard and why not. The built-in hotkey needs the `input` group; see [the trade-off](USER_MANUAL.md#the-input-group-trade-off) before adding it
+3. Check the key name with `evtest`
+4. Try running with debug: `voxtype -vv`
 
 ### No text is typed
 

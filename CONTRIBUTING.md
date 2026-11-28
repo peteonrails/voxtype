@@ -41,6 +41,23 @@ cargo test
 cargo run -- -vv
 ```
 
+### Tests that use real input devices
+
+A few tests create a real uinput keyboard or open the keyboards under
+`/dev/input`. When `/dev/uinput` is writable, the compositor treats that
+device like any other keyboard, and the keys a test emits can land in the
+window you are working in. `cargo test` therefore skips these tests and
+prints why. Run them in a VM, or in a session you are not using:
+
+```bash
+VOXTYPE_TEST_UINPUT=1 cargo test hotkey::evdev_listener
+```
+
+A new test that builds a uinput device or opens a real evdev device must
+call `crate::test_support::real_input_devices_allowed` first; a test in
+`src/test_support.rs` fails when a `VirtualDevice::builder()` call has no
+matching check.
+
 ### Code Style
 
 - Follow Rust conventions (use `cargo fmt` and `cargo clippy`)

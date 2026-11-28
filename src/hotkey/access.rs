@@ -97,11 +97,12 @@ pub fn startup_failure_notification(err: &HotkeyError) -> Option<(&'static str, 
                                instead, set [hotkey] enabled = false (or start with \
                                --no-hotkey) to turn the built-in hotkey off and silence this.";
     let body = match err {
-        HotkeyError::DeviceAccess(_) => format!(
-            "Permission denied reading keyboards in /dev/input. \
-             Run `sudo usermod -aG input $USER`, then log out and back in. {}",
-            ALTERNATIVE
-        ),
+        HotkeyError::DeviceAccess(_) => "The built-in hotkey can't read keyboards in /dev/input. \
+             Bind `voxtype record toggle` (or record start/stop) in your compositor and set \
+             [hotkey] enabled = false (or start with --no-hotkey) to turn the built-in hotkey \
+             off and silence this. Adding yourself to the 'input' group also works but lets \
+             every program read your keystrokes."
+            .to_string(),
         HotkeyError::InputGroupInactive(_) => format!(
             "You are in the 'input' group, but this session started before you were added. \
              Log out completely and back in (or reboot). {}",
@@ -246,9 +247,12 @@ mod tests {
     fn notification_names_the_fix() {
         let (_, body) =
             startup_failure_notification(&HotkeyError::DeviceAccess("x".into())).unwrap();
-        assert!(body.contains("sudo usermod -aG input $USER"));
-        assert!(body.contains("log out"));
-        assert!(body.contains("voxtype record toggle"));
+        // The compositor binding leads; the group is a trade-off, not the
+        // fix (Omarchy removed it on purpose).
+        assert!(!body.contains("usermod"));
+        assert!(body.contains("every program read your keystrokes"));
+        let binding = body.find("voxtype record toggle").unwrap();
+        assert!(binding < body.find("'input' group").unwrap());
         assert!(body.contains("[hotkey] enabled = false"));
         assert!(body.contains("--no-hotkey"));
         assert!(body.contains("silence this"));

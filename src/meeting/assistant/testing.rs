@@ -148,6 +148,46 @@ cat "$out/pi.reply""#,
         );
     }
 
+    /// Choose Omarchy's local model for `settings` and make Omarchy report
+    /// one text model, `qwen-test`, in `unit` state at `endpoint`, through
+    /// a fake `omarchy-models status --json` and a fixture key file. No
+    /// real Omarchy, model or key is touched.
+    pub fn use_omarchy(&self, settings: &mut AssistantSettings, unit: &str, endpoint: &str) {
+        let status = serde_json::json!({
+            "models": {"qwen-test": {"recipe": "qwen-test", "kind": "text",
+                                      "unit": unit, "endpoint": endpoint}},
+            "last": "qwen-test",
+        });
+        let fixture = self.dir.path().join("omarchy-status.json");
+        std::fs::write(&fixture, status.to_string()).unwrap();
+        let cmd = self.dir.path().join("omarchy-models");
+        crate::test_support::write_script(
+            &cmd,
+            &format!("#!/bin/sh\ncat '{}'\n", fixture.display()),
+        );
+        let key = self.dir.path().join("omarchy-key");
+        std::fs::write(&key, "fixture-key\n").unwrap();
+        settings.summary_backend = "omarchy".into();
+        settings.llm = Some(crate::llm::LlmConfig {
+            provider: crate::llm::Provider::Omarchy,
+            url: None,
+            model: None,
+            api_key_file: None,
+            settings: crate::llm::SettingNames {
+                table: "meeting.summary",
+                url: "openai_url",
+                model: "openai_model",
+            },
+        });
+        settings.env.omarchy = crate::llm::omarchy::OmarchyEnv {
+            models_command: Some(cmd),
+            key_file: Some(key),
+            probe_ports: Vec::new(),
+            status_timeout: Duration::from_secs(5),
+            check_port_owner: true,
+        };
+    }
+
     pub fn fake_omarchy(&self, prints: &str) {
         self.script(
             "omarchy-default-agent",
@@ -208,11 +248,13 @@ cat "$out/pi.reply""#,
                 ollama_url: url,
                 ..Default::default()
             },
+            llm: None,
             env: AssistantEnv {
                 path: Some(OsString::from(self.bin())),
                 consent_file: self.dir.path().join("state").join("assistant-consent.json"),
                 omarchy_command: "omarchy-default-agent".into(),
                 codex_home: self.home().join(".codex"),
+                omarchy: crate::llm::omarchy::OmarchyEnv::disabled(),
             },
             my_name: None,
         }

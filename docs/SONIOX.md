@@ -47,6 +47,7 @@ No local model files. No GPU.
 
    [soniox]
    language_hints = ["en"]   # adjust for your languages
+   # region = "eu"           # if your Soniox project is in the EU, Japan ("jp") or India ("in")
    ```
 4. Run voxtype, press the hotkey, dictate, press again to stop.
 
@@ -143,6 +144,7 @@ See [CONFIGURATION.md → [soniox]](CONFIGURATION.md#soniox) for the full field-
 | Field | Default | Notes |
 |---|---|---|
 | `api_key` | env: `SONIOX_API_KEY` | Required |
+| `region` | `us` | Region of the key's Soniox project: `us`, `eu`, `jp`, `in` |
 | `model` | `stt-rt-v6` (or `stt-async-v6` if `async_api`) | Advanced override |
 | `language_hints` | `["hu", "en"]` | Empty = auto-detect |
 | `language_hints_strict` | `true` | Restrict output to hinted languages (no-op if hints empty) |
@@ -199,7 +201,7 @@ See [TROUBLESHOOTING.md → Soniox Backend Issues](TROUBLESHOOTING.md#soniox-bac
 ## Limitations
 
 - **No on-prem option.** Soniox is SaaS only.
-- **Internet dependency.** No fallback to a local engine if the network drops mid-session — voxtype surfaces a `Streaming Error` notification and returns to idle.
+- **Internet dependency.** If the network drops mid-session, voxtype retains captured audio and recovers undelivered dictation through the configured batch backend by default. Disable or tune this in `[streaming_recovery]`.
 - **Stream sessions can't be replayed.** Once tokens arrive, they're processed once. The async API supports re-fetching transcripts, but realtime tokens are not stored.
 - **Tail revisions cause occasional cursor artifacts.** When Soniox revises a non-final token that voxtype already typed (e.g. `,` → `.`), voxtype emits a backspace+retype. In rare cases where the revision is bigger than my LCP-reconciler can handle, you may see transient duplication. Set `type_partials = false` to avoid entirely.
 - **Async API doesn't stream.** Use realtime for live cursor feedback.

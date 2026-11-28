@@ -75,6 +75,161 @@
     <main class="news-content">
         <div class="container">
 
+            <article class="news-article" id="v132">
+                <div class="article-meta">
+                    <time datetime="2026-11-27">November 27, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.3.2: Soniox Handshake Auth, Streaming Recovery, Omarchy's Local Model</h2>
+                <div class="article-body">
+                    <p>Voxtype 1.3.2 is mostly fixes, many of them contributor pull requests or issue reports, and several close Omarchy reports. It also moves the Soniox key into the WebSocket handshake, which Soniox requires from January 15, 2027.</p>
+                    <p>If you use Soniox, upgrade before then. After that date 1.3.1 and older get a 401 on every Soniox dictation.</p>
+
+                    <h3>Soniox: key in the handshake, and regions</h3>
+                    <p>Soniox stops accepting <code>api_key</code> in the first WebSocket message on 2027-01-15. Voxtype now sends the key as <code>Authorization: Bearer</code> on the upgrade request, for both realtime and async, and the start message no longer carries it (<a href="https://docs.soniox.com/authentication/websocket-authentication">Soniox docs</a>). Nothing changes in your config.</p>
+                    <p>Soniox projects are pinned to one data-residency region, and a key only works on its own region's hosts. Voxtype used the US hosts for everyone, so a key from an EU project did not work at all. <code>[soniox] region</code> picks the hosts:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[soniox]
+region = "eu"   # us (default), eu, jp, in</code></pre>
+                    </div>
+                    <p>Also <code>--soniox-region</code>, <code>VOXTYPE_SONIOX_REGION</code> and <code>voxtype config set soniox.region eu</code>. A typo fails when the engine starts, before any audio is sent, and the startup log names the host (#864, <a href="https://github.com/picombinator">@picombinator</a>, #871, <a href="https://github.com/kohanyirobert">@kohanyirobert</a>).</p>
+
+                    <h3>Recordings from a dead input stop</h3>
+                    <p>A microphone that is muted in hardware, off, or asleep can still open and stream. You talked for a minute and got nothing. Voxtype now checks the start of every recording and stops one whose input has delivered nothing but exact digital zero for 5 seconds. It plays the error cue and shows a notification that names the silent source.</p>
+                    <p>The rule is zero-only on purpose. A single non-zero sample, however quiet, counts as input, so a noise gate that holds the mic at zero until you speak only trips the guard if you say nothing for the whole window. A DC offset is not treated as dead.</p>
+                    <p>The guard is on by default:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[audio.dead_input]
+enabled = true
+window_ms = 5000</code></pre>
+                    </div>
+                    <p><code>VOXTYPE_DEAD_INPUT_DETECTION=false</code> turns it off for one process (#1063, <a href="https://github.com/sjawhar">@sjawhar</a>).</p>
+
+                    <h3>Streaming recovers instead of losing the dictation</h3>
+                    <p>A streaming backend that failed mid-recording took the dictation with it, although the capture still held every sample. Now a session that ends without delivering text runs the retained audio through the normal batch path, with your text processing, history and output chain, and a notification says it was recovered that way.</p>
+                    <p>A stop also has a deadline now. If the backend has not finished 30 seconds after the mic stops, Voxtype tears the session down itself and recovers the audio. 30 seconds is long enough for a slow CPU to finish a local sliding-window engine's last window, and short enough that a stuck backend can't hold the session open forever.</p>
+                    <p>Soniox recovers with Whisper first, since a lost connection is the usual cause. Parakeet and other local streaming engines recover with their own batch path first, because the model is already loaded. Text that was already typed, or already went through the output chain, is never sent a second time.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[streaming_recovery]
+enabled = true
+stop_timeout_secs = 30   # 1 to 120</code></pre>
+                    </div>
+                    <p>Also <code>--streaming-recovery=false</code>, <code>--streaming-stop-timeout-secs</code>, <code>VOXTYPE_STREAMING_RECOVERY</code> and <code>VOXTYPE_STREAMING_STOP_TIMEOUT_SECS</code> (#1066, <a href="https://github.com/sjawhar">@sjawhar</a>).</p>
+
+                    <h3>Omarchy's local model for summaries, Ask and cleanup</h3>
+                    <p>Omarchy runs a local text model (<code>omarchy models</code>). Voxtype can now use it for meeting summaries, meeting questions and dictation cleanup:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.summary]
+backend = "omarchy"</code></pre>
+                    </div>
+                    <p>It counts as local, like Ollama: no agent prompt, since the transcript never leaves the machine. Voxtype finds the model only through what Omarchy documents for third-party clients (<code>omarchy-models status --json</code>, a loopback address, the key in <code>~/.config/omarchy/agent-local/key</code>). It never starts, installs or downloads a model. When none is running, the log says how to start one and Voxtype falls back to whatever it would have used before. The key is read per request and never logged.</p>
+                    <p>A config that <code>voxtype setup</code> writes on an Omarchy install now picks <code>backend = "omarchy"</code> for summaries. An existing config keeps what it has.</p>
+                    <p>Dictation cleanup through a model is off unless you choose it, because it adds roughly 2 to 6 seconds to every dictation:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output.post_process]
+backend = "omarchy"
+timeout_ms = 15000</code></pre>
+                    </div>
+                    <p>On a timeout or any failure, the original text is typed. If all you want is fillers removed, LARD does that in milliseconds.</p>
+                    <p><code>backend = "openai"</code> does the same with any OpenAI-compatible server (llama-server, LM Studio, vLLM). For meetings it answers questions only when the server is on this machine. Ask through <code>pi</code> also reaches Omarchy's model now, by loading Omarchy's one <code>omarchy-local.ts</code> extension while every other extension stays off. <code>voxtype doctor</code> reports whether Omarchy's model was found, is running and answers.</p>
+
+                    <h3>Paste mode</h3>
+                    <ul>
+                        <li>Clipboard reads give up after 2 seconds. A frozen app that owned the selection used to hold the dictation forever with the state stuck on "transcribing" (#1003, <a href="https://github.com/jiri-one">@jiri-one</a>).</li>
+                        <li>A failed clipboard read is no longer treated as an empty clipboard, and the restore keeps the most specific text type instead of whatever was offered first.</li>
+                        <li>The restore runs after the paste lands, in the background. The OSD shows the result and the daemon goes idle right after the paste, not <code>restore_clipboard_delay_ms</code> later (#1079, <a href="https://github.com/charlielockyer-rice">@charlielockyer-rice</a>). If you copied something in the meantime, the restore leaves it alone.</li>
+                        <li>A <code>voxtype record start</code> or <code>toggle</code> sent while a dictation was still being typed no longer starts a recording once the typing finishes (#1004, <a href="https://github.com/jiri-one">@jiri-one</a>).</li>
+                    </ul>
+
+                    <h3>Hyprland paste driver</h3>
+                    <p>wtype puts its first key on keycode 1, which XWayland and Electron apps read as Escape. Paste mode's Shift+Insert reached some apps as Shift+Escape and opened a dialog instead of pasting (Omarchy <a href="https://github.com/omacom/omarchy/issues/16536">#16536</a>, <a href="https://github.com/omacom/omarchy/issues/18935">#18935</a>). On Hyprland, the compositor can send the shortcut itself, with your real keymap and no uinput access:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+mode = "paste"
+driver_order = ["hyprland", "wtype"]</code></pre>
+                    </div>
+                    <p>It is paste-only and opt-in. Outside a Hyprland session it is skipped and the next driver is used. It works with both Hyprland's Lua dispatch (0.55 and later) and the older <code>sendshortcut</code>. <code>VOXTYPE_DRIVER_ORDER</code> is new too (#938, <a href="https://github.com/agata">@agata</a>, <a href="https://github.com/ninyawee">@ninyawee</a>).</p>
+
+                    <h3>xdotool output driver</h3>
+                    <p><code>xdotool</code> types through XTEST on an X11 session, with no daemon. It is opt-in: name it in <code>driver_order</code>. It needs <code>DISPLAY</code>, and under Wayland it only reaches XWayland windows.</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+driver_order = ["xdotool", "xclip"]</code></pre>
+                    </div>
+                    <p>Number and letter keys (<code>KEY_1</code>, <code>KEY_A</code> and so on) can also be used as evdev hotkeys now (#559, <a href="https://github.com/iacore">@iacore</a>).</p>
+
+                    <h3>Whisper keeps its state between dictations</h3>
+                    <p>Every Whisper transcription used to create a new state, which allocates the KV caches and compute buffers on the GPU again. <a href="https://github.com/someonewithpc">@someonewithpc</a> measured that at about 0.83 seconds per dictation on an RTX 3080 with large-v3-turbo on Vulkan. Voxtype now keeps one state and creates it when recording starts, so the first dictation after the model loads doesn't pay for it either. Language detection, the decode and its retry share that one state (#1088, #1089, <a href="https://github.com/someonewithpc">@someonewithpc</a>, #1022, <a href="https://github.com/felipe-NR">@felipe-NR</a>, whose reading of whisper.cpp showed the reuse can't leak one dictation into the next).</p>
+                    <p>The kept state stays in GPU memory between dictations, on top of the model. If you need that memory back when you're not dictating, <code>gpu_isolation = true</code> runs each transcription in a worker process that exits afterwards:</p>
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+gpu_isolation = true</code></pre>
+                    </div>
+
+                    <h3>macOS: one Voxtype per user</h3>
+                    <p>macOS has no <code>XDG_RUNTIME_DIR</code>, so every account on a Mac shared <code>/tmp/voxtype</code>, and the first user to run Voxtype owned the lock files. Runtime files (locks, pid, state) now live in <code>$TMPDIR/voxtype</code>, which macOS makes per user. With fast user switching, a daemon in a background session also ignores the hotkey, so it no longer records silence and types "Thank you." into the active user's session. Linux paths are unchanged (#1100, <a href="https://github.com/M0tionl3ss">@M0tionl3ss</a>).</p>
+                    <p>If a script of yours reads <code>/tmp/voxtype/state</code> on a Mac, point it at <code>$TMPDIR/voxtype/state</code>.</p>
+
+                    <h3>CPUs without AVX2</h3>
+                    <p>A fresh deb or rpm install on a CPU without AVX2 crashed with SIGILL, because <code>/usr/bin/voxtype</code> only ever picked the AVX-512 or AVX2 build. So did the <code>voxtype setup variant --to baseline</code> it suggested. It now runs <code>voxtype-baseline</code> when the CPU has no AVX2. A build you pick with <code>setup variant</code> still wins.</p>
+                    <ul>
+                        <li><code>voxtype info variants</code> recommends the baseline build on those CPUs, and never the Vulkan or ONNX builds, which need AVX2 too.</li>
+                        <li>The AUR packages install only the builds a CPU can run, and that layout is now recognized as a packaged install, so the AVX2 check applies there too. The AUR post-install no longer suggests <code>setup gpu --enable</code> on those CPUs.</li>
+                    </ul>
+
+                    <h3>A model that fails to load no longer takes the daemon down</h3>
+                    <p>Voxtype used to exit when the startup model load failed, and systemd restarted it in a loop, with no tray icon. It now keeps running, shows one notification, marks the tray and status as needing attention, and tries the model again on the next recording. Fixing the config or switching builds recovers without a restart loop.</p>
+                    <p><code>voxtype config validate-selection</code>, <code>voxtype doctor</code> and the startup check also catch a <code>gguf_backend</code> the active build cannot provide, such as <code>vulkan</code> on the AVX-512 or baseline build, and name the fix.</p>
+
+                    <h3>Whisper repeats</h3>
+                    <ul>
+                        <li>When the decoder repeats a phrase back to back, Voxtype runs the audio again with beam search and keeps the cleaner result, then collapses any repeats that remain (#827, <a href="https://github.com/someonewithpc">@someonewithpc</a>).</li>
+                        <li>With a reduced audio context, Whisper sometimes starts the transcript over partway through, so the text came out twice. Voxtype now keeps one copy (#898, <a href="https://github.com/someonewithpc">@someonewithpc</a>).</li>
+                    </ul>
+
+                    <h3>Bug fixes</h3>
+                    <ul>
+                        <li><strong>Dictation history works on atomic Fedora.</strong> History refused every symbolic link in its path, so it recorded nothing on Silverblue, Kinoite and other atomic Fedora variants, where <code>/home</code> is a link to <code>/var/home</code>. Links owned by root above the history directory are now accepted. A link anyone else made, or a linked history directory itself, is still refused.</li>
+                        <li><code>voxtype meeting assistant status</code> names the model that actually answers. With <code>[meeting.summary] backend = "omarchy"</code> or <code>"openai"</code> it named Ollama's default model.</li>
+                        <li>On macOS, the meeting view's "is the window open" check no longer depends on <code>/proc</code>, so status notices are quieted while the view is open.</li>
+                        <li>Feedback cues open an output stream per sound and play one at a time. The long-lived stream went silent after suspend and resume, and could spin a core forever after an ALSA error. With no stream open while idle, a Bluetooth headset can clip the start cue as it wakes (#848, #859, #870, <a href="https://github.com/LucasFrendorf">@LucasFrendorf</a>, with <a href="https://github.com/thpham">@thpham</a>, <a href="https://github.com/pederbe">@pederbe</a>, <a href="https://github.com/paoloantinori">@paoloantinori</a> and <a href="https://github.com/vonwerderc">@vonwerderc</a>).</li>
+                        <li><code>voxtype setup gpu --enable</code> refuses machines where the Vulkan build would crash: a CPU without AVX2, or a GPU without 16-bit storage such as Haswell graphics. Under systemd both became a crash loop: in Omarchy <a href="https://github.com/omacom/omarchy/issues/11370">#11370</a> the daemon aborted and restarted every 5 seconds while the core dump list kept growing (<a href="https://github.com/llyorshch">@llyorshch</a>). <code>--disable</code> picks the baseline build on a CPU without AVX2, and <code>setup variant --to baseline</code> works.</li>
+                        <li>A CPU below x86-64-v2 gets a message that says so, from every binary including the OSD, meetings window and audio bridge. They used to send you to the baseline build, which crashes the same way (Omarchy <a href="https://github.com/omacom/omarchy/issues/7883">#7883</a>).</li>
+                        <li>The Quickshell OSD animates once per display frame instead of on a 16 ms timer, so it no longer judders on 120 Hz screens (#1078, <a href="https://github.com/charlielockyer-rice">@charlielockyer-rice</a>).</li>
+                        <li>A minimized meeting pill dragged to the left edge stays there, and expands in place.</li>
+                        <li><code>voxtype configure</code> no longer cycles the Whisper mode onto <code>cli</code> when <code>whisper-cli</code> isn't installed. That mode recorded and typed nothing (Omarchy <a href="https://github.com/omacom/omarchy/issues/18694">#18694</a>). The daemon, <code>doctor</code>, <code>setup check</code> and <code>config set</code> now name both ways out: install whisper-cpp, or <code>voxtype config set whisper.mode local</code>.</li>
+                        <li>A <code>whisper</code> on PATH is no longer used as whisper-cli. That name is OpenAI's Python CLI.</li>
+                    </ul>
+
+                    <h3>Docs and messages: compositor bindings first</h3>
+                    <p>Omarchy removed users from the <code>input</code> group on purpose, because any process in it can read every keystroke. The docs, the hotkey errors and <code>voxtype doctor</code> still told people to add themselves back. They now lead with binding <code>voxtype record</code> in your compositor, with niri and GNOME examples, and describe the input group as a trade-off with its cost. dotool and ydotool get a dedicated <code>uinput</code> group through a udev rule instead, which grants <code>/dev/uinput</code> without exposing what you type.</p>
+
+                    <h3>For contributors</h3>
+                    <p>Tests that create a real uinput device, or open the keyboards under <code>/dev/input</code>, run only with <code>VOXTYPE_TEST_UINPUT=1</code>. A plain <code>cargo test</code> on a desktop used to be able to type into the focused window.</p>
+
+                    <h3>Upgrading</h3>
+                    <ul>
+                        <li>Soniox users: upgrade before January 15, 2027.</li>
+                        <li>The dead-input guard is on for existing configs. A recording stops only after 5 seconds of pure digital zero. <code>[audio.dead_input] enabled = false</code> turns it off.</li>
+                        <li>Streaming recovery is on for existing configs. A config that already set <code>stop_timeout_secs</code> keeps its value.</li>
+                        <li>Whisper holds one state in memory between dictations. Use <code>gpu_isolation = true</code> if you need GPU memory freed.</li>
+                        <li>macOS runtime files move from <code>/tmp/voxtype</code> to <code>$TMPDIR/voxtype</code>.</li>
+                        <li>On Omarchy, restart the shell after upgrading (<code>omarchy-restart-shell</code>).</li>
+                    </ul>
+
+                    <h3>Thanks</h3>
+                    <p>Thank you to <a href="https://github.com/picombinator">@picombinator</a>, <a href="https://github.com/kohanyirobert">@kohanyirobert</a>, <a href="https://github.com/sjawhar">@sjawhar</a>, <a href="https://github.com/jiri-one">@jiri-one</a>, <a href="https://github.com/charlielockyer-rice">@charlielockyer-rice</a>, <a href="https://github.com/agata">@agata</a>, <a href="https://github.com/ninyawee">@ninyawee</a>, <a href="https://github.com/iacore">@iacore</a>, <a href="https://github.com/someonewithpc">@someonewithpc</a>, <a href="https://github.com/felipe-NR">@felipe-NR</a>, <a href="https://github.com/M0tionl3ss">@M0tionl3ss</a>, <a href="https://github.com/LucasFrendorf">@LucasFrendorf</a>, <a href="https://github.com/thpham">@thpham</a>, <a href="https://github.com/pederbe">@pederbe</a>, <a href="https://github.com/paoloantinori">@paoloantinori</a>, <a href="https://github.com/vonwerderc">@vonwerderc</a>, <a href="https://github.com/llyorshch">@llyorshch</a>, <a href="https://github.com/mrehanabbasi">@mrehanabbasi</a> (#727) and <a href="https://github.com/Adamkadaban">@Adamkadaban</a> (#502), whose pull requests found the same problems the state reuse and the per-sound feedback stream fix.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v131">
                 <div class="article-meta">
                     <time datetime="2026-11-21">November 21, 2026</time>

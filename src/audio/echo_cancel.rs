@@ -1367,7 +1367,9 @@ mod tests {
     }
 
     /// A canceller whose shell was killed on its own is stopped by the next
-    /// start.
+    /// start. Linux only: `stop_stale` finds the orphan through /proc, and
+    /// the PipeWire canceller it stops exists only on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_stale_canceller_is_stopped_at_the_next_start() {
         let fakes = Fakes::new("sources", SOURCE_NODE);

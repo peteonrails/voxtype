@@ -9,6 +9,7 @@ use voxtype::meeting::{self, MeetingConfig, MeetingData, MeetingSummary};
 use voxtype::{config, AssistantAction};
 
 /// How long `ask --notify` waits for the notification to be answered.
+#[cfg(target_os = "linux")]
 const NOTIFY_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// `meeting show --json`: the meeting plus its saved questions and answers.
@@ -354,13 +355,39 @@ fn print_status(settings: &AssistantSettings) {
         "path" => "found on PATH",
         _ => "",
     };
+    // Name the model that actually answers, from the same resolution the
+    // JSON status uses: an Omarchy or OpenAI-compatible endpoint when one is
+    // configured, Ollama otherwise.
+    let status = assistant::status_json(settings);
+    let local_name = status["backend_name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{} at {}",
+                settings.summary.ollama_model, settings.summary.ollama_url
+            )
+        });
     if settings.local_only {
-        println!(
-            "Assistant: local model only ({} at {})",
-            settings.summary.ollama_model, settings.summary.ollama_url
-        );
+        println!("Assistant: local model only ({local_name})");
     } else {
+        // A configured Omarchy or OpenAI-compatible model takes questions
+        // ahead of any agent found, so say that instead of the agent.
+        let llm_overrides_agent = res
+            .agent
+            .as_ref()
+            .is_some_and(|a| status["backend_name"].as_str().is_some_and(|n| n != a.name));
         match &res.agent {
+            Some(a) if llm_overrides_agent => {
+                println!(
+                    "Assistant: {local_name} ([meeting.summary] backend = \"{}\")",
+                    settings.summary_backend
+                );
+                println!(
+                    "           {} was found but is not used while that backend is set.",
+                    a.name
+                );
+            }
             Some(a) => {
                 println!(
                     "Assistant: {} ({}) at {}",
@@ -385,13 +412,13 @@ fn print_status(settings: &AssistantSettings) {
                 if let Some(p) = &res.problem {
                     println!("Assistant: none: {p}");
                 } else {
-                    println!(
-                        "Assistant: no agent found; using the local model ({} at {})",
-                        settings.summary.ollama_model, settings.summary.ollama_url
-                    );
+                    println!("Assistant: no agent found; using {local_name}");
                 }
             }
         }
+    }
+    if let Some(note) = status["summary_note"].as_str() {
+        println!("           {note}");
     }
     if res.choice_required {
         println!("           Several agents were found; allow the one you want to use.");
@@ -469,10 +496,12 @@ pub(crate) async fn run_summarize(
                 agent: args.agent.clone(),
             };
             // Ask for consent up front on a terminal, like `ask` does. The
-            // older "local"/"remote" summarizers need none.
+            // older "local"/"remote" summarizers need none, nor does a
+            // chosen "omarchy"/"openai" model.
             let legacy = matches!(
                 assistant::choose_summary_backend(&settings, &overrides),
-                Ok(assistant::SummaryBackend::Legacy(_))
+                Ok(assistant::SummaryBackend::Legacy(_)
+                    | assistant::SummaryBackend::Assistant(Backend::Llm(_)))
             );
             if interactive() && !legacy {
                 match backend_for(&settings, &overrides, true) {
@@ -494,7 +523,10 @@ pub(crate) async fn run_summarize(
             .await?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             if let Some(failed) = &outcome.fell_back_from {
-                eprintln!("{failed} failed; summarized with the local model instead.");
+                eprintln!(
+                    "{failed} failed; summarized with {} instead.",
+                    outcome.agent_name
+                );
             }
             eprintln!(
                 "Summarized by {}{}",

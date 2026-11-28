@@ -49,7 +49,17 @@ impl VariantMismatch {
             .unwrap_or("the running binary");
         let hint = install_hint::hint(Need::Feature(self.required_feature));
         match (&self.remediation, &hint) {
-            (Remediation::SwitchToVariant { target }, Hint::Switch { command }) => format!(
+            (Remediation::SwitchToVariant { target: None }, _) => format!(
+                "{} was built without --features {}, and the builds that have it need a CPU \
+                 with AVX2, which this one lacks. Choose an engine the running build supports.",
+                active, self.required_feature,
+            ),
+            (
+                Remediation::SwitchToVariant {
+                    target: Some(target),
+                },
+                Hint::Switch { command },
+            ) => format!(
                 "{} was built without --features {}. \
                  Run `{}` (or open `voxtype configure` and press F2) \
                  to switch to {}.",
@@ -83,8 +93,9 @@ pub enum Remediation {
     /// `/usr/bin/voxtype` dispatch to the listed variant. `target` is the
     /// recommended ONNX variant for this host's hardware
     /// (`Inventory::recommendation.onnx`); the variant switcher screen
-    /// uses it as the default selection.
-    SwitchToVariant { target: Variant },
+    /// uses it as the default selection. `None` when no ONNX build runs on
+    /// this CPU (no AVX2), so there is nothing to switch to.
+    SwitchToVariant { target: Option<Variant> },
     /// Source install (cargo build from a git checkout). The user has to
     /// rebuild — there's no separate ONNX variant to swap to. `feature`
     /// is the Cargo feature to add to the build, e.g. `"parakeet"`.
@@ -143,6 +154,173 @@ pub fn detect_mismatch(config: &Config, inventory: &Inventory) -> Option<Variant
     })
 }
 
+/// `gguf_backend` values that need a GPU backend compiled into the worker.
+/// `auto`, `cpu` and `cpu_accel` run on any worker.
+const GGUF_GPU_BACKENDS: [&str; 4] = ["vulkan", "cuda", "rocm", "metal"];
+
+/// GPU backends the packaged GGUF worker named `worker_name` was built with,
+/// or `None` for a worker this table does not know: a source build, a custom
+/// `VOXTYPE_GGUF_WORKER`, the generic `voxtype-gguf-worker`, aarch64 or Nix.
+///
+/// Mirrors the release Dockerfiles. The Vulkan build and every x86_64 ONNX
+/// build ship a worker built with `--features vulkan` (which
+/// `scripts/verify-gguf-companion.sh --vulkan` checks links libvulkan), and
+/// the CPU Whisper builds ship a CPU-only one. No packaged worker has CUDA,
+/// ROCm or Metal.
+pub fn packaged_worker_gpu_backends(worker_name: &str) -> Option<&'static [&'static str]> {
+    match worker_name {
+        "voxtype-gguf-worker-baseline"
+        | "voxtype-gguf-worker-avx2"
+        | "voxtype-gguf-worker-avx512" => Some(&[]),
+        "voxtype-gguf-worker-vulkan"
+        | "voxtype-gguf-worker-onnx-avx2"
+        | "voxtype-gguf-worker-onnx-avx512"
+        | "voxtype-gguf-worker-onnx-cuda-12"
+        | "voxtype-gguf-worker-onnx-cuda-13"
+        | "voxtype-gguf-worker-onnx-migraphx" => Some(&["vulkan"]),
+        _ => None,
+    }
+}
+
+/// The active GGUF model asks for a `gguf_backend` the worker of the running
+/// build was not built with, so transcribe.cpp cannot bind it and the model
+/// fails to load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GgufBackendMismatch {
+    /// Config section of the GGUF engine, e.g. `"cohere"`.
+    pub section: &'static str,
+    /// The requested backend, lowercased, e.g. `"vulkan"`.
+    pub requested: String,
+    /// File name of the worker that would run the model, e.g.
+    /// `"voxtype-gguf-worker-avx512"`.
+    pub worker: String,
+    /// GPU backends that worker was built with.
+    pub worker_gpu_backends: &'static [&'static str],
+}
+
+impl GgufBackendMismatch {
+    /// The requested backend as it reads in a sentence, e.g. "Vulkan".
+    pub fn backend_label(&self) -> &str {
+        match self.requested.as_str() {
+            "vulkan" => "Vulkan",
+            "cuda" => "CUDA",
+            "rocm" => "ROCm",
+            "metal" => "Metal",
+            other => other,
+        }
+    }
+
+    /// The build that ships this worker, e.g. "voxtype-avx512".
+    fn build(&self) -> String {
+        match self.worker.strip_prefix("voxtype-gguf-worker-") {
+            Some(variant) => format!("voxtype-{variant}"),
+            // The packaged generic worker belongs to the baseline build.
+            None if self.worker == "voxtype-gguf-worker" => "voxtype-baseline".to_string(),
+            None => "this voxtype build".to_string(),
+        }
+    }
+
+    /// What is wrong, in one sentence.
+    pub fn summary(&self) -> String {
+        let built = if self.worker_gpu_backends.is_empty() {
+            "runs on the CPU only".to_string()
+        } else {
+            format!("was built without {}", self.backend_label())
+        };
+        format!(
+            "{section}.gguf_backend is \"{requested}\", but the GGUF worker of {build} ({worker}) \
+             {built}, so the {section} model cannot load.",
+            section = self.section,
+            requested = self.requested,
+            build = self.build(),
+            worker = self.worker,
+        )
+    }
+
+    /// How to fix it. `vulkan_build` is how to get onto the Vulkan build,
+    /// from [`crate::setup::install_hint`].
+    pub fn fix_with(&self, vulkan_build: &crate::setup::install_hint::Hint) -> String {
+        let key = format!("{}.gguf_backend", self.section);
+        let stay = format!("`voxtype config set {key} auto`");
+        let worker_has_vulkan = self.worker_gpu_backends.contains(&"vulkan");
+        match (self.requested.as_str(), worker_has_vulkan) {
+            ("vulkan", _) => format!(
+                "To run it on the GPU, {vulkan_build} and restart voxtype. \
+                 To stay on this build, run {stay}."
+            ),
+            (_, true) => format!(
+                "Voxtype's GGUF workers use Vulkan for the GPU, not {}. \
+                 Run `voxtype config set {key} vulkan`, or {stay}.",
+                self.backend_label()
+            ),
+            (_, false) => format!(
+                "Voxtype's GGUF workers use Vulkan for the GPU, not {}. \
+                 Run {stay} to use the CPU, or to run it on the GPU, {vulkan_build}, \
+                 restart voxtype and run `voxtype config set {key} vulkan`.",
+                self.backend_label()
+            ),
+        }
+    }
+
+    /// [`Self::fix_with`] for how voxtype is installed on this machine.
+    pub fn fix(&self) -> String {
+        use crate::setup::install_hint::{self, Need};
+        self.fix_with(&install_hint::hint(Need::Variant(Variant::WhisperVulkan)))
+    }
+
+    /// Summary and fix, for the daemon's startup notice and
+    /// `voxtype config validate-selection`.
+    pub fn explanation(&self) -> String {
+        format!("{} {}", self.summary(), self.fix())
+    }
+}
+
+/// Returns `Some` when the active GGUF model requests a GPU backend that
+/// `worker`, the worker that would run it, is known not to have. Workers the
+/// table in [`packaged_worker_gpu_backends`] does not know are trusted.
+pub fn detect_gguf_backend_mismatch(
+    config: &Config,
+    worker: &std::path::Path,
+) -> Option<GgufBackendMismatch> {
+    let active = config.active_gguf()?;
+    let requested = active.backend.to_ascii_lowercase();
+    if !GGUF_GPU_BACKENDS.contains(&requested.as_str()) {
+        return None;
+    }
+    let in_package_dir = worker.parent() == Some(std::path::Path::new("/usr/lib/voxtype"));
+    let worker = worker.file_name()?.to_str()?;
+    // Packages install the baseline build's worker under the generic name,
+    // and it is CPU-only. Elsewhere the generic name is a source build's.
+    let worker_gpu_backends = if in_package_dir && worker == "voxtype-gguf-worker" {
+        &[][..]
+    } else {
+        packaged_worker_gpu_backends(worker)?
+    };
+    if worker_gpu_backends.contains(&requested.as_str()) {
+        return None;
+    }
+    Some(GgufBackendMismatch {
+        section: active.section,
+        requested,
+        worker: worker.to_string(),
+        worker_gpu_backends,
+    })
+}
+
+/// [`detect_gguf_backend_mismatch`] for the worker this process would spawn.
+/// A build without the GGUF client has no worker to ask about.
+pub fn gguf_backend_mismatch(config: &Config) -> Option<GgufBackendMismatch> {
+    #[cfg(any(feature = "cohere-gguf", feature = "parakeet-gguf", feature = "gguf"))]
+    {
+        detect_gguf_backend_mismatch(config, &crate::transcribe::gguf_subprocess::worker_path())
+    }
+    #[cfg(not(any(feature = "cohere-gguf", feature = "parakeet-gguf", feature = "gguf")))]
+    {
+        let _ = config;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,7 +354,7 @@ mod tests {
             recommendation: Recommendation {
                 whisper: Variant::WhisperAvx2,
                 whisper_reason: "test",
-                onnx: recommendation_onnx,
+                onnx: Some(recommendation_onnx),
                 onnx_reason: "test",
                 primary: Variant::WhisperAvx2,
             },
@@ -234,8 +412,8 @@ mod tests {
         assert_eq!(m.active_variant_name.as_deref(), Some("voxtype-avx2"));
         match m.remediation {
             Remediation::SwitchToVariant { target } => {
-                assert_eq!(target, Variant::OnnxAvx2);
-                assert_eq!(target.family(), EngineFamily::Onnx);
+                assert_eq!(target, Some(Variant::OnnxAvx2));
+                assert_eq!(target.map(Variant::family), Some(EngineFamily::Onnx));
             }
             Remediation::Rebuild { .. } => panic!("package install should recommend variant swap"),
         }
@@ -269,6 +447,137 @@ mod tests {
                 panic!("source install should recommend rebuild, not variant swap")
             }
         }
+    }
+
+    fn cohere_gguf(backend: &str) -> Config {
+        let mut config = Config::default();
+        config.set_model_for(
+            TranscriptionEngine::Cohere,
+            "cohere-transcribe-03-2026-Q4_K_M.gguf",
+        );
+        config.cohere.as_mut().unwrap().gguf_backend = backend.to_string();
+        config
+    }
+
+    const SWITCH: crate::setup::install_hint::Hint = crate::setup::install_hint::Hint::Switch {
+        command: "sudo voxtype setup gpu --enable",
+    };
+
+    /// voxtype-bin-rc left /usr/bin/voxtype on voxtype-avx512, whose worker
+    /// has no Vulkan, under a config with cohere.gguf_backend = "vulkan".
+    #[test]
+    fn vulkan_backend_on_a_cpu_only_worker_is_a_mismatch() {
+        let config = cohere_gguf("vulkan");
+        let worker = std::path::Path::new("/usr/lib/voxtype/voxtype-gguf-worker-avx512");
+        let m = detect_gguf_backend_mismatch(&config, worker).expect("mismatch");
+        assert_eq!(m.section, "cohere");
+        assert_eq!(m.requested, "vulkan");
+        assert_eq!(m.worker, "voxtype-gguf-worker-avx512");
+        assert_eq!(
+            m.summary(),
+            "cohere.gguf_backend is \"vulkan\", but the GGUF worker of voxtype-avx512 \
+             (voxtype-gguf-worker-avx512) runs on the CPU only, so the cohere model cannot load."
+        );
+        let fix = m.fix_with(&SWITCH);
+        assert!(
+            fix.contains("run `sudo voxtype setup gpu --enable`"),
+            "{fix}"
+        );
+        assert!(
+            fix.contains("`voxtype config set cohere.gguf_backend auto`"),
+            "{fix}"
+        );
+    }
+
+    #[test]
+    fn vulkan_backend_on_a_vulkan_worker_is_fine() {
+        let config = cohere_gguf("Vulkan");
+        for worker in [
+            "/usr/lib/voxtype/voxtype-gguf-worker-vulkan",
+            "/usr/lib/voxtype/voxtype-gguf-worker-onnx-avx512",
+            "/usr/lib/voxtype/migraphx/voxtype-gguf-worker-onnx-migraphx",
+        ] {
+            assert_eq!(
+                detect_gguf_backend_mismatch(&config, std::path::Path::new(worker)),
+                None,
+                "{worker}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_and_auto_backends_never_mismatch() {
+        let worker = std::path::Path::new("/usr/lib/voxtype/voxtype-gguf-worker-avx2");
+        for backend in ["auto", "cpu", "cpu_accel"] {
+            assert_eq!(
+                detect_gguf_backend_mismatch(&cohere_gguf(backend), worker),
+                None,
+                "{backend}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_workers_are_trusted() {
+        // Source builds, VOXTYPE_GGUF_WORKER overrides and a generic worker
+        // outside the package directory have whatever features they were
+        // built with.
+        let config = cohere_gguf("vulkan");
+        for worker in [
+            "/home/user/voxtype/target/release/voxtype-gguf-worker",
+            "/opt/my-worker",
+        ] {
+            assert_eq!(
+                detect_gguf_backend_mismatch(&config, std::path::Path::new(worker)),
+                None,
+                "{worker}"
+            );
+        }
+    }
+
+    /// Packages install the baseline build's worker under the generic name,
+    /// and it has no GPU backend, so baseline with `vulkan` must be caught.
+    #[test]
+    fn packaged_generic_worker_is_the_cpu_only_baseline_worker() {
+        let worker = std::path::Path::new("/usr/lib/voxtype/voxtype-gguf-worker");
+        let mismatch = detect_gguf_backend_mismatch(&cohere_gguf("vulkan"), worker)
+            .expect("baseline's worker has no Vulkan");
+        assert!(
+            mismatch.explanation().contains("voxtype-baseline"),
+            "{}",
+            mismatch.explanation()
+        );
+        assert_eq!(
+            detect_gguf_backend_mismatch(&cohere_gguf("auto"), worker),
+            None
+        );
+    }
+
+    #[test]
+    fn cuda_backend_points_at_vulkan() {
+        let config = cohere_gguf("cuda");
+        let worker =
+            std::path::Path::new("/usr/lib/voxtype/cuda-13/voxtype-gguf-worker-onnx-cuda-13");
+        let m = detect_gguf_backend_mismatch(&config, worker).expect("mismatch");
+        assert!(
+            m.summary().contains("was built without CUDA"),
+            "{}",
+            m.summary()
+        );
+        let fix = m.fix_with(&SWITCH);
+        assert!(
+            fix.contains("`voxtype config set cohere.gguf_backend vulkan`"),
+            "{fix}"
+        );
+        assert!(!fix.contains("setup gpu --enable"), "{fix}");
+    }
+
+    #[test]
+    fn a_non_gguf_model_is_not_checked() {
+        let mut config = cohere_gguf("vulkan");
+        config.cohere.as_mut().unwrap().model = "cohere-transcribe-q4f16".to_string();
+        let worker = std::path::Path::new("/usr/lib/voxtype/voxtype-gguf-worker-avx512");
+        assert_eq!(detect_gguf_backend_mismatch(&config, worker), None);
     }
 
     #[test]

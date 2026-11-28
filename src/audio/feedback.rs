@@ -4,9 +4,16 @@
 //! Supports multiple sound themes and custom sound files.
 
 use crate::config::AudioFeedbackConfig;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+type Cue = rodio::source::Amplify<Decoder<Cursor<Vec<u8>>>>;
+
+const DRAIN_GRACE: Duration = Duration::from_millis(150);
+const STALE_AFTER: Duration = Duration::from_secs(1);
 
 /// Sound event types
 #[derive(Debug, Clone, Copy)]
@@ -25,10 +32,9 @@ pub enum SoundEvent {
 
 /// Audio feedback player
 pub struct AudioFeedback {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
     config: AudioFeedbackConfig,
     theme: SoundTheme,
+    cues: mpsc::Sender<(Instant, Cue)>,
 }
 
 /// A sound theme containing audio data for different events
@@ -47,16 +53,18 @@ impl AudioFeedback {
             return Err("Audio feedback is disabled".to_string());
         }
 
-        let (stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| format!("Failed to open audio output: {}", e))?;
-
         let theme = load_theme(&config.theme)?;
 
+        let (cues, rx) = mpsc::channel::<(Instant, Cue)>();
+        std::thread::Builder::new()
+            .name("audio-feedback".into())
+            .spawn(move || run_player(rx, play_cue))
+            .map_err(|e| format!("Failed to start audio feedback thread: {}", e))?;
+
         Ok(Self {
-            _stream: stream,
-            stream_handle,
             config: config.clone(),
             theme,
+            cues,
         })
     }
 
@@ -86,14 +94,59 @@ impl AudioFeedback {
         // Apply volume control
         let source = source.amplify(self.config.volume);
 
-        let sink = Sink::try_new(&self.stream_handle)
-            .map_err(|e| format!("Failed to create audio sink: {}", e))?;
-
-        sink.append(source);
-        sink.detach(); // Let it play in the background
-
-        Ok(())
+        self.cues
+            .send((Instant::now(), source))
+            .map_err(|_| "Audio feedback thread has stopped".to_string())
     }
+}
+
+/// Play queued cues one at a time, in order. A cue that waited longer than
+/// [`STALE_AFTER`] behind a slow device is dropped rather than played late.
+fn run_player<T>(rx: mpsc::Receiver<(Instant, T)>, mut play: impl FnMut(T)) {
+    for (queued, cue) in rx {
+        if queued.elapsed() < STALE_AFTER {
+            play(cue);
+        } else {
+            tracing::warn!("Skipping stale feedback cue");
+        }
+    }
+}
+
+/// Poll `is_empty` until it reports true or `deadline` passes. Returns
+/// whether the sink drained, so a wedged device cannot hold the stream open.
+fn wait_until_drained(is_empty: impl Fn() -> bool, deadline: Instant, poll: Duration) -> bool {
+    while !is_empty() && Instant::now() < deadline {
+        std::thread::sleep(poll);
+    }
+    is_empty()
+}
+
+fn play_cue(source: Cue) {
+    let timeout = source.total_duration().unwrap_or_default() + Duration::from_secs(1);
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (_stream, stream_handle) = match OutputStream::try_default() {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!("Failed to open audio output: {}", e);
+                return;
+            }
+        };
+        match Sink::try_new(&stream_handle) {
+            Ok(sink) => {
+                let deadline = Instant::now() + timeout;
+                sink.append(source);
+                if wait_until_drained(|| sink.empty(), deadline, Duration::from_millis(10)) {
+                    std::thread::sleep(DRAIN_GRACE);
+                } else {
+                    tracing::warn!("Audio output stalled, feedback cue abandoned");
+                }
+            }
+            Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+        }
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(timeout + DRAIN_GRACE + Duration::from_secs(1));
 }
 
 /// Load a sound theme by name or path
@@ -283,6 +336,53 @@ fn generate_mechanical_theme() -> SoundTheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The tests below drive the player with fakes. Nothing here may call
+    // `AudioFeedback::play` or `play_cue`: those open a real output device.
+
+    #[test]
+    fn player_plays_cues_in_order_and_skips_stale_ones() {
+        let (tx, rx) = mpsc::channel();
+        let stale = Instant::now()
+            .checked_sub(STALE_AFTER + Duration::from_millis(500))
+            .expect("clock far enough past boot");
+        tx.send((stale, "stale")).unwrap();
+        tx.send((Instant::now(), "start")).unwrap();
+        tx.send((Instant::now(), "stop")).unwrap();
+        drop(tx);
+
+        let mut played = Vec::new();
+        run_player(rx, |cue| played.push(cue));
+        assert_eq!(played, ["start", "stop"]);
+    }
+
+    #[test]
+    fn drain_wait_returns_once_the_sink_empties() {
+        let polls = std::cell::Cell::new(0);
+        let drained = wait_until_drained(
+            || {
+                polls.set(polls.get() + 1);
+                polls.get() > 3
+            },
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+        assert!(drained);
+    }
+
+    /// #859: a device that stops consuming samples must not hold the stream
+    /// (and its POLLERR-spinning thread) open forever.
+    #[test]
+    fn drain_wait_gives_up_on_a_stalled_sink() {
+        let start = Instant::now();
+        let drained = wait_until_drained(
+            || false,
+            start + Duration::from_millis(30),
+            Duration::from_millis(5),
+        );
+        assert!(!drained);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn test_generate_tone_wav() {
