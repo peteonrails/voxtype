@@ -8343,8 +8343,23 @@ while True:
     /// restarted it into the same failure, so the tray, status, meetings and
     /// history went with it. It keeps running now, marked as failed so the
     /// tray does not claim to be ready.
+    ///
+    /// Runs in a process of its own with a scratch runtime directory: the
+    /// failed preload writes the `model_unavailable` marker there, and in
+    /// the session's real one it would outlive the test and make a running
+    /// daemon's status, and the status tests, report a broken model.
     #[tokio::test]
     async fn a_model_that_fails_to_preload_leaves_the_daemon_running() {
+        let scratch = tempfile::tempdir().unwrap();
+        if !crate::test_support::own_process(
+            "daemon::tests::a_model_that_fails_to_preload_leaves_the_daemon_running",
+            |child| {
+                child.env("XDG_RUNTIME_DIR", scratch.path());
+            },
+        ) {
+            return;
+        }
+        std::fs::create_dir_all(Config::runtime_dir()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::config::Config::default();
         config.whisper.model = dir.path().join("missing.bin").to_string_lossy().into();
@@ -8357,6 +8372,9 @@ while True:
         daemon.preload_at_startup(&mut manager, true).await;
         assert!(daemon.model_failed_at_startup);
         assert!(daemon.transcriber_preloaded.is_none());
+        assert!(Config::runtime_dir()
+            .join(crate::status_json::MODEL_UNAVAILABLE_FILE)
+            .is_file());
     }
 
     #[tokio::test]
