@@ -266,13 +266,28 @@ pub(crate) fn lines_from_tokens(tokens: &[TimedToken]) -> Vec<TimedSegment> {
 
 /// Build the ONNX Runtime session config: the execution provider the
 /// features select, with `threads` intra-op threads when it is set. Unset
-/// keeps parakeet-rs's default of 4.
+/// keeps parakeet-rs's default of 4. Worker threads block between runs
+/// rather than spin (see [`no_spin`]).
 pub(super) fn build_execution_config(threads: Option<usize>) -> Option<ExecutionConfig> {
-    let config = provider_execution_config();
-    match threads {
-        Some(n) => Some(config.unwrap_or_default().with_intra_threads(n)),
+    let config = provider_execution_config().unwrap_or_default();
+    let config = match threads {
+        Some(n) => config.with_intra_threads(n),
         None => config,
-    }
+    };
+    Some(no_spin(config))
+}
+
+/// ONNX Runtime's worker threads busy-wait for their next job by default.
+/// Streaming runs the model every chunk (a third of a second), so they never
+/// get to sleep: 200 s of CPU across 9 threads for 70 s of dictation on the
+/// GPU path. With spinning off they block between runs, and a run starts
+/// microseconds later instead.
+pub(super) fn no_spin(config: ExecutionConfig) -> ExecutionConfig {
+    config.with_custom_configure(|builder| {
+        Ok(builder
+            .with_intra_op_spinning(false)?
+            .with_inter_op_spinning(false)?)
+    })
 }
 
 /// Execution provider config based on compile-time feature flags
@@ -592,7 +607,17 @@ mod tests {
     )))]
     #[test]
     fn unset_threads_keep_the_parakeet_rs_default_on_the_cpu() {
-        assert!(build_execution_config(None).is_none());
+        let config = build_execution_config(None).expect("spinning is always switched off");
+        assert_eq!(
+            config.intra_threads,
+            ExecutionConfig::default().intra_threads
+        );
+    }
+
+    #[test]
+    fn onnx_worker_threads_block_between_runs() {
+        assert!(build_execution_config(None).unwrap().configure.is_some());
+        assert!(build_execution_config(Some(2)).unwrap().configure.is_some());
     }
     use tempfile::TempDir;
 
